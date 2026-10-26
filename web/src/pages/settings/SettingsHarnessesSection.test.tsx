@@ -542,6 +542,90 @@ describe("Harness details", () => {
     expect(screen.getByTestId("fix-dialog")).toHaveAttribute("data-mode", "reconfigure");
   });
 
+  it("shows account identity, provider labels, and switch actions from host metadata", () => {
+    hosts = [
+      {
+        ...ONLINE,
+        configured_harnesses: {
+          "claude-native": true,
+          "codex-native": true,
+          "pi-native": true,
+          "opencode-native": true,
+        },
+        harness_accounts: {
+          "claude-native": {
+            kind: "subscription",
+            email: "person@example.com",
+            plan: "Max",
+          },
+          "codex-native": { kind: "chatgpt", email: "codex@example.com", plan: "Plus" },
+          "pi-native": {
+            kind: "providers",
+            providers: [{ id: "anthropic", label: "Anthropic", auth_type: "oauth" }],
+          },
+          "opencode-native": {
+            kind: "providers",
+            providers: [
+              { id: "anthropic", label: "Anthropic", auth_type: "api_key" },
+              { id: "openrouter", label: "OpenRouter", auth_type: "api_key" },
+            ],
+          },
+        },
+      },
+    ];
+    renderHarnesses();
+
+    expect(within(card("claude-native")).getByText("· person@example.com · Max")).toBeTruthy();
+    expect(within(card("codex-native")).getByText("· codex@example.com · Plus")).toBeTruthy();
+    expect(within(card("pi-native")).getByText("· Anthropic")).toBeTruthy();
+    expect(within(card("opencode-native")).getByText("· Anthropic, OpenRouter")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("harness-settings-opencode-native"));
+    expect(screen.getByText("Providers")).toBeTruthy();
+    expect(screen.getByText("Anthropic (API key) · OpenRouter (API key)")).toBeTruthy();
+  });
+
+  it("shows an expired amber credential card without a duplicate banner", () => {
+    hosts = [
+      {
+        ...ONLINE,
+        harness_accounts: {
+          "codex-native": {
+            kind: "chatgpt",
+            email: "codex@example.com",
+            plan: "Plus",
+            expired: true,
+          },
+        },
+      },
+    ];
+    renderHarnesses("codex-native");
+
+    expect(screen.getByText("Sign-in expired")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Sign in again" })).toBeTruthy();
+    expect(screen.queryByText(/Codex can’t sign in/)).toBeNull();
+  });
+
+  it("opens switch-account confirmation for a ready subscription", () => {
+    hosts = [
+      {
+        ...ONLINE,
+        harness_accounts: {
+          "claude-native": {
+            kind: "subscription",
+            email: "person@example.com",
+            plan: "Pro",
+          },
+        },
+      },
+    ];
+    renderHarnesses("claude-native");
+    selectTab("Settings");
+
+    fireEvent.click(screen.getByRole("button", { name: "Switch account" }));
+    expect(screen.getByTestId("fix-dialog")).toHaveAttribute("data-mode", "switch");
+  });
+
   it("uses Update for an outdated harness", () => {
     hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": "version-too-low" } }];
     renderHarnesses("codex-native");

@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { CheckIcon, CircleIcon, CopyIcon, KeyRoundIcon, Loader2Icon } from "lucide-react";
+import {
+  CheckIcon,
+  CircleIcon,
+  CopyIcon,
+  ExternalLinkIcon,
+  KeyRoundIcon,
+  Loader2Icon,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -14,8 +21,14 @@ import {
 import { showToast } from "@/components/ui/toast";
 import {
   fetchHosts,
+  fetchHarnessLogin,
+  cancelHarnessLogin,
+  logoutHarnessOnHost,
   refreshHarnessesOnHost,
+  startHarnessLogin,
   useInstallHarness,
+  type HarnessAccount,
+  type HarnessLoginStart,
   type Host,
   type StoreCredentialResult,
 } from "@/hooks/useHosts";
@@ -35,13 +48,14 @@ import { ApiError } from "@/lib/sessionsApi";
 import { cn } from "@/lib/utils";
 import { HarnessCredentialForm } from "@/shell/HarnessCredentialForm";
 
-export type HarnessFixMode = "reconfigure" | "update" | "install";
+export type HarnessFixMode = "reconfigure" | "update" | "install" | "switch";
 
 export interface HarnessFixResult {
   configuredHarnesses: Record<string, boolean | string>;
   credentialKind?: HarnessCredentialKind;
   version?: string;
   gatewayInference?: Record<string, boolean> | null;
+  harnessAccounts?: Record<string, HarnessAccount> | null;
 }
 
 export interface HarnessFixDialogProps {
@@ -55,7 +69,17 @@ export interface HarnessFixDialogProps {
 }
 
 type Phase =
-  "install" | "choose" | "progress" | "isaac" | "personal" | "credentials" | "setup" | "error";
+  | "install"
+  | "choose"
+  | "confirm"
+  | "progress"
+  | "isaac"
+  | "personal"
+  | "device"
+  | "device-error"
+  | "credentials"
+  | "setup"
+  | "error";
 
 export function HarnessFixDialog(props: HarnessFixDialogProps) {
   const { open, onOpenChange, mode, host, harness, harnessLabel, onFixed } = props;
@@ -88,13 +112,16 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
       : "setup";
   const installable = harnessInstallableOnHost(info, harness, host);
   const requiresManualSetup = !installable && (mode === "install" || mode === "update");
-  const initialPhase: Phase = requiresManualSetup
-    ? "setup"
-    : mode === "update"
-      ? "progress"
-      : mode === "install" && !hasCredentialCards
-        ? "install"
-        : credentialChoicePhase;
+  const initialPhase: Phase =
+    mode === "switch"
+      ? "confirm"
+      : requiresManualSetup
+        ? "setup"
+        : mode === "update"
+          ? "progress"
+          : mode === "install" && !hasCredentialCards
+            ? "install"
+            : credentialChoicePhase;
 
   const [phase, setPhase] = useState<Phase>(initialPhase);
   const [choice, setChoice] = useState<HarnessCredentialKind>(
@@ -104,6 +131,10 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
   const [stillNotReady, setStillNotReady] = useState(false);
   const [updatedNeedsSetup, setUpdatedNeedsSetup] = useState(false);
   const [checking, setChecking] = useState(false);
+  const account = host.harness_accounts?.[harness];
+  const [emailHint, setEmailHint] = useState("");
+  const [deviceLogin, setDeviceLogin] = useState<HarnessLoginStart | null>(null);
+  const [secondsRemaining, setSecondsRemaining] = useState(0);
   const runId = useRef(0);
 
   const finish = useCallback(
@@ -113,15 +144,21 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
       version?: string | null,
       announce = true,
       gatewayInference?: Record<string, boolean> | null,
+      harnessAccounts?: Record<string, HarnessAccount> | null,
+      successMessage?: string,
     ) => {
       onFixed({
         configuredHarnesses,
         credentialKind,
         ...(version ? { version } : {}),
         ...(gatewayInference !== undefined ? { gatewayInference } : {}),
+        ...(harnessAccounts !== undefined ? { harnessAccounts } : {}),
       });
       if (announce) {
-        showToast(`${harnessLabel}${version ? ` ${version}` : ""} is ready on ${hostName}`);
+        showToast(
+          successMessage ??
+            `${harnessLabel}${version ? ` ${version}` : ""} is ready on ${hostName}`,
+        );
       }
       onOpenChange(false);
     },
@@ -134,10 +171,44 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     setPhase("error");
   }, []);
 
-  const authenticate = useCallback((selected: HarnessCredentialKind) => {
-    setStillNotReady(false);
-    setPhase(selected);
-  }, []);
+  const startDeviceLogin = useCallback(async () => {
+    const id = ++runId.current;
+    setError("");
+    setDeviceLogin(null);
+    try {
+      const login = await startHarnessLogin(hostId, harness);
+      if (runId.current !== id) return;
+      setDeviceLogin(login);
+      setSecondsRemaining(
+        Math.max(0, Math.ceil((Date.parse(login.expires_at) - Date.now()) / 1000)),
+      );
+      setPhase("device");
+    } catch (reason) {
+      if (runId.current !== id) return;
+      if (
+        reason instanceof ApiError &&
+        reason.status === 409 &&
+        reason.code === "login_unsupported"
+      ) {
+        setPhase("personal");
+        return;
+      }
+      setError(reason instanceof Error ? reason.message : "Couldn’t start sign-in.");
+      setPhase("device-error");
+    }
+  }, [harness, hostId]);
+
+  const authenticate = useCallback(
+    (selected: HarnessCredentialKind) => {
+      setStillNotReady(false);
+      if (selected === "personal" && isCodexHarness(harness)) {
+        void startDeviceLogin();
+      } else {
+        setPhase(selected);
+      }
+    },
+    [harness, startDeviceLogin],
+  );
 
   const needsSetup = useCallback(() => {
     setUpdatedNeedsSetup(mode === "update");
@@ -194,6 +265,8 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     setStillNotReady(false);
     setUpdatedNeedsSetup(false);
     setChecking(false);
+    setEmailHint("");
+    setDeviceLogin(null);
     setPhase(initialPhase);
     if (mode === "update" && installable) void startRef.current();
     return () => {
@@ -203,6 +276,9 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
 
   const setOpen = (nextOpen: boolean) => {
     if (!nextOpen) runId.current += 1;
+    if (!nextOpen && deviceLogin) {
+      void cancelHarnessLogin(hostId, harness, deviceLogin.login_id).catch(() => undefined);
+    }
     onOpenChange(nextOpen);
   };
 
@@ -227,6 +303,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     return {
       configured_harnesses: refreshed.configured_harnesses ?? {},
       gateway_inference: refreshed.gateway_inference ?? null,
+      harness_accounts: refreshed.harness_accounts,
     };
   }, [hostId, hostName, queryClient]);
 
@@ -264,6 +341,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
           undefined,
           true,
           result.gateway_inference,
+          result.harness_accounts,
         );
       } else {
         setStillNotReady(true);
@@ -276,12 +354,93 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
   };
 
   const onCredentialStored = (result: StoreCredentialResult) => {
-    finish(result.configured_harnesses, undefined, undefined, false);
+    finish(
+      result.configured_harnesses,
+      undefined,
+      undefined,
+      false,
+      undefined,
+      result.harness_accounts,
+    );
   };
+  const personalCommand =
+    mode === "switch" && canonicalHarness.includes("claude") && emailHint.trim()
+      ? `${loginCommand ?? "claude auth login --claudeai"} --email ${shellArgument(emailHint.trim())}`
+      : loginCommand;
+
+  const switchAccount = async () => {
+    const id = ++runId.current;
+    setError("");
+    setPhase("progress");
+    try {
+      await logoutHarnessOnHost(hostId, harness);
+      if (runId.current !== id) return;
+      if (isCodexHarness(harness)) await startDeviceLogin();
+      else setPhase("personal");
+    } catch (reason) {
+      fail(reason, id);
+    }
+  };
+
+  useEffect(() => {
+    if (phase !== "device" || !deviceLogin) return;
+    const tick = window.setInterval(() => {
+      setSecondsRemaining(
+        Math.max(0, Math.ceil((Date.parse(deviceLogin.expires_at) - Date.now()) / 1000)),
+      );
+    }, 1000);
+    return () => window.clearInterval(tick);
+  }, [deviceLogin, phase]);
+
+  useEffect(() => {
+    if (phase !== "device" || !deviceLogin) return;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const result = await fetchHarnessLogin(hostId, harness, deviceLogin.login_id);
+        if (stopped || result.status === "pending") return;
+        if (result.status === "succeeded") {
+          let configuredHarnesses = result.configured_harnesses;
+          let harnessAccounts = result.harness_accounts;
+          if (!configuredHarnesses) {
+            const refreshed = await refreshHarnessesOnHost(hostId);
+            configuredHarnesses = refreshed.configured_harnesses;
+            harnessAccounts = refreshed.harness_accounts;
+          }
+          const signedIn = harnessAccounts?.[harness];
+          const identity = [signedIn?.email, signedIn?.plan].filter(Boolean).join(" · ");
+          finish(
+            configuredHarnesses,
+            "personal",
+            undefined,
+            true,
+            undefined,
+            harnessAccounts,
+            identity
+              ? `${harnessLabel} is ready on ${hostName}. Signed in as ${identity}.`
+              : `${harnessLabel} is ready on ${hostName}`,
+          );
+          return;
+        }
+        setError(result.error || `Sign-in ${result.status}.`);
+        setPhase("device-error");
+      } catch (reason) {
+        if (!stopped) {
+          setError(reason instanceof Error ? reason.message : "Couldn’t check sign-in.");
+          setPhase("device-error");
+        }
+      }
+    };
+    const timer = window.setInterval(() => void poll(), 2000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [deviceLogin, finish, harness, harnessLabel, hostId, hostName, phase]);
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent className="gap-0 overflow-hidden rounded-[20px] p-0 sm:max-w-[440px]">
+      <DialogContent className="gap-0 overflow-hidden rounded-[20px] bg-background p-0 text-foreground sm:max-w-[440px]">
         <DialogHeader className="px-6 pt-6 pb-4">
           <DialogTitle>{dialogTitle(mode, phase, harnessLabel, hostName)}</DialogTitle>
         </DialogHeader>
@@ -292,7 +451,14 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
               {harnessLabel} was updated but still needs to be set up on {hostName}.
             </p>
           )}
-          {phase === "install" ? (
+          {phase === "confirm" ? (
+            <SwitchAccountConfirm
+              account={account}
+              hostName={hostName}
+              emailHint={emailHint}
+              onEmailHint={setEmailHint}
+            />
+          ) : phase === "install" ? (
             <DialogDescription>
               Install {harnessLabel} on {hostName}.
             </DialogDescription>
@@ -309,9 +475,17 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
             />
           ) : phase === "error" ? (
             <ErrorState error={error} hostName={hostName} />
-          ) : phase === "personal" && loginCommand ? (
+          ) : phase === "device" && deviceLogin ? (
+            <DeviceCodeState
+              login={deviceLogin}
+              secondsRemaining={secondsRemaining}
+              hostName={hostName}
+            />
+          ) : phase === "device-error" ? (
+            <DeviceCodeError error={error} hostName={hostName} />
+          ) : phase === "personal" && personalCommand ? (
             <PersonalCommand
-              command={loginCommand}
+              command={personalCommand}
               harness={harness}
               hostName={hostName}
               stillNotReady={stillNotReady}
@@ -342,7 +516,18 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
         </div>
 
         <DialogFooter className="mx-0 -mb-0 mt-4 rounded-none border-t border-border px-6 py-4">
-          {phase === "install" ? (
+          {phase === "confirm" ? (
+            <>
+              <Button
+                variant="outline"
+                className="bg-background text-foreground hover:bg-muted dark:bg-background dark:hover:bg-muted"
+                onClick={() => setOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button onClick={() => void switchAccount()}>Sign out and switch</Button>
+            </>
+          ) : phase === "install" ? (
             <>
               <Button variant="outline" onClick={() => setOpen(false)}>
                 Cancel
@@ -364,6 +549,26 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
                 Close
               </Button>
               <Button onClick={retry}>Try again</Button>
+            </>
+          ) : phase === "device" ? (
+            <>
+              <span className="mr-auto text-xs text-muted-foreground">
+                Signing in on {hostName}
+              </span>
+              <Button
+                variant="outline"
+                className="bg-background text-foreground hover:bg-muted dark:bg-background dark:hover:bg-muted"
+                onClick={() => setOpen(false)}
+              >
+                Cancel
+              </Button>
+            </>
+          ) : phase === "device-error" ? (
+            <>
+              <Button variant="outline" onClick={() => setOpen(false)}>
+                Close
+              </Button>
+              <Button onClick={() => void startDeviceLogin()}>Try again</Button>
             </>
           ) : phase === "personal" || phase === "isaac" || phase === "setup" ? (
             <>
@@ -394,6 +599,153 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
       </DialogContent>
     </Dialog>
   );
+}
+
+function SwitchAccountConfirm({
+  account,
+  hostName,
+  emailHint,
+  onEmailHint,
+}: {
+  account?: HarnessAccount;
+  hostName: string;
+  emailHint: string;
+  onEmailHint: (value: string) => void;
+}) {
+  const current =
+    [account?.email, account?.plan].filter(Boolean).join(" · ") || "the current account";
+  return (
+    <>
+      <DialogDescription>
+        {hostName} is signed in as <span className="font-medium text-foreground">{current}</span>.
+      </DialogDescription>
+      <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
+        Switching signs this machine out of that account. Every session on {hostName} that uses this
+        harness will use the new account. Running sessions keep working until their token expires.
+      </div>
+      <label className="flex flex-col gap-1.5 text-sm">
+        <span className="text-muted-foreground">Account to sign in with (optional)</span>
+        <input
+          value={emailHint}
+          onChange={(event) => onEmailHint(event.target.value)}
+          type="email"
+          className="h-9 rounded-lg border border-border bg-background px-3 outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+          placeholder="name@example.com"
+          aria-label="Account to sign in with"
+        />
+      </label>
+    </>
+  );
+}
+
+function DeviceCodeState({
+  login,
+  secondsRemaining,
+  hostName,
+}: {
+  login: HarnessLoginStart;
+  secondsRemaining: number;
+  hostName: string;
+}) {
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex gap-3">
+        <StepNumber>1</StepNumber>
+        <div className="flex min-w-0 flex-1 flex-col gap-2">
+          <p className="text-sm">Open the ChatGPT sign-in page and choose the account for Codex.</p>
+          <div className="flex flex-wrap gap-2">
+            <Button asChild size="sm">
+              <a href={login.verification_url} target="_blank" rel="noreferrer">
+                Open sign-in page <ExternalLinkIcon className="size-3.5" />
+              </a>
+            </Button>
+            <CopyButton text={login.verification_url} label="Copy sign-in link" />
+          </div>
+        </div>
+      </div>
+      <div className="flex gap-3">
+        <StepNumber>2</StepNumber>
+        <div className="flex min-w-0 flex-1 flex-col gap-2">
+          <p className="text-sm">Enter this one-time code when asked:</p>
+          <div className="flex items-center gap-2 rounded-xl border border-dashed border-border bg-muted/40 px-4 py-3">
+            <code className="min-w-0 flex-1 text-center font-mono text-xl font-semibold tracking-[0.16em]">
+              {login.user_code}
+            </code>
+            <CopyButton text={login.user_code} label="Copy one-time code" iconOnly />
+          </div>
+        </div>
+      </div>
+      <div className="flex gap-3">
+        <StepNumber>
+          <Loader2Icon aria-label="Waiting" className="size-3 animate-spin" />
+        </StepNumber>
+        <p className="text-sm">
+          Waiting for you to finish in the browser…{" "}
+          <span className="text-muted-foreground">
+            Code expires in {formatCountdown(secondsRemaining)}
+          </span>
+        </p>
+      </div>
+      <p className="sr-only">Signing in to Codex on {hostName}</p>
+    </div>
+  );
+}
+
+function DeviceCodeError({ error, hostName }: { error: string; hostName: string }) {
+  return (
+    <>
+      <DialogDescription>Codex is still signed out on {hostName}.</DialogDescription>
+      <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-3.5 py-2.5 text-sm text-destructive">
+        {error || "The sign-in did not complete."}
+      </div>
+    </>
+  );
+}
+
+function StepNumber({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="flex size-5 shrink-0 items-center justify-center rounded-full border border-border bg-muted text-xs">
+      {children}
+    </span>
+  );
+}
+
+function CopyButton({
+  text,
+  label,
+  iconOnly = false,
+}: {
+  text: string;
+  label: string;
+  iconOnly?: boolean;
+}) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      size={iconOnly ? "icon-sm" : "sm"}
+      aria-label={label}
+      onClick={() => {
+        void copyText(text)
+          .then(() => setCopied(true))
+          .catch(() => showToast("Couldn't copy — select and copy manually.", { duration: 0 }));
+      }}
+    >
+      {copied ? <CheckIcon className="size-3.5" /> : <CopyIcon className="size-3.5" />}
+      {!iconOnly && (copied ? "Copied" : "Copy link")}
+    </Button>
+  );
+}
+
+function formatCountdown(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function shellArgument(value: string): string {
+  if (/^[A-Za-z0-9@._+-]+$/.test(value)) return value;
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
 function ChooseCredential({
@@ -502,15 +854,19 @@ function ProgressState({
   harnessLabel: string;
 }) {
   const installing =
-    mode === "update"
-      ? `Installing the latest version on ${hostName}`
-      : `Installing ${harnessLabel} on ${hostName}`;
+    mode === "switch"
+      ? `Signing out on ${hostName}`
+      : mode === "update"
+        ? `Installing the latest version on ${hostName}`
+        : `Installing ${harnessLabel} on ${hostName}`;
   return (
     <>
       <DialogDescription>
-        {mode === "update"
-          ? `Updating ${harnessLabel} to the latest version on ${hostName}.`
-          : `Installing ${harnessLabel} on ${hostName}.`}{" "}
+        {mode === "switch"
+          ? `Signing out of ${harnessLabel} on ${hostName} before starting a new sign-in.`
+          : mode === "update"
+            ? `Updating ${harnessLabel} to the latest version on ${hostName}.`
+            : `Installing ${harnessLabel} on ${hostName}.`}{" "}
         This can take a few minutes.
       </DialogDescription>
       <Steps
@@ -699,6 +1055,10 @@ function dialogTitle(
   harnessLabel: string,
   hostName: string,
 ): string {
+  if (phase === "confirm") return `Switch ${harnessLabel} account?`;
+  if (phase === "device" || phase === "device-error") {
+    return `Sign in to ${harnessLabel} on ${hostName}`;
+  }
   if (phase === "personal") return `Sign in to ${harnessLabel} on ${hostName}`;
   if (phase === "isaac") return `Set up Isaac for ${harnessLabel} on ${hostName}`;
   if (phase === "setup") return `Set up ${harnessLabel} on ${hostName}`;
@@ -708,6 +1068,7 @@ function dialogTitle(
     return `Couldn’t reconfigure ${harnessLabel}`;
   }
   if (phase === "progress") {
+    if (mode === "switch") return `Switching ${harnessLabel} account…`;
     if (mode === "update") return `Updating ${harnessLabel}…`;
     if (mode === "install") return `Installing ${harnessLabel}…`;
     return `Reconfiguring ${harnessLabel}…`;

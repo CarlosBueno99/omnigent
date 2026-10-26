@@ -23,7 +23,7 @@ import { cn } from "@/lib/utils";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isFeatureEnabled } from "@/lib/capabilities";
 import { ComposerAgentIcon } from "@/shell/NewChatDialog";
-import { useHarnessStartup, useHosts, type Host } from "@/hooks/useHosts";
+import { useHarnessStartup, useHosts, type HarnessAccount, type Host } from "@/hooks/useHosts";
 import { ApiError } from "@/lib/sessionsApi";
 import { INVENTORY_HARNESS_IDS } from "@/hooks/useHarnessInventory";
 import { BRAND_HARNESSES } from "@/components/onboarding/harnessBrand";
@@ -116,6 +116,7 @@ export const SettingsHarnessesSection = () => {
     harness: string;
     hostId: string;
     version?: string;
+    account?: HarnessAccount;
   } | null>(null);
 
   // Gate the "Set up" affordance on the install feature, matching New Chat: with
@@ -256,7 +257,13 @@ export const SettingsHarnessesSection = () => {
           host={fixTarget.host}
           harness={fixTarget.entry.harness}
           harnessLabel={fixTarget.entry.name}
-          onFixed={({ configuredHarnesses, credentialKind, version, gatewayInference }) => {
+          onFixed={({
+            configuredHarnesses,
+            credentialKind,
+            version,
+            gatewayInference,
+            harnessAccounts,
+          }) => {
             const { host: fixedHost, entry } = fixTarget;
             queryClient.setQueriesData<Host[]>({ queryKey: ["hosts"] }, (cachedHosts) =>
               cachedHosts?.map((cachedHost) =>
@@ -264,6 +271,9 @@ export const SettingsHarnessesSection = () => {
                   ? {
                       ...cachedHost,
                       configured_harnesses: configuredHarnesses,
+                      ...(harnessAccounts !== undefined
+                        ? { harness_accounts: harnessAccounts }
+                        : {}),
                       ...(gatewayInference !== undefined
                         ? { gateway_inference: gatewayInference }
                         : {}),
@@ -277,7 +287,12 @@ export const SettingsHarnessesSection = () => {
                 [hostHarnessKey(fixedHost.host_id, entry.harness)]: credentialKind,
               }));
             }
-            setReadyNotice({ harness: entry.harness, hostId: fixedHost.host_id, version });
+            setReadyNotice({
+              harness: entry.harness,
+              hostId: fixedHost.host_id,
+              version,
+              account: harnessAccounts?.[entry.harness],
+            });
           }}
         />
       )}
@@ -388,9 +403,62 @@ function credentialPresentation(
     return HARNESS_CREDENTIAL_COPY.personal;
   }
   if (override === "isaac" || host?.gateway_inference?.[harness] === true) {
-    return databricksFeatures ? HARNESS_CREDENTIAL_COPY.isaac : GATEWAY_CREDENTIAL_COPY;
+    return gatewayPresentation(databricksFeatures);
+  }
+  const account = host?.harness_accounts?.[harness];
+  if (account) {
+    if (account.kind === "gateway") return gatewayPresentation(databricksFeatures);
+    if (account.kind === "providers") {
+      return {
+        label: "Providers",
+        description: providerDetails(account),
+      };
+    }
+    if (account.kind === "api_key") {
+      return { label: "API key", description: "Uses an API key configured on this host" };
+    }
+    if (account.kind === "chatgpt" || account.kind === "subscription") {
+      return {
+        label: "Personal subscription",
+        description: accountDetails(account),
+      };
+    }
   }
   return { label: "Signed in", description: "Uses the harness's own login on this host" };
+}
+
+function gatewayPresentation(databricksFeatures: boolean) {
+  return databricksFeatures ? HARNESS_CREDENTIAL_COPY.isaac : GATEWAY_CREDENTIAL_COPY;
+}
+
+function accountDetails(account: HarnessAccount): string {
+  return [account.email, account.org, account.plan].filter(Boolean).join(" · ") || "Signed in";
+}
+
+function providerDetails(account: HarnessAccount): string {
+  const providers = account.providers ?? [];
+  if (providers.length === 0) return "No providers configured";
+  return providers
+    .map((provider) => {
+      const authType = provider.auth_type.replaceAll("_", " ");
+      return `${provider.label} (${authType === "api key" ? "API key" : authType})`;
+    })
+    .join(" · ");
+}
+
+function configuredAccountLabel(
+  host: Host | null,
+  harness: string,
+  databricksFeatures = false,
+): string | undefined {
+  const account = host?.harness_accounts?.[harness];
+  if (!account) return undefined;
+  if (account.kind === "providers") {
+    const labels = (account.providers ?? []).map((provider) => provider.label);
+    return labels.length > 0 ? labels.join(", ") : undefined;
+  }
+  if (account.kind === "gateway") return gatewayPresentation(databricksFeatures).label;
+  return [account.email, account.plan].filter(Boolean).join(" · ") || undefined;
 }
 
 function reconfigurationReason(reason: string | null) {
@@ -522,8 +590,9 @@ function HarnessCard({
               enhanced={canSetup}
               configuredCredential={
                 status.ready && canSetup
-                  ? credentialPresentation(host, entry.harness, databricksFeatures, credentialKind)
-                      .label
+                  ? (configuredAccountLabel(host, entry.harness, databricksFeatures) ??
+                    credentialPresentation(host, entry.harness, databricksFeatures, credentialKind)
+                      .label)
                   : undefined
               }
             />
@@ -592,7 +661,12 @@ function HarnessDetail({
   databricksFeatures: boolean;
   installable: boolean;
   credentialKind?: HarnessCredentialKind;
-  readyNotice: { harness: string; hostId: string; version?: string } | null;
+  readyNotice: {
+    harness: string;
+    hostId: string;
+    version?: string;
+    account?: HarnessAccount;
+  } | null;
   onFix: (mode: HarnessFixMode) => void;
 }) {
   const status = harnessStatus(entry.harness, host);
@@ -600,7 +674,8 @@ function HarnessDetail({
   const mode = credentialProblem ? "reconfigure" : fixMode(status.reason);
   const canFix = canSetup && !!host && !host.sandbox_provider;
   const gateway = host?.gateway_inference?.[entry.harness] === true;
-  const credential = canSetup
+  const account = host?.harness_accounts?.[entry.harness];
+  const presentedCredential = canSetup
     ? credentialPresentation(host, entry.harness, databricksFeatures, credentialKind)
     : gateway
       ? {
@@ -608,6 +683,13 @@ function HarnessDetail({
           description: "Managed credential via the Databricks Unity Gateway",
         }
       : { label: "Signed in", description: "Uses the harness's own login on this host" };
+  const credential =
+    account?.expired && status.reason === "needs-auth"
+      ? {
+          label: "Sign-in expired",
+          description: `${accountDetails(account)} — new sessions on ${host?.name ?? "this host"} can’t use ${entry.name} until you sign in again.`,
+        }
+      : presentedCredential;
   const header = (
     <>
       <BackButton label="Harnesses" to="/settings/harnesses" />
@@ -619,7 +701,12 @@ function HarnessDetail({
             <HarnessStatusText
               status={status}
               enhanced={canSetup}
-              configuredCredential={status.ready && canSetup ? credential.label : undefined}
+              configuredCredential={
+                status.ready && canSetup
+                  ? (configuredAccountLabel(host, entry.harness, databricksFeatures) ??
+                    credential.label)
+                  : undefined
+              }
             />
           </div>
         </div>
@@ -629,12 +716,21 @@ function HarnessDetail({
   );
   const credentialCard = (
     <CredentialCard
-      label={credentialProblem ? "Not signed in" : credential.label}
+      label={
+        account?.expired && credentialProblem
+          ? "Sign-in expired"
+          : credentialProblem
+            ? "Not signed in"
+            : credential.label
+      }
       description={
-        credentialProblem && host ? missingCredentialCopy(entry, host) : credential.description
+        account?.expired && credentialProblem
+          ? credential.description
+          : credentialProblem && host
+            ? missingCredentialCopy(entry, host)
+            : credential.description
       }
       ready={status.ready}
-      warning={credentialProblem}
       actionable={credentialProblem && canFix}
       showStatus={canSetup}
       statusLabel={
@@ -642,12 +738,29 @@ function HarnessDetail({
           ? reconfigurationReason(status.reason)
           : "Needs reconfiguration"
       }
-      onClick={() => onFix(mode)}
+      warning={status.reason === "needs-auth"}
+      actionLabel={
+        status.ready && canFix && ["claude-native", "codex-native"].includes(entry.harness)
+          ? "Switch account"
+          : status.reason === "needs-auth" && account?.expired
+            ? "Sign in again"
+            : credentialProblem && canFix
+              ? "Reconfigure"
+              : undefined
+      }
+      onClick={() => onFix(status.ready ? "switch" : mode)}
     />
   );
   const settings = host ? (
     <div className="flex flex-col gap-6">
-      {readyNotice && <ReadyNotice entry={entry} host={host} version={readyNotice.version} />}
+      {readyNotice && (
+        <ReadyNotice
+          entry={entry}
+          host={host}
+          version={readyNotice.version}
+          account={readyNotice.account}
+        />
+      )}
       {status.needsSetup && !credentialProblem && (
         <HarnessWarning
           entry={entry}
@@ -686,7 +799,14 @@ function HarnessDetail({
             <p className="text-ui text-muted-foreground">
               MCP servers, skills, and plugins aren't listed for {entry.name} yet.
             </p>
-            {readyNotice && <ReadyNotice entry={entry} host={host} version={readyNotice.version} />}
+            {readyNotice && (
+              <ReadyNotice
+                entry={entry}
+                host={host}
+                version={readyNotice.version}
+                account={readyNotice.account}
+              />
+            )}
             {credentialCard}
           </>
         ) : canFix ? (
@@ -796,17 +916,20 @@ function ReadyNotice({
   entry,
   host,
   version,
+  account,
 }: {
   entry: HarnessEntry;
   host: Host;
   version?: string;
+  account?: HarnessAccount;
 }) {
   return (
     <div className="flex items-center gap-3 rounded-xl border border-green-500/30 bg-green-500/10 p-4 text-ui text-green-700 dark:text-green-300">
       <CheckCircle2Icon className="size-4 shrink-0" aria-hidden />
       <p>
         {entry.name}
-        {version ? ` ${version}` : ""} is ready on {host.name}. Checked just now.
+        {version ? ` ${version}` : ""} is ready on {host.name}.
+        {account ? ` Signed in as ${accountDetails(account)}.` : " Checked just now."}
       </p>
     </div>
   );
@@ -928,6 +1051,7 @@ function CredentialCard({
   showStatus,
   statusLabel,
   onClick,
+  actionLabel,
 }: {
   label: string;
   description: string;
@@ -937,6 +1061,7 @@ function CredentialCard({
   showStatus: boolean;
   statusLabel: string;
   onClick: () => void;
+  actionLabel?: string;
 }) {
   const body = (
     <>
@@ -954,12 +1079,17 @@ function CredentialCard({
         />
       </span>
       <span className="flex min-w-0 flex-1 flex-col text-left">
-        <span className="text-ui font-medium">{label}</span>
+        <span
+          className={cn("text-ui font-medium", warning && "text-amber-700 dark:text-amber-300")}
+        >
+          {warning && <TriangleAlertIcon className="mr-1 inline size-3.5" aria-hidden />}
+          {label}
+        </span>
         <span className="text-xs text-muted-foreground">{description}</span>
       </span>
-      {actionable ? (
+      {actionLabel ? (
         <Button size="sm" className="pointer-events-auto relative z-10" onClick={onClick}>
-          Reconfigure
+          {actionLabel}
         </Button>
       ) : showStatus ? (
         <span

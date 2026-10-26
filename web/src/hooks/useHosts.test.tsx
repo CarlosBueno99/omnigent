@@ -4,7 +4,11 @@ import { startTransition, Suspense, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  cancelHarnessLogin,
+  fetchHarnessLogin,
   installHarnessOnHost,
+  logoutHarnessOnHost,
+  startHarnessLogin,
   useDetectedCredentials,
   useHostModelOptions,
   useHosts,
@@ -43,6 +47,55 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+});
+
+describe("harness account routes", () => {
+  it("uses encoded login, poll, cancel, and logout routes", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        mockResponse({
+          login_id: "login/1",
+          verification_url: "https://auth.example.test/device",
+          user_code: "ABCD-EFGH",
+          expires_at: "2027-01-01T00:00:00Z",
+        }),
+      )
+      .mockResolvedValueOnce(mockResponse({ status: "pending", error: null }))
+      .mockResolvedValueOnce(mockResponse({}, 204))
+      .mockResolvedValueOnce(
+        mockResponse({ configured_harnesses: { "codex-native": false }, harness_accounts: {} }),
+      );
+
+    await startHarnessLogin("host/1", "codex-native");
+    await fetchHarnessLogin("host/1", "codex-native", "login/1");
+    await cancelHarnessLogin("host/1", "codex-native", "login/1");
+    await logoutHarnessOnHost("host/1", "codex-native");
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/v1/hosts/host%2F1/harnesses/codex-native/login",
+      "/v1/hosts/host%2F1/harnesses/codex-native/login/login%2F1",
+      "/v1/hosts/host%2F1/harnesses/codex-native/login/login%2F1",
+      "/v1/hosts/host%2F1/harnesses/codex-native/logout",
+    ]);
+    expect(fetchMock.mock.calls.map(([, init]) => init.method ?? "GET")).toEqual([
+      "POST",
+      "GET",
+      "DELETE",
+      "POST",
+    ]);
+  });
+
+  it("preserves login_unsupported as an ApiError", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({ error: { code: "login_unsupported", message: "Update the host." } }, 409),
+    );
+
+    await expect(startHarnessLogin("host_1", "codex-native")).rejects.toMatchObject({
+      status: 409,
+      code: "login_unsupported",
+      message: "Update the host.",
+    });
+  });
 });
 
 describe("useHosts", () => {
