@@ -422,7 +422,8 @@ async def test_wait_for_host_online_deadline_names_host_owned_by_another_account
     assert "The server says another account owns this host (HTTP 403)." in message
     assert (
         "Run `isaac omni login https://ws.cloud.databricks.com/omnigent` as the account"
-        " that registered it, or run `isaac omni host reset-id`"
+        " that registered it, or run `isaac omni host stop --all` and then"
+        " `isaac omni host reset-id` to register this machine as a new host, then retry."
     ) in message
     assert "rejected this machine's sign-in" not in message
     assert suppresses_recovery_hint(excinfo.value)

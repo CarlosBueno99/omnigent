@@ -174,6 +174,7 @@ async def wait_for_host_online(
             message += (
                 " The server says another account owns this host (HTTP 403)."
                 f" Run {login} as the account that registered it, or run"
+                f" `{cli_invocation()} host stop --all` and then"
                 f" `{cli_invocation()} host reset-id` to register this machine as a new host,"
                 " then retry."
             )
