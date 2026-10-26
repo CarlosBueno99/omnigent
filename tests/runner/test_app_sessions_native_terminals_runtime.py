@@ -48,6 +48,7 @@ from omnigent.runner.session_init_protocol import (
     RunnerSessionInitSnapshot,
 )
 from omnigent.spec.types import AgentSpec, ExecutorSpec
+from omnigent.stores.conversation_store import CODEX_NATIVE_COLLABORATION_MODE_LABEL_KEY
 from tests.budgets import budget
 from tests.runner.conftest import (
     _FakeProcessManager,
@@ -486,6 +487,7 @@ async def test_auto_create_codex_terminal_keeps_loop_responsive_during_credentia
         "cancel_launch",
         "use_envelope",
         "provider_profile",
+        "plan_mode",
     ),
     [
         pytest.param(
@@ -495,6 +497,7 @@ async def test_auto_create_codex_terminal_keeps_loop_responsive_during_credentia
             cancel_launch,
             use_envelope,
             None,
+            False,
             id=f"{version}-{'cancel' if cancel_launch else 'launch'}-"
             f"{'envelope' if use_envelope else 'legacy'}",
         )
@@ -508,8 +511,16 @@ async def test_auto_create_codex_terminal_keeps_loop_responsive_during_credentia
     ]
     + [
         pytest.param(
-            (0, 154, 0), [], True, False, True, "configured-workspace", id="configured-provider"
-        )
+            (0, 154, 0),
+            [],
+            True,
+            False,
+            True,
+            "configured-workspace",
+            False,
+            id="configured-provider",
+        ),
+        pytest.param((0, 154, 0), [], True, False, True, None, True, id="plan-mode"),
     ],
 )
 @pytest.mark.parametrize("rotated", [False, True], ids=["session-dir", "label-dir"])
@@ -523,6 +534,7 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     use_envelope: bool,
     rotated: bool,
     provider_profile: str | None,
+    plan_mode: bool,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """
@@ -569,6 +581,8 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     session_labels: dict[str, str] = (
         {codex_native_bridge.CODEX_NATIVE_BRIDGE_ID_LABEL_KEY: bridge_id} if rotated else {}
     )
+    if plan_mode:
+        session_labels[CODEX_NATIVE_COLLABORATION_MODE_LABEL_KEY] = "plan"
     launch_snapshot = RunnerSessionInitSnapshot(
         created_at=10,
         updated_at=11,
@@ -761,6 +775,9 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
             assert effort_calls == [(thread_id, "high", None)], (
                 "settings controls must not see the bridge until resume effort is applied"
             )
+            assert plan_calls == (
+                [(thread_id, "gpt-5.4-mini", "high", None)] if plan_mode else []
+            ), "a resumed Plan-mode thread must be back in Plan before the bridge is published"
             preloaded_state = codex_native_bridge.read_bridge_state(bridge_dir)
             assert preloaded_state is not None
             assert preloaded_state.thread_id == thread_id
@@ -778,12 +795,21 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     forward_calls: list[dict[str, Any]] = []
     preload_calls: list[tuple[str, str, list[str] | None, str | None]] = []
     effort_calls: list[tuple[str, str, object]] = []
+    plan_calls: list[tuple[str, str, str | None, object]] = []
 
     async def _fake_apply_effort(
         transport: str, loaded_thread_id: str, effort: str, **kwargs: Any
     ) -> None:
         effort_calls.append(
             (loaded_thread_id, effort, codex_native_bridge.read_bridge_state(bridge_dir))
+        )
+
+    async def _fake_apply_collaboration_mode(
+        transport: str, loaded_thread_id: str, mode: str, *, model: str, effort: str | None
+    ) -> None:
+        assert mode == "plan"
+        plan_calls.append(
+            (loaded_thread_id, model, effort, codex_native_bridge.read_bridge_state(bridge_dir))
         )
 
     async def _fake_preload_thread(
@@ -828,6 +854,9 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     monkeypatch.setattr(codex_app_mod, "CodexAppServerClient", _UnexpectedDiscoveryClient)
     monkeypatch.setattr(codex_app_mod, "preload_codex_thread_for_resume", _fake_preload_thread)
     monkeypatch.setattr(codex_app_mod, "apply_codex_thread_effort", _fake_apply_effort)
+    monkeypatch.setattr(
+        codex_app_mod, "apply_codex_thread_collaboration_mode", _fake_apply_collaboration_mode
+    )
     monkeypatch.setattr(runner_app_mod, "_codex_forward_known_thread", _fake_forward_known_thread)
     monkeypatch.setattr(
         startup_config_mod,
@@ -4646,6 +4675,7 @@ async def test_codex_discover_thread_and_forward_persists_workspace_as_bridge_cw
     state without it, the Codex executor falls back to the harness process's
     own working directory (the runner service's cwd), so web-driven shell
     commands run from the wrong directory instead of the selected workspace.
+    A Plan-armed launch must switch the thread before that state is published.
     """
     from omnigent.harnesses.codex_native import forwarder as codex_native_forwarder
     from omnigent.runner.app import (
@@ -4672,6 +4702,11 @@ async def test_codex_discover_thread_and_forward_persists_workspace_as_bridge_cw
 
     async def _fake_supervise(**_kwargs: object) -> None:
         return None
+
+    plan_calls: list[tuple[str, object]] = []
+
+    async def _apply_plan_mode(discovered_thread_id: str) -> None:
+        plan_calls.append((discovered_thread_id, codex_native_bridge.read_bridge_state(tmp_path)))
 
     class _Client:
         async def close(self) -> None:
@@ -4700,10 +4735,12 @@ async def test_codex_discover_thread_and_forward_persists_workspace_as_bridge_cw
             event_client=_Client(),  # type: ignore[arg-type]
             routing_summary="provider 'test' (model=gpt-test)",
             thread_start_timeout_seconds=120.0,
+            apply_plan_mode=_apply_plan_mode,
         )
     finally:
         _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
 
+    assert plan_calls == [(thread_id, None)]
     assert len(patch_requests) == 1
     patch_request = patch_requests[0]
     assert patch_request.method == "PATCH"
@@ -4720,6 +4757,83 @@ async def test_codex_discover_thread_and_forward_persists_workspace_as_bridge_cw
     assert state.cwd == str(workspace)
     assert wait_calls == [{"timeout": 120.0}]
     assert codex_native_bridge.read_bridge_startup_timeout(tmp_path) == 120.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "config_model", "apply_fails", "expected_model"),
+    [
+        pytest.param("gpt-5.4-mini", "gpt-5.5", False, "gpt-5.4-mini", id="launch-model"),
+        pytest.param(None, "gpt-5.5", False, "gpt-5.5", id="config-model"),
+        pytest.param("gpt-5.4-mini", None, True, "gpt-5.4-mini", id="apply-fails"),
+        pytest.param(None, None, False, None, id="no-model"),
+    ],
+)
+async def test_apply_codex_launch_plan_mode_reports_default_when_switch_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    model: str | None,
+    config_model: str | None,
+    apply_fails: bool,
+    expected_model: str | None,
+) -> None:
+    """
+    A launch whose Plan switch fails reports Default mode for the session.
+
+    The Plan label is already persisted, so leaving it would show Plan mode in
+    the composer while Codex runs Default.
+    """
+    import omnigent.harnesses.codex_native.app_server as codex_app_mod
+    from omnigent.runner.native import orchestration
+
+    session_id = "9f1f7f7bd7f24f80a621d9a3ba3fbc10"
+    thread_id = "019e96aa-abcd-7343-8d3b-6f914d60936b"
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    if config_model is not None:
+        (codex_home / "config.toml").write_text(f'model = "{config_model}"\n')
+    apply_calls: list[tuple[str, str, str, str, str | None]] = []
+    posted: list[tuple[str, object]] = []
+
+    async def _fake_apply(
+        transport: str, loaded_thread_id: str, mode: str, *, model: str, effort: str | None
+    ) -> None:
+        apply_calls.append((transport, loaded_thread_id, mode, model, effort))
+        if apply_fails:
+            raise RuntimeError("thread/settings/update rejected")
+
+    def _handle(request: httpx.Request) -> httpx.Response:
+        posted.append((request.url.path, json.loads(request.content)))
+        return httpx.Response(202, json={})
+
+    monkeypatch.setattr(codex_app_mod, "apply_codex_thread_collaboration_mode", _fake_apply)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_handle), base_url="http://ap.example"
+    ) as server_client:
+        await orchestration._apply_codex_launch_plan_mode(
+            thread_id,
+            session_id=session_id,
+            server_client=server_client,
+            codex_ws_url="ws://127.0.0.1:1",
+            codex_home=codex_home,
+            model=model,
+            effort="high",
+        )
+
+    assert apply_calls == (
+        [("ws://127.0.0.1:1", thread_id, "plan", expected_model, "high")] if expected_model else []
+    )
+    switched = expected_model is not None and not apply_fails
+    assert posted == (
+        []
+        if switched
+        else [
+            (
+                f"/v1/sessions/{session_id}/events",
+                {"type": "external_codex_collaboration_mode_change", "data": {"mode": "default"}},
+            )
+        ]
+    )
 
 
 @pytest.mark.asyncio

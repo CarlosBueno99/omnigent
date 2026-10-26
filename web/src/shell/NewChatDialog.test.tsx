@@ -6728,6 +6728,19 @@ describe("NewChatLandingScreen", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("arms Codex plan mode from the add menu before the first prompt", () => {
+    renderLanding();
+    selectAgent("a2");
+    const openAddMenu = () => {
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Add" }), { button: 0 });
+      return within(screen.getByRole("menu", { name: "Add" })).getByTestId("composer-plan-action");
+    };
+    const plan = openAddMenu();
+    expect(plan).not.toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(plan);
+    expect(openAddMenu()).toHaveTextContent("Plan mode is on");
+  });
+
   it.each([
     ["default", "Default"],
     ["full-access", "Full access"],
@@ -6781,6 +6794,36 @@ describe("NewChatLandingScreen", () => {
     // The label is what the runner reads to launch with the bypass flag.
     expect(labels["omnigent.codex_native.bypass_sandbox"]).toBe("1");
     // The native wrapper labels still ride alongside it.
+    expect(labels["omnigent.wrapper"]).toBe("codex-native-ui");
+  });
+
+  it("seeds armed Codex plan mode in the create body and drops it on an agent switch", async () => {
+    authenticatedFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "conv_new" }),
+    } as unknown as Response);
+    renderLanding();
+    selectAgent("a2");
+    const togglePlan = () => {
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Add" }), { button: 0 });
+      fireEvent.click(
+        within(screen.getByRole("menu", { name: "Add" })).getByTestId("composer-plan-action"),
+      );
+    };
+    togglePlan();
+    expect(screen.getByTestId("new-chat-landing-plan-mode")).toHaveTextContent("Plan mode");
+    togglePlan();
+    expect(screen.queryByTestId("new-chat-landing-plan-mode")).toBeNull();
+
+    togglePlan();
+    selectAgent("a1");
+    selectAgent("a2");
+    expect(screen.queryByTestId("new-chat-landing-plan-mode")).toBeNull();
+
+    togglePlan();
+    const { body } = await submitAndReadBody();
+    const labels = body.labels as Record<string, string>;
+    expect(labels["omnigent.codex_native.collaboration_mode"]).toBe("plan");
     expect(labels["omnigent.wrapper"]).toBe("codex-native-ui");
   });
 
