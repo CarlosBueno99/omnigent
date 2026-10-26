@@ -2821,12 +2821,8 @@ async def test_create_session_rejects_other_users_host(
     alice_conn = host_perm_app.state.host_registry.get("f54bb9272002938a3a934bfcb6bb228a")
     assert alice_conn is not None
 
-    # A bindable BUILT-IN (template) agent: session_id IS NULL, so any
-    # user can bind it. Session-scoped agents are owned by one session
-    # and would block Bob at the agent-access check before the host
-    # check (see designs/BUILTIN_AGENTS.md); creating a template here
-    # isolates the host-owner check. It and the bundle run Codex, so a
-    # Plan-mode check placed before the owner check would answer 409.
+    # A bindable template agent (session_id NULL) running Codex: isolates the
+    # host-owner check from agent access and the Plan-mode 409.
     SqlAlchemyAgentStore(db_uri).create(
         "f2b40a7cc3eaec4ee8cbb151e1021c75",
         "codex-native-ui",

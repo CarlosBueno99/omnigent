@@ -1616,9 +1616,11 @@ async def test_auto_create_codex_terminal_fork_builds_rollout_from_items_and_res
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("plan_mode", [False, True], ids=["default", "plan-mode"])
 async def test_auto_create_codex_terminal_uses_worktree_workspace_not_bundle_dir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    plan_mode: bool,
 ) -> None:
     """
     Codex-native launches in the session worktree, not the bundle dir.
@@ -1634,10 +1636,12 @@ async def test_auto_create_codex_terminal_uses_worktree_workspace_not_bundle_dir
     reports a worktree workspace that differs from BOTH the runner env var
     and the ResolvedSpec bundle dir. The launched Codex app-server's
     ``cwd`` must be the worktree. If reverted, ``cwd`` would be the bundle
-    dir and the ``cwd == worktree`` assertion fails.
+    dir and the ``cwd == worktree`` assertion fails. A Plan-labelled launch
+    must hand the discovery forwarder the switch to Plan mode.
 
     :param tmp_path: Temporary directory for isolated bridge/workspace state.
     :param monkeypatch: Pytest monkeypatch fixture.
+    :param plan_mode: Whether the session carries the Codex Plan-mode label.
     :returns: None.
     """
     import omnigent.harness_startup_config as startup_config_mod
@@ -1702,6 +1706,9 @@ async def test_auto_create_codex_terminal_uses_worktree_workspace_not_bundle_dir
                     "terminal_launch_args": None,
                     "model_override": None,
                     "external_session_id": None,
+                    "labels": {CODEX_NATIVE_COLLABORATION_MODE_LABEL_KEY: "plan"}
+                    if plan_mode
+                    else {},
                 },
                 request=httpx.Request("GET", url),
             )
@@ -1910,6 +1917,36 @@ async def test_auto_create_codex_terminal_uses_worktree_workspace_not_bundle_dir
         "check_for_update_on_startup=false",
         "--dangerously-bypass-hook-trust",
     ]
+
+    plan_calls: list[tuple[str, str, str, str | None, str | None]] = []
+
+    async def _fake_apply_collaboration_mode(
+        transport: str, loaded_thread_id: str, mode: str, *, model: str, effort: str | None
+    ) -> None:
+        plan_calls.append((transport, loaded_thread_id, mode, model, effort))
+
+    monkeypatch.setattr(
+        codex_app_mod, "apply_codex_thread_collaboration_mode", _fake_apply_collaboration_mode
+    )
+    apply_plan_mode = discover_kwargs["apply_plan_mode"]
+    if plan_mode:
+        assert apply_plan_mode is not None, "a Plan-labelled launch never switched Codex to Plan"
+        await apply_plan_mode("019e96aa-2222-7333-8444-555566667777")
+    else:
+        assert apply_plan_mode is None
+    assert plan_calls == (
+        [
+            (
+                discover_kwargs["codex_ws_url"],
+                "019e96aa-2222-7333-8444-555566667777",
+                "plan",
+                "gpt-5-default",
+                None,
+            )
+        ]
+        if plan_mode
+        else []
+    )
 
 
 @pytest.mark.asyncio
