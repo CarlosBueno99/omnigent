@@ -1107,6 +1107,16 @@ export function parseEvent(rawType: string, data: Record<string, unknown>): Stre
       ...(p.native_delivery
         ? { nativeDelivery: parseNativePermissionDelivery(p.native_delivery) }
         : {}),
+      ...(p.terminal_fallback &&
+      typeof p.terminal_fallback === "object" &&
+      !Array.isArray(p.terminal_fallback)
+        ? {
+            terminalFallback: {
+              answerUndelivered:
+                (p.terminal_fallback as Record<string, unknown>).answer_undelivered === true,
+            },
+          }
+        : {}),
       elicitationId,
       targetSessionId:
         typeof targetSessionId === "string" && targetSessionId ? targetSessionId : null,

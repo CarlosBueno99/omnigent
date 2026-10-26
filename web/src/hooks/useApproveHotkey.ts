@@ -74,6 +74,7 @@ export function useApproveHotkey(isMac = isMacPlatform()): void {
         .find((b): b is ElicitationBlock => b.type === "elicitation" && b.status === "pending");
       if (!newest) return;
       if (newest.nativeDelivery && newest.nativeDelivery.state !== "ready") return;
+      if (newest.terminalFallback) return;
       const takesAPlainVerdict =
         !newest.askUserQuestion && schemaFields(newest.requestedSchema).length === 0;
       if (!takesAPlainVerdict) return;

@@ -2467,6 +2467,201 @@ async def test_permission_hook_verdict_during_gap_honored_on_repark(
     pending_elicitations.reset_for_tests()
 
 
+async def _next_elicitation_event(collector: Any) -> dict[str, Any]:
+    """
+    Return the collector's next elicitation request or resolved event.
+
+    :param collector: A running session stream collector.
+    :returns: The next ``response.elicitation_*`` event dict.
+    """
+    while True:
+        event = await collector.next_event(timeout=5.0)
+        if str(event.get("type", "")).startswith("response.elicitation_"):
+            return event
+
+
+async def _sever_claude_hook_mid_turn(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    agent_name: str,
+    *,
+    sever_every_poll: bool = True,
+) -> tuple[str, dict[str, Any], Any]:
+    """
+    Park a Claude prompt in a running session, then sever its hook.
+
+    :param client: Test HTTP client.
+    :param monkeypatch: Pytest monkeypatch fixture.
+    :param agent_name: Unique test agent name.
+    :param sever_every_poll: ``False`` keeps re-parked polls connected.
+    :returns: The session id, the hook payload, and a collector that has
+        already consumed the original elicitation request.
+    """
+    from omnigent.runtime import pending_elicitations
+
+    polls = 0
+
+    async def _sever(_request: Any) -> None:
+        nonlocal polls
+        polls += 1
+        if sever_every_poll or polls == 1:
+            await asyncio.sleep(0.01)
+            return
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(sessions_route, "_poll_request_disconnect", _sever)
+    monkeypatch.setattr(sessions_route, "_HARNESS_ELICITATION_REPARK_GRACE_S", 0.2)
+    monkeypatch.setattr(sessions_route, "_HARNESS_TERMINAL_FALLBACK_POLL_S", 0.02)
+    pending_elicitations.reset_for_tests()
+    agent = await create_test_agent(client, agent_name)
+    session_id = await _create_session(client, agent["id"])
+    monkeypatch.setitem(sessions_route._session_status_cache, session_id, "running")
+    payload = {
+        **(await _claude_permission_payload()),
+        "_omnigent_elicitation_id": _REATTACH_ELICITATION_ID,
+    }
+    collector = await start_session_stream_collector(session_id)
+    first = await client.post(f"/v1/sessions/{session_id}/hooks/permission-request", json=payload)
+    assert first.status_code == 200, first.text
+    assert first.content == b""
+    request_event = await _next_elicitation_event(collector)
+    assert request_event["type"] == "response.elicitation_request"
+    assert "terminal_fallback" not in request_event["params"]
+    return session_id, payload, collector
+
+
+async def _finish_deferred_clears() -> None:
+    """Wait for every deferred elicitation clear to finish."""
+    for task in set(sessions_route._deferred_elicitation_clear_tasks):
+        await asyncio.wait_for(task, timeout=5.0)
+
+
+async def test_unanswered_claude_prompt_waits_in_terminal_until_turn_ends(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A Claude prompt whose hook exited mid-turn points the user to the terminal.
+
+    Claude keeps its own picker open and the runner holds chat messages
+    behind it, so an expired card left the user no visible way forward.
+    """
+    from omnigent.runtime import pending_elicitations
+
+    session_id, _payload, collector = await _sever_claude_hook_mid_turn(
+        client, monkeypatch, "test-terminal-fallback-unanswered"
+    )
+    try:
+        waiting = await _next_elicitation_event(collector)
+        assert waiting["type"] == "response.elicitation_request"
+        assert waiting["elicitation_id"] == _REATTACH_ELICITATION_ID
+        assert waiting["params"]["terminal_fallback"] == {"answer_undelivered": False}
+        snapshot = pending_elicitations.snapshot_for(session_id)
+        assert [event["params"].get("terminal_fallback") for event in snapshot] == [
+            {"answer_undelivered": False}
+        ]
+
+        # No live hook can carry a chat answer to Claude now.
+        refused = await _post_approval(client, session_id, _REATTACH_ELICITATION_ID, "accept")
+        assert refused.status_code == 409, refused.text
+        assert pending_elicitations.count_for(session_id) == 1
+        assert _REATTACH_ELICITATION_ID not in _harness_pre_resolved_elicitations
+
+        sessions_route._session_status_cache[session_id] = "idle"
+        expired = await _next_elicitation_event(collector)
+        assert expired == {
+            "type": "response.elicitation_resolved",
+            "elicitation_id": _REATTACH_ELICITATION_ID,
+            "reason": "unanswered",
+        }
+        assert pending_elicitations.count_for(session_id) == 0
+        await _finish_deferred_clears()
+    finally:
+        await collector.stop()
+        pending_elicitations.reset_for_tests()
+
+
+async def test_chat_answer_stranded_by_hook_exit_is_reported_undelivered(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    An answer accepted after the hook exited is not left looking delivered.
+
+    A later re-park restores the normal card, and its own answer reaches
+    the hook.
+    """
+    from omnigent.runtime import pending_elicitations
+
+    session_id, payload, collector = await _sever_claude_hook_mid_turn(
+        client,
+        monkeypatch,
+        "test-terminal-fallback-undelivered",
+        sever_every_poll=False,
+    )
+    hook_task: asyncio.Task[httpx.Response] | None = None
+    try:
+        gap_answer = await _post_approval(client, session_id, _REATTACH_ELICITATION_ID, "accept")
+        assert gap_answer.status_code == 202, gap_answer.text
+        accepted = await _next_elicitation_event(collector)
+        assert accepted["type"] == "response.elicitation_resolved"
+        assert accepted["action"] == "accept"
+
+        waiting = await _next_elicitation_event(collector)
+        assert waiting["type"] == "response.elicitation_request"
+        assert waiting["params"]["terminal_fallback"] == {"answer_undelivered": True}
+        assert pending_elicitations.count_for(session_id) == 1
+        assert _REATTACH_ELICITATION_ID not in _harness_pre_resolved_elicitations
+
+        hook_task = asyncio.create_task(
+            client.post(f"/v1/sessions/{session_id}/hooks/permission-request", json=payload)
+        )
+        reparked = await _next_elicitation_event(collector)
+        assert reparked["type"] == "response.elicitation_request"
+        assert "terminal_fallback" not in reparked["params"]
+        await _finish_deferred_clears()
+        assert pending_elicitations.count_for(session_id) == 1
+
+        verdict = await _post_approval(client, session_id, _REATTACH_ELICITATION_ID, "accept")
+        assert verdict.status_code == 202, verdict.text
+        response = await hook_task
+        assert response.json()["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+    finally:
+        if hook_task is not None and not hook_task.done():
+            hook_task.cancel()
+        await collector.stop()
+        pending_elicitations.reset_for_tests()
+
+
+async def test_terminal_answer_clears_card_waiting_in_terminal(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gated tool's mirrored result clears a card waiting in the terminal."""
+    from omnigent.runtime import pending_elicitations
+
+    session_id, payload, collector = await _sever_claude_hook_mid_turn(
+        client, monkeypatch, "test-terminal-fallback-answered"
+    )
+    try:
+        waiting = await _next_elicitation_event(collector)
+        assert waiting["params"]["terminal_fallback"] == {"answer_undelivered": False}
+
+        sessions_route._signal_terminal_resolved_harness_elicitation(
+            session_id, payload["tool_name"], {"command": "ls -la"}
+        )
+        resolved = await _next_elicitation_event(collector)
+        assert resolved == {
+            "type": "response.elicitation_resolved",
+            "elicitation_id": _REATTACH_ELICITATION_ID,
+        }
+        assert pending_elicitations.count_for(session_id) == 0
+        await _finish_deferred_clears()
+    finally:
+        await collector.stop()
+        pending_elicitations.reset_for_tests()
+
+
 async def test_permission_hook_rejects_malformed_reattach_id(
     client: httpx.AsyncClient,
 ) -> None:

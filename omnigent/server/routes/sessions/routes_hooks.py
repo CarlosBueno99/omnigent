@@ -406,6 +406,8 @@ def register_hooks_routes(
             # (or None when absent).
             tool_name=tool_name,
             tool_input=tool_input if isinstance(tool_input, dict) else None,
+            # Claude shows its own picker once the hook exits unanswered.
+            terminal_fallback=is_claude,
         )
         if result is None:
             # Disconnect or timeout. Either way Claude is no

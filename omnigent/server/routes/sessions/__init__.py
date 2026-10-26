@@ -110,8 +110,10 @@ from omnigent.server._elicitation_registry import (
     _harness_elicitation_registry,
     _harness_parked_elicitations,
     _harness_pre_resolved_elicitations,
+    _harness_unparked_elicitations,
     _ParkedHarnessElicitation,
     _PreResolvedHarnessElicitation,
+    _UnparkedHarnessElicitation,
 )
 from omnigent.server.auth import (
     LEVEL_EDIT,
@@ -254,6 +256,7 @@ from omnigent.server.routes._sessions.common import (
     _HARNESS_ELICITATION_REPARK_GRACE_S as _HARNESS_ELICITATION_REPARK_GRACE_S,
     _HARNESS_PRE_RESOLVED_ELICITATION_MAX_ENTRIES as _HARNESS_PRE_RESOLVED_ELICITATION_MAX_ENTRIES,
     _HARNESS_PRE_RESOLVED_ELICITATION_TTL_S as _HARNESS_PRE_RESOLVED_ELICITATION_TTL_S,
+    _HARNESS_TERMINAL_FALLBACK_POLL_S as _HARNESS_TERMINAL_FALLBACK_POLL_S,
     _HOOK_ELICITATION_ID_RE as _HOOK_ELICITATION_ID_RE,
     _HOST_BOUND_RUNNER_CONNECT_GRACE_S as _HOST_BOUND_RUNNER_CONNECT_GRACE_S,
     _HOST_LAUNCH_RESULT_TIMEOUT_S as _HOST_LAUNCH_RESULT_TIMEOUT_S,

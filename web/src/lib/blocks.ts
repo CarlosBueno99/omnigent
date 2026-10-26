@@ -1,4 +1,5 @@
 import type { NativePermissionDelivery } from "./nativePermissionDelivery";
+import type { ElicitationTerminalFallback } from "./events";
 // Mirrors sdks/python-client/omnigent_client/_blocks.py.
 //
 // Hand-ported. When _blocks.py changes, update this file and the
@@ -613,6 +614,7 @@ export interface ElicitationBlock {
   nativeDelivery?: NativePermissionDelivery;
   /** Positive native resolution evidence; snapshot absence alone is insufficient. */
   nativeDeliveryResolved?: boolean;
+  terminalFallback?: ElicitationTerminalFallback;
   type: "elicitation";
   ctx: BlockContext;
   elicitationId: string;

@@ -130,8 +130,10 @@ from omnigent.server._elicitation_registry import (
     _harness_elicitation_registry,
     _harness_parked_elicitations,
     _harness_pre_resolved_elicitations,
+    _harness_unparked_elicitations,
     _ParkedHarnessElicitation,
     _PreResolvedHarnessElicitation,
+    _UnparkedHarnessElicitation,
 )
 from omnigent.server.auth import (
     LEVEL_EDIT,
@@ -463,6 +465,7 @@ async def _publish_and_wait_for_harness_elicitation(
     elicitation_id: str | None = None,
     tool_name: str | None = None,
     tool_input: dict[str, Any] | None = None,
+    terminal_fallback: bool = False,
 ) -> ElicitationResult | None:
     """
     Publish one harness-originated elicitation and wait for web verdict.
@@ -506,6 +509,10 @@ async def _publish_and_wait_for_harness_elicitation(
     :param tool_input: Gated tool input, e.g. ``{"command": "ls"}``,
         used with ``tool_name`` to disambiguate the result when several
         same-named prompts are parked at once.
+    :param terminal_fallback: ``True`` when the harness keeps showing the
+        prompt in its terminal after the hook exits, so a severed wait
+        that is never re-parked keeps its card as waiting in the terminal
+        for the rest of the turn instead of expiring it.
     :returns: Web verdict, or ``None`` on terminal-side resolution,
         timeout, or disconnect.
     """
@@ -529,6 +536,10 @@ async def _publish_and_wait_for_harness_elicitation(
     _harness_elicitation_registry[elicitation_id] = future
     _harness_elicitation_owners[elicitation_id] = session_id
     _harness_parked_elicitations[elicitation_id] = parked
+    unparked = _harness_unparked_elicitations.get(elicitation_id)
+    if unparked is not None and unparked.session_id == session_id:
+        _harness_unparked_elicitations.pop(elicitation_id, None)
+    event_payload: dict[str, Any] | None = None
     # settled = verdict / terminal-resolved (clear the card now); a
     # severed wait instead defers the clear so a hook retry can re-park.
     published_request = False
@@ -619,6 +630,22 @@ async def _publish_and_wait_for_harness_elicitation(
         if published_request and (
             not settled or (delivery is not None and settled_action is not None)
         ):
+            unparked = None
+            if (
+                terminal_fallback
+                and not settled
+                and event_payload is not None
+                and elicitation_id not in _harness_elicitation_registry
+            ):
+                unparked = _UnparkedHarnessElicitation(
+                    session_id=session_id,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    event_payload=event_payload,
+                    request_fingerprint=request_fingerprint,
+                    resolved_elsewhere=asyncio.Event(),
+                )
+                _harness_unparked_elicitations[elicitation_id] = unparked
             # Retain the card during reconnect or native delivery. Abandoned
             # waits expire if no new hook arrives within the grace period.
             _schedule_deferred_elicitation_clear(
@@ -626,6 +653,7 @@ async def _publish_and_wait_for_harness_elicitation(
                 elicitation_id,
                 conversation_store,
                 native_delivery_attempt=delivery["attempt"] if delivery is not None else None,
+                unparked=unparked,
             )
         elif published_request:
             _publish_elicitation_resolved(session_id, elicitation_id, action=settled_action)
@@ -645,6 +673,7 @@ def _schedule_deferred_elicitation_clear(
     conversation_store: ConversationStore | None,
     *,
     native_delivery_attempt: str | None = None,
+    unparked: _UnparkedHarnessElicitation | None = None,
 ) -> None:
     """
     Clear one elicitation's approval card after the re-park grace, unless
@@ -666,6 +695,9 @@ def _schedule_deferred_elicitation_clear(
         ancestor streams, or ``None`` to keep it session-local.
     :param native_delivery_attempt: Only expire this delivery attempt, never
         a newer attempt or a card already confirmed by the recorder.
+    :param unparked: State of a prompt the harness may still show in its
+        terminal. Mid-turn, the card is then held as waiting in the
+        terminal (see :func:`_hold_elicitation_for_terminal_answer`).
     """
 
     async def _clear_after_grace() -> None:
@@ -690,6 +722,13 @@ def _schedule_deferred_elicitation_clear(
                 != native_delivery_attempt
             ):
                 return  # A receipt or a newer delivery attempt superseded this wait.
+        if unparked is not None:
+            if _harness_unparked_elicitations.get(elicitation_id) is not unparked:
+                return  # A re-park took over this prompt.
+            if await _hold_elicitation_for_terminal_answer(
+                session_id, elicitation_id, unparked, conversation_store
+            ):
+                return
         _publish_elicitation_resolved(session_id, elicitation_id, reason="unanswered")
         if conversation_store is not None:
             await asyncio.to_thread(
@@ -703,6 +742,95 @@ def _schedule_deferred_elicitation_clear(
     task = asyncio.create_task(_clear_after_grace())
     _deferred_elicitation_clear_tasks.add(task)
     task.add_done_callback(_deferred_elicitation_clear_tasks.discard)
+
+
+async def _hold_elicitation_for_terminal_answer(
+    session_id: str,
+    elicitation_id: str,
+    unparked: _UnparkedHarnessElicitation,
+    conversation_store: ConversationStore | None,
+) -> bool:
+    """
+    Keep an unanswered prompt's card up while the terminal still shows it.
+
+    Claude keeps its own picker open after the hook exits, and the runner
+    holds chat messages until it is answered, so expiring the card would
+    leave the user no visible way forward. Mid-turn, the card is instead
+    re-published with a ``terminal_fallback`` param that points the user
+    to the terminal and says whether a chat answer given in the gap never
+    reached the agent. It clears once the terminal answers, a re-park takes
+    over, or the turn ends.
+
+    :param session_id: Session that owns the prompt, e.g. ``"conv_abc123"``.
+    :param elicitation_id: The prompt's id, e.g. ``"elicit_claude_0f3a..."``.
+    :param unparked: The prompt's registered unparked state.
+    :param conversation_store: Store used to mirror the card into ancestor
+        streams, or ``None`` to keep it session-local.
+    :returns: ``True`` when the card was handled here, ``False`` when the
+        caller should expire it as unanswered.
+    """
+    from omnigent.server.routes import sessions as _facade
+
+    if not unparked.resolved_elsewhere.is_set():
+        if _session_status_cache.get(session_id) not in _MID_TURN_STATUSES:
+            _harness_unparked_elicitations.pop(elicitation_id, None)
+            return False
+        tombstone = _harness_pre_resolved_elicitations.get(elicitation_id)
+        answer_undelivered = (
+            tombstone is not None
+            and tombstone.session_id == session_id
+            and tombstone.result is not None
+            and tombstone.request_fingerprint == unparked.request_fingerprint
+        )
+        if answer_undelivered:
+            # The card now asks for the terminal, so a late re-park must re-ask.
+            _harness_pre_resolved_elicitations.pop(elicitation_id, None)
+        elif pending_elicitations.lookup(elicitation_id, conversation_id=session_id) is None:
+            _harness_unparked_elicitations.pop(elicitation_id, None)
+            return False
+        terminal_event = {
+            **unparked.event_payload,
+            "params": {
+                **unparked.event_payload["params"],
+                "terminal_fallback": {"answer_undelivered": answer_undelivered},
+            },
+        }
+        unparked.in_terminal = True
+        session_stream.publish(session_id, terminal_event)
+        if conversation_store is not None:
+            await asyncio.to_thread(
+                _publish_elicitation_request_to_ancestors,
+                conversation_store,
+                session_id,
+                terminal_event,
+            )
+    while not unparked.resolved_elsewhere.is_set():
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(
+                unparked.resolved_elsewhere.wait(),
+                timeout=_facade._HARNESS_TERMINAL_FALLBACK_POLL_S,
+            )
+        if _harness_unparked_elicitations.get(elicitation_id) is not unparked:
+            return True  # A re-park took over this prompt.
+        if unparked.resolved_elsewhere.is_set():
+            break
+        if pending_elicitations.lookup(elicitation_id, conversation_id=session_id) is None:
+            _harness_unparked_elicitations.pop(elicitation_id, None)
+            return True  # Already cleared, e.g. by a stop.
+        if _session_status_cache.get(session_id) not in _MID_TURN_STATUSES:
+            _harness_unparked_elicitations.pop(elicitation_id, None)
+            return False
+    # A mirrored tool result proved the terminal answered the prompt.
+    _harness_unparked_elicitations.pop(elicitation_id, None)
+    _publish_elicitation_resolved(session_id, elicitation_id)
+    if conversation_store is not None:
+        await asyncio.to_thread(
+            _publish_elicitation_resolved_to_ancestors,
+            conversation_store,
+            session_id,
+            elicitation_id,
+        )
+    return True
 
 
 async def _best_effort_stop(
@@ -2390,6 +2518,13 @@ async def _resolve_elicitation(
         session_id, elicitation_id, data, conversation_store
     ):
         return
+    unparked = _harness_unparked_elicitations.get(elicitation_id)
+    if unparked is not None and unparked.in_terminal and unparked.session_id == session_id:
+        # Nothing can deliver the answer; accepting it would strand it again.
+        raise OmnigentError(
+            "This prompt is waiting in the agent's terminal. Answer it there.",
+            code=ErrorCode.CONFLICT,
+        )
     harness_future = _harness_elicitation_registry.get(elicitation_id)
     if harness_future is not None and not harness_future.done():
         # Only the session that owns this elicitation

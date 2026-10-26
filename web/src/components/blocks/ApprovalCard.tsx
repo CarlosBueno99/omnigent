@@ -32,6 +32,7 @@
 //      on `POST /v1/sessions/{id}/elicitations/{eid}/resolve`,
 //   3. rolls back to "pending" on network error.
 
+import type { ElicitationTerminalFallback } from "@/lib/events";
 import type { NativePermissionDelivery } from "@/lib/nativePermissionDelivery";
 import { useContext } from "react";
 import {
@@ -62,6 +63,7 @@ import { sessionNavigationSearch } from "@/lib/sessionNavigation";
 import type { AgyPermission, CodexPersistMode, RememberScope } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { childPrimaryLabel } from "@/shell/subagentLabel";
+import { useTerminalFirst } from "@/shell/TerminalFirstContext";
 import { useChatStore } from "@/store/chatStore";
 import {
   ConversationScopeContext,
@@ -149,6 +151,8 @@ function SubagentRequesterLine({ sessionId, ancestorSessionId }: SubagentRequest
 
 interface ApprovalCardProps {
   nativeDelivery?: NativePermissionDelivery;
+  /** Set while the prompt can only be answered in the agent's terminal. */
+  terminalFallback?: ElicitationTerminalFallback;
   elicitationId: string;
   message: string;
   phase: string;
@@ -245,6 +249,7 @@ const EMPTY_CODEX_PERSIST_MODES: CodexPersistMode[] = [];
 
 export function ApprovalCard({
   nativeDelivery,
+  terminalFallback,
   elicitationId,
   message,
   phase,
@@ -271,6 +276,7 @@ export function ApprovalCard({
   // the child's elicitation rather than the main conversation's. null (the main
   // transcript) leaves submitApproval on its active-conversation default.
   const scopedConversationId = useContext(ConversationScopeContext);
+  const terminalFirst = useTerminalFirst();
   const submitVerdict: SubmitApprovalFn =
     onSubmit ??
     ((id, action, content, meta) => {
@@ -640,6 +646,63 @@ export function ApprovalCard({
     );
   }
 
+  if (status === "pending" && terminalFallback) {
+    // Only this session's own terminal can answer; a mirrored or side-chat card names another one.
+    const canOpenTerminal =
+      !requester && !scopedConversationId && Boolean(terminalFirst?.isTerminalFirst);
+    return (
+      <Alert
+        data-testid="approval-card"
+        data-state="terminal"
+        className={cn("flex flex-col gap-2 py-3 px-4", className)}
+      >
+        <AlertTitle className="flex items-center gap-2 text-ui">
+          <TerminalIcon className="size-4 text-yellow-600 dark:text-yellow-400" />
+          Answer in the terminal
+          {policyLabel && <span className="text-muted-foreground text-sm">· {policyLabel}</span>}
+        </AlertTitle>
+        <AlertDescription className="flex flex-col gap-2">
+          {requesterLine}
+          <span data-testid="approval-card-terminal-hint">
+            {terminalFallback.answerUndelivered
+              ? "Your answer didn't reach the agent. It is still waiting for this answer in its terminal."
+              : "The agent is waiting for this answer in its terminal, not in chat."}
+          </span>
+          {isAskUserQuestion ? (
+            <AskUserQuestionForm
+              questions={askPayload.questions}
+              onSubmit={submitAnswers}
+              onReject={() => submitBinary("decline")}
+              readOnly
+            />
+          ) : (
+            <>
+              <ElicitationMessage message={message} className="whitespace-pre-line" />
+              {formattedPreview && (
+                <pre className="max-h-64 overflow-y-auto rounded bg-muted px-2 py-1 font-mono text-sm text-foreground whitespace-pre-wrap break-words">
+                  {formattedPreview}
+                </pre>
+              )}
+            </>
+          )}
+          {canOpenTerminal && (
+            <div className="flex flex-wrap gap-2 pt-1">
+              <Button
+                size="sm"
+                onClick={() => terminalFirst?.setView("terminal")}
+                data-testid="approval-card-open-terminal"
+                componentId="approval.open_terminal"
+              >
+                <TerminalIcon className="mr-1 size-3.5" />
+                Open terminal
+              </Button>
+            </div>
+          )}
+        </AlertDescription>
+      </Alert>
+    );
+  }
+
   if (status === "responded" && response) {
     const autoResolved = response.action === "auto_resolved";
     const promptExpired = autoResolved && response.reason === "unanswered";
@@ -971,6 +1034,7 @@ export function ElicitationCard({
     <ApprovalCard
       elicitationId={item.elicitationId}
       nativeDelivery={item.nativeDelivery}
+      terminalFallback={item.terminalFallback}
       message={item.message}
       phase={item.phase}
       policyName={item.policyName}

@@ -7,6 +7,10 @@ import { childSessionsQueryKey, type ChildSessionInfo } from "@/hooks/useChildSe
 import { BlockStream } from "@/lib/blockStream";
 import { buildBubbles, type RenderItem } from "@/lib/renderItems";
 import { parseEventLines } from "@/lib/sse";
+import {
+  TerminalFirstContextProvider,
+  type TerminalFirstContextValue,
+} from "@/shell/TerminalFirstContext";
 import { useChatStore } from "@/store/chatStore";
 import { ApprovalCard, ElicitationCard } from "./ApprovalCard";
 
@@ -1776,6 +1780,109 @@ describe("ApprovalCard — prompt expired", () => {
 
     expect(screen.getByText(/Resolved elsewhere/)).toBeDefined();
     expect(screen.queryByTestId("prompt-expired-hint")).toBeNull();
+  });
+});
+
+describe("ApprovalCard — prompt waiting in the terminal", () => {
+  const question = {
+    question: "Which deployment target should I use?",
+    header: "Target",
+    multiSelect: false,
+    options: [
+      { label: "Staging", description: "Deploy to the staging cluster" },
+      { label: "Production", description: "Deploy to production" },
+    ],
+  };
+
+  function terminalCardItem(answerUndelivered: boolean) {
+    const events = [
+      ...parseEventLines([
+        JSON.stringify({
+          event: "response.elicitation_request",
+          data: {
+            type: "response.elicitation_request",
+            elicitation_id: "elic_terminal",
+            params: {
+              mode: "form",
+              message: "Claude wants to call **AskUserQuestion**",
+              phase: "pre_tool_use",
+              policy_name: "claude_native_permission",
+              requestedSchema: {},
+              ask_user_question: { questions: [question] },
+              terminal_fallback: { answer_undelivered: answerUndelivered },
+            },
+          },
+        }),
+      ]),
+    ];
+    const bubble = buildBubbles(new BlockStream().reduceSync(events), null)[0];
+    if (bubble?.kind !== "assistant") throw new Error("Expected an assistant bubble");
+    const item = bubble.items[0];
+    if (item?.kind !== "elicitation") throw new Error("Expected an elicitation card");
+    return item;
+  }
+
+  it("shows the question's options read-only and points to the terminal", () => {
+    render(<ElicitationCard item={terminalCardItem(false)} />);
+
+    const card = screen.getByTestId("approval-card");
+    expect(card.getAttribute("data-state")).toBe("terminal");
+    expect(within(card).getByText("Answer in the terminal")).toBeDefined();
+    expect(within(card).getByText(question.question)).toBeDefined();
+    const staging = within(card).getByRole("radio", { name: /Staging/ });
+    expect(staging).toBeDisabled();
+    expect(within(card).queryByTestId("ask-user-question-submit")).toBeNull();
+    expect(within(card).queryByTestId("ask-user-question-custom-input")).toBeNull();
+    expect(within(card).queryByRole("button", { name: /cancel/i })).toBeNull();
+    expect(screen.getByTestId("approval-card-terminal-hint").textContent).toContain(
+      "waiting for this answer in its terminal",
+    );
+    expect(screen.queryByTestId("approval-card-open-terminal")).toBeNull();
+  });
+
+  it("says when an answer given in chat never reached the agent", () => {
+    render(<ElicitationCard item={terminalCardItem(true)} />);
+
+    expect(screen.getByTestId("approval-card-terminal-hint").textContent).toContain(
+      "Your answer didn't reach the agent",
+    );
+  });
+
+  it("opens this session's terminal view", () => {
+    const setView = vi.fn();
+    const terminalFirst = {
+      isTerminalFirst: true,
+      setView,
+    } as unknown as TerminalFirstContextValue;
+    render(
+      <TerminalFirstContextProvider value={terminalFirst}>
+        <ElicitationCard item={terminalCardItem(false)} />
+      </TerminalFirstContextProvider>,
+    );
+
+    fireEvent.click(screen.getByTestId("approval-card-open-terminal"));
+    expect(setView).toHaveBeenCalledExactlyOnceWith("terminal");
+  });
+
+  it("shows a tool approval without Approve or Reject buttons", () => {
+    render(
+      <ApprovalCard
+        elicitationId="elic_terminal_bash"
+        message="Claude wants to call **Bash**"
+        phase="pre_tool_use"
+        policyName="claude_native_permission"
+        contentPreview="ls -la"
+        requestedSchema={{}}
+        status="pending"
+        response={null}
+        terminalFallback={{ answerUndelivered: false }}
+      />,
+    );
+
+    expect(screen.getByText(/wants to call/)).toBeDefined();
+    expect(screen.getByText("ls -la")).toBeDefined();
+    expect(screen.queryByRole("button", { name: /approve/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /reject/i })).toBeNull();
   });
 });
 

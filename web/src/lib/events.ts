@@ -180,8 +180,15 @@ export interface PolicyDenied {
   phase: string;
 }
 
+/** A prompt still open in the agent's terminal after its chat hook stopped waiting. */
+export interface ElicitationTerminalFallback {
+  /** The chat accepted an answer that never reached the agent. */
+  answerUndelivered: boolean;
+}
+
 export interface ElicitationRequest {
   nativeDelivery?: NativePermissionDelivery;
+  terminalFallback?: ElicitationTerminalFallback;
   type: "elicitation_request";
   elicitationId: string;
   /**

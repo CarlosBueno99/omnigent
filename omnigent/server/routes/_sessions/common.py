@@ -524,6 +524,11 @@ _HARNESS_PRE_RESOLVED_ELICITATION_MAX_ENTRIES = 1024
 _HARNESS_ELICITATION_REPARK_GRACE_S = 30.0
 
 
+# How often a card re-shown as waiting in the terminal checks whether the turn
+# moved on, so it clears once the prompt can no longer be answered.
+_HARNESS_TERMINAL_FALLBACK_POLL_S = 1.0
+
+
 # How long an archive defers tearing down the session's runner, giving an Undo's
 # unarchive time to land first. When the teardown fires it re-reads the persisted
 # archived flag and skips if the session was unarchived, so any Undo whose
@@ -1173,6 +1178,7 @@ __all__ = [
     "_HARNESS_ELICITATION_REPARK_GRACE_S",
     "_HARNESS_PRE_RESOLVED_ELICITATION_MAX_ENTRIES",
     "_HARNESS_PRE_RESOLVED_ELICITATION_TTL_S",
+    "_HARNESS_TERMINAL_FALLBACK_POLL_S",
     "_HOOK_ELICITATION_ID_RE",
     "_HOST_BOUND_RUNNER_CONNECT_GRACE_S",
     "_HOST_LAUNCH_RESULT_TIMEOUT_S",

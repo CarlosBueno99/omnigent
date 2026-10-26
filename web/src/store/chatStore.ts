@@ -5430,6 +5430,16 @@ function reconcileElicitationBlocks(
       changed = true;
       return { ...currentDelivery, ctx: b.ctx };
     }
+    // The prompt moved to the agent's terminal, or back to chat, during the gap.
+    if (
+      currentDelivery &&
+      Boolean(currentDelivery.terminalFallback) !== Boolean(b.terminalFallback) &&
+      preGapCards.get(b.elicitationId) === b &&
+      !b.nativeDeliveryResolved
+    ) {
+      changed = true;
+      return { ...currentDelivery, ctx: b.ctx };
+    }
     if (
       b.status === "pending" &&
       preGapPendingIds.has(b.elicitationId) &&
@@ -6696,6 +6706,12 @@ function revivePendingElicitationBlock(
       const updated = { ...incoming, ctx: target.ctx };
       return { blocks: [...s.blocks.slice(0, idx), updated, ...s.blocks.slice(idx + 1)] };
     }
+    // The server re-asks only while the prompt is still unanswered, so this
+    // replaces even a card showing the user's undelivered answer.
+    if (incoming && (incoming.terminalFallback || target.terminalFallback)) {
+      const updated = { ...incoming, ctx: target.ctx };
+      return { blocks: [...s.blocks.slice(0, idx), updated, ...s.blocks.slice(idx + 1)] };
+    }
     if (target.status !== "responded" || target.response?.action !== "auto_resolved") return {};
     const updated: ElicitationBlock = { ...target, status: "pending", response: null };
     return { blocks: [...s.blocks.slice(0, idx), updated, ...s.blocks.slice(idx + 1)] };
@@ -6923,7 +6939,12 @@ export async function pumpStreamEvents(
           (b) => b.type === "elicitation" && b.elicitationId === eid,
         );
         if (buffered !== -1) {
-          if (block.nativeDelivery) buffer[buffered] = { ...block, ctx: buffer[buffered].ctx };
+          if (
+            block.nativeDelivery ||
+            block.terminalFallback ||
+            (buffer[buffered] as ElicitationBlock).terminalFallback
+          )
+            buffer[buffered] = { ...block, ctx: buffer[buffered].ctx };
           continue;
         }
         if (get().blocks.some((b) => b.type === "elicitation" && b.elicitationId === eid)) {

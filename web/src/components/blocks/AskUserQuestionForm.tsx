@@ -16,6 +16,8 @@ interface AskUserQuestionFormProps {
   questions: ClaudeQuestion[];
   onSubmit: (answers: AskUserQuestionAnswers) => void;
   onReject: () => void;
+  /** Show the questions and options without letting the user answer them. */
+  readOnly?: boolean;
 }
 
 /**
@@ -54,7 +56,12 @@ function questionKey(question: ClaudeQuestion): string {
   return question.id && question.id.length > 0 ? question.id : question.question;
 }
 
-export function AskUserQuestionForm({ questions, onSubmit, onReject }: AskUserQuestionFormProps) {
+export function AskUserQuestionForm({
+  questions,
+  onSubmit,
+  onReject,
+  readOnly = false,
+}: AskUserQuestionFormProps) {
   // Currently-visible question (carousel index).
   const [currentIndex, setCurrentIndex] = useState(0);
 
@@ -186,7 +193,7 @@ export function AskUserQuestionForm({ questions, onSubmit, onReject }: AskUserQu
     (opt) => selectedLabels.includes(opt.label) && opt.preview,
   );
 
-  const allowCustomInput = current.isOther !== false;
+  const allowCustomInput = current.isOther !== false && !readOnly;
   const customRowId = `${currentKey}__custom`;
   const customRowChecked = customSelected[currentKey] ?? false;
   const customRowValue = customInputs[currentKey] ?? "";
@@ -206,6 +213,7 @@ export function AskUserQuestionForm({ questions, onSubmit, onReject }: AskUserQu
 
       <fieldset
         key={currentKey}
+        disabled={readOnly}
         className="flex flex-col gap-2 mb-2"
         data-testid="ask-user-question-section"
       >
@@ -316,53 +324,57 @@ export function AskUserQuestionForm({ questions, onSubmit, onReject }: AskUserQu
         )}
       </fieldset>
 
-      <div className="flex items-center gap-2">
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => setCurrentIndex((i) => i - 1)}
-          disabled={isFirst}
-          data-testid="ask-user-question-prev"
-          componentId="question.prev"
-        >
-          <ChevronLeftIcon className="mr-1 size-3.5" />
-          Prev
-        </Button>
-        {!isLast && (
+      {(!readOnly || questions.length > 1) && (
+        <div className="flex items-center gap-2">
           <Button
             size="sm"
             variant="outline"
-            onClick={() => setCurrentIndex((i) => i + 1)}
-            data-testid="ask-user-question-next"
-            componentId="question.next"
+            onClick={() => setCurrentIndex((i) => i - 1)}
+            disabled={isFirst}
+            data-testid="ask-user-question-prev"
+            componentId="question.prev"
           >
-            Next
-            <ChevronRightIcon className="ml-1 size-3.5" />
+            <ChevronLeftIcon className="mr-1 size-3.5" />
+            Prev
           </Button>
-        )}
-        {isLast && (
-          <Button
-            size="sm"
-            onClick={handleSubmit}
-            disabled={!allAnswered}
-            data-testid="ask-user-question-submit"
-            componentId="question.submit"
-          >
-            <CheckIcon className="mr-1 size-3.5" />
-            Submit
-          </Button>
-        )}
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={onReject}
-          className="ml-auto"
-          componentId="question.cancel"
-        >
-          <XIcon className="mr-1 size-3.5" />
-          Cancel
-        </Button>
-      </div>
+          {!isLast && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setCurrentIndex((i) => i + 1)}
+              data-testid="ask-user-question-next"
+              componentId="question.next"
+            >
+              Next
+              <ChevronRightIcon className="ml-1 size-3.5" />
+            </Button>
+          )}
+          {isLast && !readOnly && (
+            <Button
+              size="sm"
+              onClick={handleSubmit}
+              disabled={!allAnswered}
+              data-testid="ask-user-question-submit"
+              componentId="question.submit"
+            >
+              <CheckIcon className="mr-1 size-3.5" />
+              Submit
+            </Button>
+          )}
+          {!readOnly && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onReject}
+              className="ml-auto"
+              componentId="question.cancel"
+            >
+              <XIcon className="mr-1 size-3.5" />
+              Cancel
+            </Button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

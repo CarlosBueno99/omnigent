@@ -106,6 +106,41 @@ class _PreResolvedHarnessElicitation:
     request_fingerprint: str | None = None
 
 
+@dataclass
+class _UnparkedHarnessElicitation:
+    """
+    A published prompt whose hook stopped waiting without an answer.
+
+    The harness may still show the prompt in its terminal, so when the
+    re-park grace lapses mid-turn the card is re-published as waiting in
+    the terminal instead of expiring.
+
+    :param session_id: Conversation id that issued the prompt, e.g.
+        ``"conv_abc123"``.
+    :param tool_name: Gated tool name, e.g. ``"AskUserQuestion"``, or
+        ``None`` when the harness supplied none.
+    :param tool_input: Gated tool input, e.g. ``{"questions": [...]}``, or
+        ``None`` when not supplied.
+    :param event_payload: The published ``response.elicitation_request``
+        event, re-published with a ``terminal_fallback`` param.
+    :param request_fingerprint: Digest of the request params, matched
+        against a verdict tombstone to tell whether a chat answer was
+        stranded in the gap.
+    :param resolved_elsewhere: Set when a mirrored tool result proves the
+        terminal answered the prompt.
+    :param in_terminal: ``True`` once the card was re-published as
+        waiting in the terminal; chat answers are then refused.
+    """
+
+    session_id: str
+    tool_name: str | None
+    tool_input: dict[str, Any] | None
+    event_payload: dict[str, Any]
+    request_fingerprint: str | None
+    resolved_elsewhere: asyncio.Event
+    in_terminal: bool = False
+
+
 # Maps ``elicitation_id`` to its parked-elicitation state. Populated
 # while a harness hook long-poll is parked; popped when it returns.
 _harness_parked_elicitations: WorkspaceScopedCache[str, _ParkedHarnessElicitation] = (
@@ -121,12 +156,18 @@ _harness_pre_resolved_elicitations: WorkspaceScopedCache[str, _PreResolvedHarnes
     WorkspaceScopedCache()
 )
 
+# Maps ``elicitation_id`` to a prompt whose hook exited unanswered while
+# the harness may still show it. Popped by a re-park or when the card clears.
+_harness_unparked_elicitations: WorkspaceScopedCache[str, _UnparkedHarnessElicitation] = (
+    WorkspaceScopedCache()
+)
+
 
 def reset_for_tests() -> None:
     """
     Clear every elicitation registry. For test isolation only.
 
-    The four registries are module-global and keyed by
+    The registries are module-global and keyed by
     ``elicitation_id``, so entries left behind by one test (a severed
     long-poll, an unresolved prompt, a pre-resolved tombstone) are
     visible to every later test in the same worker process. Mirrors
@@ -137,13 +178,16 @@ def reset_for_tests() -> None:
     _harness_elicitation_owners.clear()
     _harness_parked_elicitations.clear()
     _harness_pre_resolved_elicitations.clear()
+    _harness_unparked_elicitations.clear()
 
 
 __all__ = [
     "_ParkedHarnessElicitation",
     "_PreResolvedHarnessElicitation",
+    "_UnparkedHarnessElicitation",
     "_harness_elicitation_owners",
     "_harness_elicitation_registry",
     "_harness_parked_elicitations",
     "_harness_pre_resolved_elicitations",
+    "_harness_unparked_elicitations",
 ]

@@ -114,7 +114,10 @@ from omnigent.server._elicitation_registry import (
     _harness_elicitation_owners,
     _harness_parked_elicitations,
     _harness_pre_resolved_elicitations,
+    _harness_unparked_elicitations,
+    _ParkedHarnessElicitation,
     _PreResolvedHarnessElicitation,
+    _UnparkedHarnessElicitation,
 )
 from omnigent.server.auth import (
     LEVEL_OWNER,
@@ -1085,6 +1088,9 @@ def _signal_terminal_resolved_harness_elicitation_impl(
     unrelated auto-allowed same-named tool's output is harmless for the
     same reason).
 
+    A prompt whose hook already exited unanswered matches the same way,
+    so its card clears once the terminal answers it.
+
     Best-effort and idempotent: a no-op when no parked prompt matches
     (e.g. the web UI already resolved it, the tool needed no permission,
     or it is an unrelated tool). Harness-agnostic by construction —
@@ -1097,9 +1103,13 @@ def _signal_terminal_resolved_harness_elicitation_impl(
     :param tool_input: Tool input the result is for, e.g.
         ``{"command": "ls"}``, or ``None`` if unavailable.
     """
+    tracked: list[_ParkedHarnessElicitation | _UnparkedHarnessElicitation] = [
+        *_harness_parked_elicitations.values(),
+        *_harness_unparked_elicitations.values(),
+    ]
     candidates = [
         parked
-        for parked in _harness_parked_elicitations.values()
+        for parked in tracked
         if parked.session_id == session_id
         and parked.tool_name == tool_name
         and not parked.resolved_elsewhere.is_set()

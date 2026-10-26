@@ -17461,6 +17461,60 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
     },
   );
 
+  it.each(["live", "snapshot"])(
+    "shows an answer the hook never received as waiting in the terminal via %s",
+    async (recovery) => {
+      const sid = "conv_terminal_fallback";
+      const eid = "elic_terminal_fallback";
+      seedSession(sid, []);
+      const { sinks, controller, loop } = await openLoop(sid);
+      const raw = pendingElicitationRaw(eid, "Approve?");
+      sinks.at(-1)!.push(sse("response.elicitation_request", raw));
+      await drainAsync();
+      useChatStore.setState((state) => ({
+        blocks: state.blocks.map((block) =>
+          block.type === "elicitation" && block.elicitationId === eid
+            ? { ...block, status: "responded", response: { action: "accept" } }
+            : block,
+        ),
+      }));
+
+      const inTerminal = {
+        ...raw,
+        params: {
+          ...(raw.params as Record<string, unknown>),
+          terminal_fallback: { answer_undelivered: true },
+        },
+      };
+      if (recovery === "live") {
+        sinks.at(-1)!.push(sse("response.elicitation_request", inTerminal));
+      } else {
+        seedPendingElicitations(sid, [inTerminal]);
+        sinks.at(-1)!.error();
+      }
+      await drainAsync();
+      expect(elicitationCards()).toHaveLength(1);
+      expect(elicitationCards()[0]).toMatchObject({
+        status: "pending",
+        response: null,
+        terminalFallback: { answerUndelivered: true },
+      });
+
+      // A hook that re-parks makes the prompt answerable from chat again.
+      if (recovery === "live") {
+        sinks.at(-1)!.push(sse("response.elicitation_request", raw));
+      } else {
+        seedPendingElicitations(sid, [raw]);
+        sinks.at(-1)!.error();
+      }
+      await drainAsync();
+      expect(elicitationCards()).toHaveLength(1);
+      expect(elicitationCards()[0]!.status).toBe("pending");
+      expect(elicitationCards()[0]!.terminalFallback).toBeUndefined();
+      await abortLoop(sinks, controller, loop);
+    },
+  );
+
   it("keeps a pending mid-turn ApprovalCard across a transport drop", async () => {
     seedSession("conv_keep", []);
     // The server still has the prompt parked: its snapshot lists it.

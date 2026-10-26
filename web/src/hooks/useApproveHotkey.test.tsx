@@ -129,6 +129,13 @@ describe("useApproveHotkey", () => {
     expect(submitApproval).not.toHaveBeenCalled();
   });
 
+  it("does not accept a prompt waiting in the agent's terminal", () => {
+    blocks = [{ ...pending, terminalFallback: { answerUndelivered: false } }];
+    renderHook(() => useApproveHotkey(true));
+    press();
+    expect(submitApproval).not.toHaveBeenCalled();
+  });
+
   it("skips AskUserQuestion (needs an explicit choice)", () => {
     blocks = [{ type: "elicitation", elicitationId: "q1", status: "pending", askUserQuestion: {} }];
     renderHook(() => useApproveHotkey(true));
