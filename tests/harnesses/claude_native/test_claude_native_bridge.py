@@ -4384,6 +4384,8 @@ def test_inject_user_message_pastes_content_then_submits(
         :returns: A fake CompletedProcess with rc=0.
         """
         del kwargs
+        if "display-message" in cmd:
+            return SimpleNamespace(returncode=0, stdout="120 24 latest\n", stderr="")
         if "capture-pane" in cmd:
             return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
         if "load-buffer" in cmd:
@@ -4889,6 +4891,8 @@ def test_inject_user_message_waits_for_claude_prompt_before_typing(
             input-box state; send-keys returns rc=0.
         """
         del kwargs
+        if "display-message" in cmd:
+            return SimpleNamespace(returncode=0, stdout="120 24 latest\n", stderr="")
         if "capture-pane" in cmd:
             idx = min(capture_calls["n"], len(boot_panes) - 1)
             capture_calls["n"] += 1
@@ -4957,6 +4961,8 @@ def test_inject_user_message_raises_when_prompt_never_renders(
             cut short by a pane the probe never affirmed dead.
         """
         del kwargs
+        if "display-message" in cmd:
+            return SimpleNamespace(returncode=0, stdout="120 24 latest\n", stderr="")
         # Read-only queries (pane capture, liveness probe) are not
         # keystrokes — only writes must be absent on this path.
         if "capture-pane" in cmd or "list-panes" in cmd:
@@ -12306,6 +12312,8 @@ def test_inject_user_message_restores_an_occupied_input_box_first(
             simulated pane, other calls return rc=0.
         """
         del kwargs
+        if "display-message" in cmd:
+            return SimpleNamespace(returncode=0, stdout="120 24 latest\n", stderr="")
         if "capture-pane" in cmd:
             return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
         if cmd[-1] == "Escape":

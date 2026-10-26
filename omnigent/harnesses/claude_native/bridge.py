@@ -111,6 +111,9 @@ _logger = logging.getLogger(__name__)
 _INJECTION_CANCEL_EVENT: ContextVar[threading.Event | None] = ContextVar(
     "claude_native_injection_cancel_event", default=None
 )
+_COMPOSER_RECOVERY_CLEANUP: ContextVar[contextlib.ExitStack | None] = ContextVar(
+    "claude_native_composer_recovery_cleanup", default=None
+)
 _INJECTION_LOCKS_GUARD = threading.Lock()
 _INJECTION_LOCKS: dict[str, threading.Lock] = {}
 _INJECTION_LOCK_POLL_INTERVAL_S = 0.1
@@ -161,18 +164,25 @@ def _serialize_bridge_injection(function: _InjectionFunction) -> _InjectionFunct
         with (
             _cancellable_injection_lock(_bridge_injection_lock(bridge_dir)),
             _cancellable_injection_lock(_bridge_injection_file_lock(bridge_dir)),
+            contextlib.ExitStack() as cleanup,
         ):
+            token = _COMPOSER_RECOVERY_CLEANUP.set(cleanup)
             try:
-                return function(bridge_dir, *args, **kwargs)
-            except ClaudeComposerNotCleared:
-                # The refused paste sent nothing. Give a clipped composer room,
-                # then recheck readiness and pending prompts before retrying.
-                info = _wait_for_tmux_info(bridge_dir, timeout_s=_TMUX_READY_TIMEOUT_S)
-                with _usable_composer_height(info["socket_path"], info["tmux_target"]) as resized:
-                    if not resized:
-                        raise
-                    time.sleep(_CLAUDE_READY_POLL_INTERVAL_S)
+                try:
                     return function(bridge_dir, *args, **kwargs)
+                except ClaudeComposerNotCleared:
+                    # The refused paste sent nothing. Give a clipped composer room,
+                    # then recheck readiness and pending prompts before retrying.
+                    info = _wait_for_tmux_info(bridge_dir, timeout_s=_TMUX_READY_TIMEOUT_S)
+                    with _usable_composer_height(
+                        info["socket_path"], info["tmux_target"]
+                    ) as resized:
+                        if not resized:
+                            raise
+                        time.sleep(_CLAUDE_READY_POLL_INTERVAL_S)
+                        return function(bridge_dir, *args, **kwargs)
+            finally:
+                _COMPOSER_RECOVERY_CLEANUP.reset(token)
 
     return cast(_InjectionFunction, wrapped)
 
@@ -4274,6 +4284,7 @@ def inject_user_message(
     """
     delivery_diagnostics.set_stage("waiting_for_tmux")
     info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
+    _prepare_composer_height(info["socket_path"], info["tmux_target"])
     delivery_diagnostics.set_stage("restoring_input")
     # A surface left occupying the composer swallows everything typed
     # below — and hides the input box, wedging the readiness gate — so
@@ -5625,6 +5636,15 @@ def _run_tmux(socket_path: str, *args: str, allow_missing_target: bool = False) 
         raise RuntimeError(f"tmux command failed (rc={proc.returncode}): {detail}")
 
 
+def _prepare_composer_height(socket_path: str, tmux_target: str) -> None:
+    """Keep a short pane expanded through readiness, submission and any fallback."""
+    cleanup = _COMPOSER_RECOVERY_CLEANUP.get()
+    if cleanup is not None:
+        resized = cleanup.enter_context(_usable_composer_height(socket_path, tmux_target))
+        if resized:
+            time.sleep(_CLAUDE_READY_POLL_INTERVAL_S)
+
+
 @contextlib.contextmanager
 def _usable_composer_height(socket_path: str, tmux_target: str) -> Iterator[bool]:
     """Give a short pane room to render its complete input box during delivery.
@@ -6945,6 +6965,7 @@ def _reclaim_and_wait_for_prompt(
         :func:`_restore_occupied_input` raise.
     """
     started = time.monotonic()
+    _prepare_composer_height(socket_path, tmux_target)
     surface = _restore_occupied_input(
         socket_path,
         tmux_target,
