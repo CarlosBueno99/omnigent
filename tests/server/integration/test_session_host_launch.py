@@ -35,6 +35,7 @@ from fastapi import FastAPI
 
 from omnigent.cli_invocation import cli_invocation
 from omnigent.entities import Conversation
+from omnigent.harness_availability import HarnessAvailability
 from omnigent.host.connect import HostProcess
 from omnigent.host.frames import (
     CAP_CODEX_PLAN_AT_LAUNCH,
@@ -159,7 +160,10 @@ def app(runtime_init: None, db_uri: str, tmp_path) -> FastAPI:
 
 
 async def _connect_host(
-    app: FastAPI, *, capabilities: list[str] | None = None
+    app: FastAPI,
+    *,
+    capabilities: list[str] | None = None,
+    configured_harnesses: dict[str, HarnessAvailability] | None = None,
 ) -> ApplicationCommunicator:
     """Connect a mock host over the WebSocket tunnel and wait for it
     to register in the app's host registry.
@@ -168,6 +172,8 @@ async def _connect_host(
         is the same instance the session-create launch path reads).
     :param capabilities: Capability tokens the host advertises, or ``None``
         for none (an older host).
+    :param configured_harnesses: Harness readiness the host reports, e.g.
+        ``{"codex": False}``, or ``None`` for no report.
     :returns: The connected ASGI communicator, ready to exchange frames.
     """
     path = f"/v1/hosts/{_HOST_ID}/tunnel"
@@ -182,6 +188,7 @@ async def _connect_host(
             frame_protocol_version=1,
             name="laptop",
             capabilities=capabilities or [],
+            configured_harnesses=configured_harnesses,
         )
     )
     await comm.send_input({"type": "websocket.receive", "text": hello})
@@ -478,14 +485,17 @@ async def test_inline_launch_binds_runner_and_returns_host(
 
 
 @pytest.mark.parametrize(
-    ("harness", "capabilities", "mode", "expected_status"),
+    ("harness", "capabilities", "readiness", "mode", "expected_status"),
     [
-        pytest.param("codex-native", [], "plan", 409, id="old-host-plan"),
+        pytest.param("codex-native", [], None, "plan", 409, id="old-host-plan"),
         pytest.param(
-            "codex-native", [CAP_CODEX_PLAN_AT_LAUNCH], "plan", 201, id="plan-capable-host"
+            "codex-native", [CAP_CODEX_PLAN_AT_LAUNCH], None, "plan", 201, id="plan-capable-host"
         ),
-        pytest.param("codex-native", [], "default", 201, id="old-host-default"),
-        pytest.param("claude-native", [], "plan", 201, id="old-host-plan-not-codex"),
+        pytest.param("codex-native", [], None, "default", 201, id="old-host-default"),
+        pytest.param("claude-native", [], None, "plan", 201, id="old-host-plan-not-codex"),
+        pytest.param(
+            "codex-native", [], {"codex": False}, "plan", 412, id="old-host-plan-without-codex"
+        ),
     ],
 )
 async def test_plan_mode_create_refuses_a_host_that_would_start_codex_in_default(
@@ -494,11 +504,15 @@ async def test_plan_mode_create_refuses_a_host_that_would_start_codex_in_default
     db_uri: str,
     harness: str,
     capabilities: list[str],
+    readiness: dict[str, HarnessAvailability] | None,
     mode: str,
     expected_status: int,
 ) -> None:
-    """An older host would run Codex in Default under a Plan-labelled session."""
-    comm = await _connect_host(app, capabilities=capabilities)
+    """An older host would run Codex in Default under a Plan-labelled session.
+
+    A host without Codex reports that before the older-host refusal.
+    """
+    comm = await _connect_host(app, capabilities=capabilities, configured_harnesses=readiness)
     agent = await create_test_agent(
         client, executor={"type": "omnigent", "config": {"harness": harness}}
     )
@@ -528,6 +542,9 @@ async def test_plan_mode_create_refuses_a_host_that_would_start_codex_in_default
     assert resp.status_code == expected_status, resp.text
     if expected_status == 409:
         assert "too old to start a Codex session in Plan mode" in resp.text
+    if expected_status == 412:
+        assert resp.json()["error"]["code"] == "harness_not_configured"
+    if expected_status != 201:
         assert {conv.id for conv in store.list_conversations().data} == existing_ids
 
 

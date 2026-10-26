@@ -2907,26 +2907,28 @@ def native_claude_mock_session(
         yield session
 
 
-@pytest.fixture
-def native_codex_mock_session(
+@contextlib.contextmanager
+def native_codex_mock_session_context(
     live_server: str,
     mock_llm_server_url: str,
     tmp_path_factory: pytest.TempPathFactory,
-    request: pytest.FixtureRequest,
+    *,
+    labels: dict[str, str] | None = None,
 ) -> Iterator[tuple[str, str]]:
     """A real Codex CLI using an explicitly configured mock provider.
 
     Workflow-owned runners reuse their startup config; standalone tests install
-    a temporary mock provider regardless of ambient credentials. Indirect
-    parametrization supplies extra session labels.
+    a temporary mock provider regardless of ambient credentials. ``labels`` are
+    set on the session at create, before Codex launches.
     """
     respawned = _ensure_runner_online(live_server, tmp_path_factory)
     runner_id = str(_server_state["runner_id"])
     with _temp_omnigent_mock_config(
         mock_llm_server_url, "codex", workflow_owned=bool(_server_state.get("workflow_owned"))
     ):
+        # Keep the default create call unchanged; tests/test_ui_fixture_wiring.py pins it.
         session_id = _create_native_codex_session(
-            live_server, runner_id, labels=getattr(request, "param", None)
+            live_server, runner_id, **({} if labels is None else {"labels": labels})
         )
         try:
             yield (live_server, session_id)
@@ -2939,6 +2941,19 @@ def native_codex_mock_session(
                 except subprocess.TimeoutExpired:
                     respawned.kill()
                     respawned.wait(timeout=5)
+
+
+@pytest.fixture
+def native_codex_mock_session(
+    live_server: str,
+    mock_llm_server_url: str,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[tuple[str, str]]:
+    """A real Codex CLI using an explicitly configured mock provider."""
+    with native_codex_mock_session_context(
+        live_server, mock_llm_server_url, tmp_path_factory
+    ) as session:
+        yield session
 
 
 @dataclass(frozen=True)

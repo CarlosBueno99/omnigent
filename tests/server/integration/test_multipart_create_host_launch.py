@@ -29,6 +29,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 
+from omnigent.harness_availability import HarnessAvailability
 from omnigent.host.frames import (
     HostHelloFrame,
     HostLaunchRunnerFrame,
@@ -313,13 +314,29 @@ async def test_multipart_create_host_id_requires_workspace(
     assert "workspace required" in resp.text
 
 
+@pytest.mark.parametrize(
+    ("readiness", "expected_status"),
+    [
+        pytest.param(None, 409, id="old-host"),
+        pytest.param({"codex": False}, 412, id="old-host-without-codex"),
+    ],
+)
 async def test_multipart_plan_mode_create_refuses_a_host_that_would_start_codex_in_default(
     register_host: RegisterHost,
     client: httpx.AsyncClient,
     conv_store: SqlAlchemyConversationStore,
+    db_uri: str,
+    readiness: dict[str, HarnessAvailability] | None,
+    expected_status: int,
 ) -> None:
-    """A bundled Plan create on a host without ``codex_plan_at_launch`` creates no row."""
+    """A bundled Plan create on a host without ``codex_plan_at_launch`` creates no row.
+
+    A host without Codex reports that before the older-host refusal.
+    """
     cap = register_host()
+    HostStore(db_uri).upsert_on_connect(
+        _HOST_ID, "bundle-host", RESERVED_USER_LOCAL, configured_harnesses=readiness
+    )
     existing_ids = {conv.id for conv in conv_store.list_conversations().data}
 
     resp = await _multipart_create(
@@ -333,8 +350,11 @@ async def test_multipart_plan_mode_create_refuses_a_host_that_would_start_codex_
         executor={"type": "omnigent", "config": {"harness": "codex-native"}},
     )
 
-    assert resp.status_code == 409, resp.text
-    assert "too old to start a Codex session in Plan mode" in resp.text
+    assert resp.status_code == expected_status, resp.text
+    if expected_status == 409:
+        assert "too old to start a Codex session in Plan mode" in resp.text
+    else:
+        assert resp.json()["error"]["code"] == "harness_not_configured"
     assert {conv.id for conv in conv_store.list_conversations().data} == existing_ids
     assert cap.launch == []
 

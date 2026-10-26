@@ -13,7 +13,6 @@ import httpx
 import pytest
 from playwright.sync_api import Page, expect
 
-from omnigent.stores.conversation_store import CODEX_NATIVE_COLLABORATION_MODE_LABEL_KEY
 from tests.e2e_ui.conftest import configure_mock_llm, reset_mock_llm, set_fallback_mock_llm
 from tests.e2e_ui.messages.test_message_render_parity import (
     _ASSISTANT,
@@ -96,35 +95,4 @@ def test_codex_plan_mode_toggle_sends_plan_mode_instructions(
     # The wrapper agent's prompt, which Codex reads from its session config.toml.
     assert "Codex is running in the session terminal" in developer_text, (
         "Plan-mode turn dropped the agent's own instructions"
-    )
-
-
-@pytest.mark.nightly
-@pytest.mark.timeout(360)
-@pytest.mark.parametrize(
-    "native_codex_mock_session",
-    [{CODEX_NATIVE_COLLABORATION_MODE_LABEL_KEY: "plan"}],
-    indirect=True,
-    ids=["plan-at-create"],
-)
-def test_codex_session_created_in_plan_mode_sends_plan_mode_on_first_turn(
-    request: pytest.FixtureRequest,
-    native_codex_mock_session: tuple[str, str],
-    mock_llm_server_url: str,
-) -> None:
-    """A session armed for Plan mode at create runs its first turn as Codex Plan Mode."""
-    base_url, session_id = native_codex_mock_session
-    page: Page = request.getfixturevalue("page")
-    page.goto(f"{base_url}/c/{session_id}")
-    _open_terminal_view(page)
-    _wait_terminal_connected(page)
-    _ensure_chat_view(page)
-    expect(page.get_by_test_id("composer-plan-mode")).to_contain_text("Plan mode", timeout=30_000)
-
-    first_requests = _run_turn(page, mock_llm_server_url, f"first-{uuid.uuid4().hex[:8]}")
-    assert first_requests, "no model request carried the first turn"
-    collaboration_messages = _collaboration_mode_messages(first_requests[0])
-    assert any("Plan Mode" in message for message in collaboration_messages), (
-        f"First turn of a Plan-mode session reached the model without Codex Plan Mode "
-        f"instructions: {collaboration_messages!r}"
     )

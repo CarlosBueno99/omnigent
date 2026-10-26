@@ -404,7 +404,9 @@ Other connection providers alone do not enable the managed MCP picker.
   page leaves the launch mode unchanged and does not prevent focus traversal.
 - **`plan-mode`:** with a real Codex CLI and a mock model, the in-session toggle
   reaching Codex as its Plan Mode preset is
-  `tests/e2e_ui/chat/test_codex_plan_mode_instructions.py::test_codex_plan_mode_toggle_sends_plan_mode_instructions`.
+  `tests/e2e_ui/chat/test_codex_plan_mode_instructions.py::test_codex_plan_mode_toggle_sends_plan_mode_instructions`;
+  a session created in Plan mode sending its first turn that way is
+  `tests/e2e_ui/chat/test_codex_plan_mode_at_create.py::test_codex_session_created_in_plan_mode_sends_plan_mode_on_first_turn`.
   Landing-page arming is in `web/src/shell/NewChatDialog.test.tsx`; the older-host
   refusal is in `tests/server/integration/test_session_host_launch.py` and
   `tests/server/integration/test_multipart_create_host_launch.py`.

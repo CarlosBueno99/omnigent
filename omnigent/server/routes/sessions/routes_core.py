@@ -1220,12 +1220,8 @@ def register_core_routes(
         # (mirroring the JSON path — a bad workspace never produces a
         # session) and persist the canonical path the host returned.
         if parsed_metadata.host_id is not None:
-            from omnigent.models.model_catalog import spec_harness
             from omnigent.server.routes._session_create_validation import (
                 validate_uploaded_bundle_host_workspace,
-            )
-            from omnigent.server.routes._session_harness_readiness import (
-                require_codex_plan_launch_support,
             )
 
             os_env = getattr(spec, "os_env", None)
@@ -1238,12 +1234,6 @@ def register_core_routes(
                 host_registry=getattr(request.app.state, "host_registry", None),
             )
             parsed_metadata = parsed_metadata.model_copy(update={"workspace": canonical_workspace})
-            require_codex_plan_launch_support(
-                harness=spec_harness(spec),
-                host_id=parsed_metadata.host_id,
-                labels=parsed_metadata.labels,
-                host_registry=getattr(request.app.state, "host_registry", None),
-            )
 
         from omnigent.server.mcp_compatibility import (
             registry_services,
@@ -1269,6 +1259,7 @@ def register_core_routes(
         )
         from omnigent.models.model_catalog import spec_harness
         from omnigent.server.routes._session_harness_readiness import (
+            require_codex_plan_launch_support,
             validate_create_harness_readiness,
         )
 
@@ -1281,6 +1272,12 @@ def register_core_routes(
             conversation_store=conversation_store,
             host_store=getattr(request.app.state, "host_store", None),
             parent=parent_conv,
+        )
+        require_codex_plan_launch_support(
+            harness=spec_harness(spec),
+            host_id=parsed_metadata.host_id,
+            labels=parsed_metadata.labels,
+            host_registry=getattr(request.app.state, "host_registry", None),
         )
         with creation_stage("create_persistence_ms"):
             result = await asyncio.to_thread(
