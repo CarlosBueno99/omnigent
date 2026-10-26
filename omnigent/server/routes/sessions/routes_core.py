@@ -43,9 +43,10 @@ from omnigent.entities.permission import SessionPermission
 from omnigent.errors import ErrorCategory, ErrorCode, ErrorImpact, ErrorPhase, OmnigentError
 from omnigent.models.model_override import validate_model_override
 from omnigent.runner.identity import (
+    ORCHESTRATION_SOURCE_HEADER,
     RUNNER_TUNNEL_TOKEN_HEADER,
 )
-from omnigent.runner.routing import RunnerRouter, routing_host_id
+from omnigent.runner.routing import RunnerRouter, routing_host_id, routing_host_session
 from omnigent.runner.session_init_protocol import build_runner_session_init_payload
 from omnigent.runtime import (
     pending_elicitations,
@@ -92,6 +93,7 @@ from omnigent.server.routes._auth_helpers import (
     require_user as _require_user,
 )
 from omnigent.server.routes._content_type import (
+    require_json_content_type,
     require_json_or_multipart_content_type,
 )
 from omnigent.server.routes._errors import (
@@ -112,10 +114,7 @@ from omnigent.server.routes._sessions.common import (
     _CODEX_NATIVE_COLLABORATION_MODES,
     _CODEX_NATIVE_WRAPPER_LABEL_VALUE,
     _DEVIN_NATIVE_WRAPPER_LABEL_VALUE,
-    _MANAGED_LAUNCH_FAILURE_RECORD_TIMEOUT_S,
     _logger,
-    _managed_launch_tasks,
-    _unbound_managed_launch_tasks,
     get_server_runner_router,
     set_server_runner_router,
 )
@@ -161,6 +160,7 @@ from omnigent.server.routes._sessions.helpers import (
     _same_provider_family,
     _session_status_cache,
     _set_read_state,
+    _start_managed_launch_task,
     _surface_model_change_forward_failure,
     _title_content_from_item,
     _validate_terminal_launch_args,
@@ -207,6 +207,7 @@ from omnigent.server.schemas import (
     SessionResponse,
     UpdateSessionRequest,
 )
+from omnigent.server.session_orchestration import require_orchestration_source
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.comment_store import CommentStore
@@ -636,45 +637,13 @@ def register_core_routes(
             agent_id=agent_id,
             host_id=requested_host_id,
         )
-        startup = getattr(request.app.state, "startup_inputs", None)
-
-        async def record_unbound_launch_failure() -> None:
-            # Shutdown gave up on the launch. Bound, the host's replica finishes
-            # it; unbound, no replica can, so fail the saved inputs rather than
-            # leave them pending with nothing to deliver them.
-            assert startup is not None
-            conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
-            if conv is not None and conv.host_id is None:
-                await startup.record_launch_failure(
-                    session_id, "the server shut down before the sandbox finished launching"
-                )
-
-        async def launch_and_record_failure() -> None:
-            try:
-                await launch
-            except asyncio.CancelledError:
-                if startup is not None:
-                    with contextlib.suppress(Exception):
-                        await asyncio.wait_for(
-                            record_unbound_launch_failure(),
-                            timeout=_MANAGED_LAUNCH_FAILURE_RECORD_TIMEOUT_S,
-                        )
-                raise
-            except Exception as exc:
-                if startup is not None:
-                    await startup.record_launch_failure(
-                        session_id, f"managed sandbox failed to launch: {exc}"
-                    )
-                raise
-            failed = managed_launches.get(session_id)
-            if startup is not None and failed is not None and failed.error is not None:
-                await startup.record_launch_failure(session_id, failed.error)
-
-        launch_task = asyncio.create_task(launch_and_record_failure())
-        _managed_launch_tasks.add(launch_task)
-        _unbound_managed_launch_tasks.add(launch_task)
-        launch_task.add_done_callback(_managed_launch_tasks.discard)
-        launch_task.add_done_callback(_unbound_managed_launch_tasks.discard)
+        _start_managed_launch_task(
+            session_id,
+            launch,
+            conversation_store=conversation_store,
+            tracker=managed_launches,
+            startup=getattr(request.app.state, "startup_inputs", None),
+        )
 
     async def _check_requested_host_id(
         request: Request, requested_host_id: str, user_id: str | None
@@ -849,7 +818,7 @@ def register_core_routes(
             launch_result = await asyncio.wait_for(future, timeout=launch_timeout_s)
         except ConnectionError as exc:
             launch_result = {"status": "failed", "error": str(exc)}
-        except asyncio.TimeoutError:
+        except TimeoutError:
             launch_result = {
                 "status": "failed",
                 "error": (
@@ -884,6 +853,23 @@ def register_core_routes(
                 ),
             )
         return runner_id, launch_failed
+
+    @router.post(
+        "/sessions/orchestrated",
+        status_code=201,
+        response_model=None,
+        include_in_schema=False,
+        dependencies=[Depends(require_json_content_type), Depends(require_trusted_origin)],
+    )
+    async def create_orchestrated_session(
+        request: Request,
+    ) -> SessionResponse | CreatedSessionResponse:
+        """Use a distinct route so unsupported servers reject before creation."""
+        if not request.headers.get(ORCHESTRATION_SOURCE_HEADER):
+            raise OmnigentError(
+                "Independent sessions require an orchestration source", code=ErrorCode.FORBIDDEN
+            )
+        return await create_session(request)
 
     @router.post(
         "/sessions",
@@ -925,6 +911,13 @@ def register_core_routes(
         """
         user_id = _require_user(request, auth_provider)
         content_type = request.headers.get("content-type", "").split(";", 1)[0].lower()
+        if (
+            content_type == "multipart/form-data"
+            and ORCHESTRATION_SOURCE_HEADER in request.headers
+        ):
+            raise OmnigentError(
+                "Independent sessions require agent_id", code=ErrorCode.INVALID_INPUT
+            )
         form = await request.form(max_files=21) if content_type == "multipart/form-data" else None
         if form is not None and (form.get("bundle") is not None or "initial_files" not in form):
             result = await _create_bundled_session_from_multipart(request, user_id)
@@ -971,11 +964,84 @@ def register_core_routes(
             # message survives in each entry's `msg`.
             raise HTTPException(status_code=422, detail=exc.errors(include_context=False)) from exc
 
+        orchestration_source = request.headers.get(ORCHESTRATION_SOURCE_HEADER)
+        if orchestration_source is not None:
+            source = await asyncio.to_thread(
+                require_orchestration_source,
+                request,
+                user_id,
+                conversation_store,
+                permission_store,
+            )
+            if body.parent_session_id is not None:
+                raise OmnigentError(
+                    "Orchestration creates independent sessions", code=ErrorCode.INVALID_INPUT
+                )
+            if body.host_type == "managed":
+                deployment = getattr(request.app.state, "sandbox_config", None)
+                if deployment is None or not deployment.managed_launch_supported:
+                    raise OmnigentError(
+                        "Managed sandboxes are unavailable; configure a sandbox provider "
+                        "or use placement='same_host'",
+                        code=ErrorCode.INVALID_INPUT,
+                    )
+
         # Checked before the session exists so a rejected create leaves nothing
         # behind.
         await _check_initial_input(request, body.initial_input)
         if body.requested_host_id is not None:
             await _check_requested_host_id(request, body.requested_host_id, user_id)
+        if orchestration_source is not None:
+            # Recheck source permissions and placement after asynchronous validation.
+            source = await asyncio.to_thread(
+                require_orchestration_source,
+                request,
+                user_id,
+                conversation_store,
+                permission_store,
+            )
+            if body.initial_items:
+                raise OmnigentError(
+                    "Use initial_input for the first task", code=ErrorCode.INVALID_INPUT
+                )
+            if body.initial_input is not None:
+                from omnigent.server.session_orchestration import orchestration_message
+
+                first = body.initial_input
+                content = first.data.get("content")
+                if (
+                    first.type != "message"
+                    or first.data.get("role") != "user"
+                    or not isinstance(content, list)
+                    or len(content) != 1
+                    or not isinstance(content[0], dict)
+                    or content[0].get("type") != "input_text"
+                ):
+                    raise OmnigentError(
+                        "The first task must be text", code=ErrorCode.INVALID_INPUT
+                    )
+                body.initial_input = orchestration_message(source.id, content[0].get("text"))
+            if body.host_type == "external":
+                placement = await asyncio.to_thread(
+                    routing_host_session, source, conversation_store
+                )
+                if placement is None or not placement.host_id or not placement.workspace:
+                    raise OmnigentError(
+                        "Sender needs a connected host and workspace", code=ErrorCode.INVALID_INPUT
+                    )
+                try:
+                    body = type(body).model_validate(
+                        {
+                            **body.model_dump(exclude_unset=True),
+                            "host_id": placement.host_id,
+                            "workspace": placement.workspace,
+                        }
+                    )
+                except ValidationError as exc:
+                    raise OmnigentError(
+                        "Sender host/workspace is invalid for independent creation",
+                        code=ErrorCode.INVALID_INPUT,
+                    ) from exc
         creation_metadata(parent_session_id=body.parent_session_id, host_type=body.host_type)
         resp, conv = await _create_session_from_existing_agent(
             conversation_store,
@@ -1140,7 +1206,7 @@ def register_core_routes(
         # Default-public grant only once every launch step has been accepted, so a
         # rejected request never leaves a public session behind. Sub-agent
         # children follow their parent's grants instead.
-        if user_id is not None and body.parent_session_id is None:
+        if user_id is not None and body.parent_session_id is None and orchestration_source is None:
             await _grant_default_public(
                 request.app.state,
                 permission_store,
@@ -1643,6 +1709,7 @@ def register_core_routes(
         order: str = Query(default="desc", pattern="^(asc|desc)$"),
         sort_by: str = Query(default="created_at", pattern="^(created_at|updated_at)$"),
         search_query: str | None = Query(default=None),
+        search_scope: str = Query(default="all", pattern="^(all|title|content)$"),
         include_archived: bool = Query(default=False),
         kind: str = Query(default="default", pattern="^(default|sub_agent|any)$"),
         project: str | None = Query(default=None),
@@ -1679,6 +1746,12 @@ def register_core_routes(
             matches if its title contains the query or any of
             its conversation items' text does. Powers the
             sidebar's session search.
+        :param search_scope: Which ``search_query`` matches to return.
+            ``"all"`` (default) returns title or content matches.
+            ``"title"`` returns only title matches. ``"content"``
+            returns content matches whose title does not match;
+            ``title`` and ``content`` never overlap. Ignored without
+            a ``search_query``.
         :param include_archived: When ``False`` (default), archived
             sessions are omitted. When ``True``, archived sessions
             are returned alongside active ones (the sidebar groups
@@ -1782,6 +1855,7 @@ def register_core_routes(
             order=order,
             sort_by=sort_by,
             search_query=normalized_query,
+            search_scope=search_scope,
             include_archived=include_archived_param,
             archived_only=archived_only_param,
             project=project,
@@ -2923,18 +2997,15 @@ def register_core_routes(
                 )
                 parent_initialized = False
                 if _runner_client is not None and conv is not None and conv.agent_id is not None:
-                    # The versioned payload's snapshot carries harness_override,
-                    # so a rebind after a cross-harness create initializes the
-                    # override harness — a bare body left the runner resolving
-                    # from the spec, and the recovery turn that executes seeded
-                    # initial_items ran on the spec's harness. Recovery stays
-                    # enabled: on rebind it is what runs the pending kickoff.
+                    # The versioned snapshot keeps harness_override on rebind.
+                    # Recovery runs the pending kickoff, except a side chat's copied turn.
                     try:
                         runner_init_resp = await _runner_client.post(
                             "/v1/sessions",
                             json=build_runner_session_init_payload(
                                 conv,
                                 server_version=VERSION,
+                                suppress_recovery_turn=conv.labels.get(SIDE_CHAT_LABEL_KEY) == "1",
                             ),
                             timeout=10.0,
                         )
