@@ -144,29 +144,28 @@ class ClaudeNativeExecutor(Executor):
         wanted_model: str | None,
         wanted_model_arg: str | None,
     ) -> None:
-        """Apply a routed ``/model`` switch, then inject the message, in one lock hold."""
-        async with self._inject_lock:
-            context_path = self._bridge_dir / CLAUDE_FRAMEWORK_CONTEXT_FILE
-            context_path.unlink(missing_ok=True)
-            if wanted_model_arg is not None:
-                # Accepted trade-off: ``/model <id>`` also saves the
-                # pick as the person's global default for new Claude
-                # sessions. Runs to completion before the message
-                # inject below (same lock), so its confirm Enter can't
-                # race the message.
-                await self._inject(
-                    partial(
-                        inject_slash_command,
-                        self._bridge_dir,
-                        command=f"/model {wanted_model_arg}",
-                        auto_confirm=True,
-                        confirm_hint=SWITCH_MODEL_DIALOG_HINT,
-                    )
+        """Apply a routed ``/model`` switch, then inject the message; caller holds the lock."""
+        context_path = self._bridge_dir / CLAUDE_FRAMEWORK_CONTEXT_FILE
+        context_path.unlink(missing_ok=True)
+        if wanted_model_arg is not None:
+            # Accepted trade-off: ``/model <id>`` also saves the
+            # pick as the person's global default for new Claude
+            # sessions. Runs to completion before the message
+            # inject below (same lock), so its confirm Enter can't
+            # race the message.
+            await self._inject(
+                partial(
+                    inject_slash_command,
+                    self._bridge_dir,
+                    command=f"/model {wanted_model_arg}",
+                    auto_confirm=True,
+                    confirm_hint=SWITCH_MODEL_DIALOG_HINT,
                 )
-                # Track the routed id, not the alias: the next turn's
-                # comparison is against what routing asked for.
-                self._applied_model = wanted_model
-            await self._inject_prompt(text, notices)
+            )
+            # Track the routed id, not the alias: the next turn's
+            # comparison is against what routing asked for.
+            self._applied_model = wanted_model
+        await self._inject_prompt(text, notices)
 
     async def _wait_for_answer(self, deadline: float) -> bool:
         """
@@ -301,29 +300,12 @@ class ClaudeNativeExecutor(Executor):
                     try:
                         async with self._inject_lock:
                             try:
-                                context_path = self._bridge_dir / CLAUDE_FRAMEWORK_CONTEXT_FILE
-                                context_path.unlink(missing_ok=True)
-                                if wanted_model_arg is not None:
-                                    # ``/model <id>`` also saves the pick as the person's
-                                    # global default (accepted trade-off). It runs under the
-                                    # same lock, so its confirm Enter can't race the message.
-                                    await self._inject(
-                                        partial(
-                                            inject_slash_command,
-                                            self._bridge_dir,
-                                            command=f"/model {wanted_model_arg}",
-                                            auto_confirm=True,
-                                            confirm_hint=SWITCH_MODEL_DIALOG_HINT,
-                                        )
-                                    )
-                                    # Track the routed id, not the alias: the next turn's
-                                    # comparison is against what routing asked for.
-                                    self._applied_model = wanted_model
-                                await self._inject_prompt(text, notices)
+                                await self._inject_turn(
+                                    text, notices, wanted_model, wanted_model_arg
+                                )
                             except (ClaudePromptTimeout, ClaudeTerminalExited):
-                                # Reap while still holding the lock: a failed pane may
-                                # yet come alive, and queued steering must not land in it
-                                # before the kill finishes.
+                                # Reap under the lock: a failed pane may yet come alive,
+                                # and queued steering must not land in it mid-kill.
                                 cleanup_error = await self._reap_failed_turn()
                                 raise
                         break
@@ -435,9 +417,10 @@ class ClaudeNativeExecutor(Executor):
             raise
 
     async def _reap_failed_turn(self) -> str | None:
-        """Kill the failed turn's pane off-loop, finishing the kill before any cancel propagates.
+        """Kill the failed turn's pane off the loop; a cancel waits for the kill to finish.
 
-        Returns a cleanup error, or None when the pane was killed or already gone."""
+        :returns: A cleanup error, or ``None`` when the pane was killed or already gone.
+        """
         # Created outside cancellable_injection, so the delivery's cancellation
         # flag cannot reject the kill's own tmux command.
         worker = asyncio.create_task(asyncio.to_thread(self._kill_failed_session))
@@ -456,9 +439,7 @@ class ClaudeNativeExecutor(Executor):
         return worker.result()
 
     def _kill_failed_session(self) -> str | None:
-        """Blocking half of :meth:`_reap_failed_turn`; runs in a worker thread.
-
-        tmux and OS failures come back as text, so cleanup never replaces the turn's own error."""
+        """Blocking half of :meth:`_reap_failed_turn`; failures come back as text, not raised."""
         try:
             kill_session(self._bridge_dir, timeout_s=1.0)
         except TmuxSessionNotAdvertised:

@@ -2207,65 +2207,6 @@ async def test_prompt_timeout_reap_keeps_event_loop_responsive(
 
 
 @pytest.mark.asyncio
-async def test_cancel_during_timeout_cleanup_completes_kill_before_unlock(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Cancelling a turn while its timeout cleanup waits on tmux finishes the kill
-    before the injection lock releases and the cancellation propagates, message intact."""
-    kill_started = threading.Event()
-    release_kill = threading.Event()
-    killed = threading.Event()
-
-    def fail_inject(bridge_dir_arg: Path, *, content: str, timeout_s: float = 30.0) -> None:
-        del bridge_dir_arg, content, timeout_s
-        raise ClaudePromptTimeout("terminal did not become ready")
-
-    def slow_kill(bridge_dir_arg: Path, *, timeout_s: float) -> None:
-        del bridge_dir_arg, timeout_s
-        kill_started.set()
-        assert release_kill.wait(10), "test did not release the in-flight kill"
-        killed.set()
-
-    monkeypatch.delenv(REQUEST_SESSION_ID_ENV_VAR, raising=False)
-    monkeypatch.setattr(claude_native_executor, "inject_user_message", fail_inject)
-    monkeypatch.setattr(claude_native_executor, "kill_session", slow_kill)
-    executor = ClaudeNativeExecutor(tmp_path / "bridge")
-
-    async def deliver() -> None:
-        async for _event in executor.run_turn(
-            messages=[{"role": "user", "content": "hi"}],
-            tools=[],
-            system_prompt="",
-        ):
-            raise AssertionError("cancelled turn emitted an event")
-
-    task = asyncio.create_task(deliver())
-    try:
-        assert await asyncio.to_thread(kill_started.wait, 10), "timeout cleanup never started"
-        task.cancel("stop requested")
-        await asyncio.sleep(0.05)
-        assert not task.done(), "cancellation mid-kill abandoned the cleanup"
-        assert executor._inject_lock.locked(), (
-            "injection lock released while the kill was in flight"
-        )
-        release_kill.set()
-        await asyncio.wait({task}, timeout=10)
-        assert task.done(), "turn did not finish after the kill was released"
-        with pytest.raises(asyncio.CancelledError) as cancelled:
-            task.result()
-        assert cancelled.value.args == ("stop requested",)
-        assert killed.is_set()
-        assert not executor._inject_lock.locked()
-    finally:
-        release_kill.set()
-        if not task.done():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-
-
-@pytest.mark.asyncio
 async def test_repeated_cancellation_mid_reap_completes_kill_before_unlock(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
