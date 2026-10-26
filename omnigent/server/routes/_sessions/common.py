@@ -510,9 +510,8 @@ _NATIVE_PERMISSION_HOOK_TIMEOUT_S = 86400.0
 _PI_EXTENSION_UI_HOOK_TIMEOUT_S = 86400.0
 
 
-# Outlive the slowest harness re-park: the claude-native hook re-POSTs a silently
-# dead poll only after its 330s read cap, a backoff and connect, plus a reconnect
-# if its token must be re-minted.
+# Outlive the claude-native hook's re-POST after a silently dead poll: its 330s read
+# cap, a backoff, and two connects when its token is re-minted (mint time unbounded).
 _HARNESS_PRE_RESOLVED_ELICITATION_TTL_S = 420.0
 
 
