@@ -77,7 +77,12 @@ from omnigent.runtime import (
 )
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.harnesses.process_manager import HarnessProcessManager
-from omnigent.server import managed_host_keepalive, session_live_state, shutdown_state
+from omnigent.server import (
+    managed_host_keepalive,
+    session_live_state,
+    session_pull_requests,
+    shutdown_state,
+)
 from omnigent.server.auth import (
     AuthProvider,
     SharingMode,
@@ -234,6 +239,9 @@ class ServerInfoResponse(BaseModel):
     agent_detail: bool = False
     # Owner configuration reads and conditional PATCH updates.
     agent_config_edit: bool = False
+    # GET/DELETE /v1/sessions/{id}/pull-requests and SessionListItem.pull_request;
+    # absent on older servers, which clients treat as unsupported.
+    session_pull_requests: bool = False
     # Absent on older servers, which clients treat as the default extensions.
     filesystem_attachments: FilesystemAttachmentsInfo | None = None
     branding: BrandingInfo
@@ -3352,6 +3360,8 @@ def create_app(
                 "agent_detail": True,
                 "agent_config_edit": agent_store.supports_config_edit
                 and artifact_store is not None,
+                "session_pull_requests": session_pull_requests.open_store(conversation_store)
+                is not None,
                 "filesystem_attachments": {
                     "extensions": sorted(filesystem_attachment_policy.extensions),
                     "all_types": filesystem_attachment_policy.all_types,
