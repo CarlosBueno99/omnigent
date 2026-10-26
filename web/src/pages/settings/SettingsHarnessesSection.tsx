@@ -50,6 +50,8 @@ interface HarnessEntry {
   agentName: string;
 }
 
+const CLAUDE_HARNESSES = new Set(["claude", "claude-native", "native-claude"]);
+
 // One-line descriptions per harness, keyed by native slug. The server catalog
 // (/v1/harnesses) carries no descriptions, so these live here; the rest of each
 // entry (name, icon, order) comes from NATIVE_CODING_AGENTS.
@@ -726,7 +728,7 @@ function missingCredentialCopy(entry: HarnessEntry, host: Host): string {
   const family = harnessCredentialFamily(entry.harness);
   const credential = isCodexHarness(entry.harness)
     ? "ChatGPT account or API key"
-    : family === "anthropic"
+    : CLAUDE_HARNESSES.has(entry.harness)
       ? "Claude subscription or API key"
       : family !== null
         ? "API key or gateway credential"

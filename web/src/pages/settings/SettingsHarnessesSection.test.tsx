@@ -583,6 +583,18 @@ describe("Harness details", () => {
     expect(screen.getByTestId("fix-dialog")).toHaveAttribute("data-mode", "reconfigure");
   });
 
+  it("uses generic credential copy for Pi needs-auth", () => {
+    hosts = [{ ...ONLINE, configured_harnesses: { "pi-native": "needs-auth" } }];
+    renderHarnesses("pi-native");
+
+    expect(
+      screen.getByText(
+        "No API key or gateway credential on my-laptop, so new sessions can’t use Pi.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/No Claude subscription or API key/)).toBeNull();
+  });
+
   it("never calls a missing binary reconfiguration", () => {
     hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": "binary-missing" } }];
     renderHarnesses("codex-native");
