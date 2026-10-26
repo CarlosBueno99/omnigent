@@ -6122,7 +6122,7 @@ async def _apply_codex_launch_plan_mode(
     """
     Switch a launching session's Codex thread into Plan mode.
 
-    Reports Default if the switch fails, so the UI never shows Plan while Codex runs Default.
+    Reports Default if the switch fails; a failed report is only logged.
 
     :param thread_id: Loaded Codex thread id, e.g. ``"019e96aa-..."``.
     :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.

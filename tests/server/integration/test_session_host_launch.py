@@ -478,24 +478,30 @@ async def test_inline_launch_binds_runner_and_returns_host(
 
 
 @pytest.mark.parametrize(
-    ("capabilities", "mode", "expected_status"),
+    ("harness", "capabilities", "mode", "expected_status"),
     [
-        pytest.param([], "plan", 409, id="old-host-plan"),
-        pytest.param([CAP_CODEX_PLAN_AT_LAUNCH], "plan", 201, id="plan-capable-host"),
-        pytest.param([], "default", 201, id="old-host-default"),
+        pytest.param("codex-native", [], "plan", 409, id="old-host-plan"),
+        pytest.param(
+            "codex-native", [CAP_CODEX_PLAN_AT_LAUNCH], "plan", 201, id="plan-capable-host"
+        ),
+        pytest.param("codex-native", [], "default", 201, id="old-host-default"),
+        pytest.param("claude-native", [], "plan", 201, id="old-host-plan-not-codex"),
     ],
 )
 async def test_plan_mode_create_refuses_a_host_that_would_start_codex_in_default(
     client: httpx.AsyncClient,
     app: FastAPI,
     db_uri: str,
+    harness: str,
     capabilities: list[str],
     mode: str,
     expected_status: int,
 ) -> None:
     """An older host would run Codex in Default under a Plan-labelled session."""
     comm = await _connect_host(app, capabilities=capabilities)
-    agent = await create_test_agent(client)
+    agent = await create_test_agent(
+        client, executor={"type": "omnigent", "config": {"harness": harness}}
+    )
     store = SqlAlchemyConversationStore(db_uri)
     existing_ids = {conv.id for conv in store.list_conversations().data}
 
@@ -512,7 +518,8 @@ async def test_plan_mode_create_refuses_a_host_that_would_start_codex_in_default
     if expected_status == 201:
         await responder
     else:
-        launched, _ = await asyncio.wait({responder}, timeout=0.2)
+        # The create answers only after any launch round-trip, which would finish the responder.
+        launched = responder.done()
         responder.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await responder

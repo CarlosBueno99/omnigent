@@ -61,7 +61,7 @@ and steers messages while the agent is busy.
   armed on the new-session composer before the first prompt (a "Plan mode"
   badge), and the session starts in Codex's own Plan mode. States: armed,
   cleared by an agent switch, unavailable for Smart Routing and unsaved custom
-  agents, and a host too old to start Codex in Plan mode (create refused).
+  agents, and a connected host too old to start Codex in Plan mode (create refused).
 - `managed-mcp-picker`: choose administrator-configured services before launch
   on a host or sandbox. States: loading, empty, error/retry, selected, unavailable,
   remembered selection, explicitly none, restored connection needing sign-in.
@@ -402,7 +402,8 @@ Other connection providers alone do not enable the managed MCP picker.
   `web/src/lib/permissionModeCycle.test.ts`.
   `web/src/shell/NewChatDialog.test.tsx` checks that Shift+Tab on the landing
   page leaves the launch mode unchanged and does not prevent focus traversal.
-- **`plan-mode`:** with a real Codex CLI and a mock model,
+- **`plan-mode`:** with a real Codex CLI and a mock model, the in-session toggle
+  reaching Codex as its Plan Mode preset is
   `tests/e2e_ui/chat/test_codex_plan_mode_instructions.py::test_codex_plan_mode_toggle_sends_plan_mode_instructions`.
   Landing-page arming is in `web/src/shell/NewChatDialog.test.tsx`; the older-host
   refusal is in `tests/server/integration/test_session_host_launch.py` and

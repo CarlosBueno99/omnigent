@@ -11593,11 +11593,6 @@ async def _create_session_from_existing_agent(
         validate_create_harness_readiness,
     )
 
-    require_codex_plan_launch_support(
-        host_id=body.host_id,
-        labels=body.labels,
-        host_registry=getattr(request.app.state, "host_registry", None),
-    )
     require_registry_mcp_runtime(
         selected_registry_services,
         host_id=body.host_id,
@@ -11612,6 +11607,12 @@ async def _create_session_from_existing_agent(
         else await asyncio.to_thread(
             _create_resolved_harness, agent, harness_override, agent_cache
         )
+    )
+    require_codex_plan_launch_support(
+        harness=selected_harness,
+        host_id=body.host_id,
+        labels=body.labels,
+        host_registry=getattr(request.app.state, "host_registry", None),
     )
     await validate_create_harness_readiness(
         harness=selected_harness,

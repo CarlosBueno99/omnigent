@@ -213,15 +213,17 @@ async def _multipart_create(
     metadata: dict[str, object],
     *,
     agent_name: str = "bundle-host-agent",
+    executor: dict[str, object] | None = None,
 ) -> httpx.Response:
     """POST a multipart create with the given metadata part.
 
     :param client: The test HTTP client.
     :param metadata: The ``metadata`` JSON part.
     :param agent_name: Name baked into the uploaded bundle.
+    :param executor: Executor block for the bundle, or ``None`` for the default.
     :returns: The raw HTTP response.
     """
-    bundle = build_agent_bundle(name=agent_name)
+    bundle = build_agent_bundle(name=agent_name, executor=executor)
     return await client.post(
         "/v1/sessions",
         data={"metadata": json.dumps(metadata)},
@@ -328,6 +330,7 @@ async def test_multipart_plan_mode_create_refuses_a_host_that_would_start_codex_
             "labels": {"omnigent.codex_native.collaboration_mode": "plan"},
         },
         agent_name="bundle-host-plan-agent",
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
     )
 
     assert resp.status_code == 409, resp.text

@@ -1220,6 +1220,7 @@ def register_core_routes(
         # (mirroring the JSON path — a bad workspace never produces a
         # session) and persist the canonical path the host returned.
         if parsed_metadata.host_id is not None:
+            from omnigent.models.model_catalog import spec_harness
             from omnigent.server.routes._session_create_validation import (
                 validate_uploaded_bundle_host_workspace,
             )
@@ -1238,6 +1239,7 @@ def register_core_routes(
             )
             parsed_metadata = parsed_metadata.model_copy(update={"workspace": canonical_workspace})
             require_codex_plan_launch_support(
+                harness=spec_harness(spec),
                 host_id=parsed_metadata.host_id,
                 labels=parsed_metadata.labels,
                 host_registry=getattr(request.app.state, "host_registry", None),

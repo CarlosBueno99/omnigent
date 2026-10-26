@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from omnigent.entities import Conversation
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.harness_aliases import native_terminal_name
 from omnigent.harness_availability import harness_launch_availability
 from omnigent.host.frames import CAP_CODEX_PLAN_AT_LAUNCH
 from omnigent.stores import ConversationStore
@@ -75,9 +76,13 @@ async def validate_create_harness_readiness(
 
 
 def require_codex_plan_launch_support(
-    *, host_id: str | None, labels: Mapping[str, str], host_registry: HostRegistry | None
+    *,
+    harness: str | None,
+    host_id: str | None,
+    labels: Mapping[str, str],
+    host_registry: HostRegistry | None,
 ) -> None:
-    """Refuse a Plan-mode create on a connected host whose runner would start in Default.
+    """Refuse a Plan-mode Codex create on a connected host whose runner would start in Default.
 
     Call only after host ownership is authorized so the 409 never reveals another
     user's host build.
@@ -85,6 +90,7 @@ def require_codex_plan_launch_support(
     if (
         host_id is None
         or host_registry is None
+        or native_terminal_name(harness) != "codex"
         or labels.get(CODEX_NATIVE_COLLABORATION_MODE_LABEL_KEY) != "plan"
     ):
         return

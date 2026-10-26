@@ -4206,6 +4206,10 @@ export function NewChatLandingScreen() {
     !smartRoutingHarnessSelected &&
     selectedNativeHarness === "codex-native" &&
     effectiveAgentId !== PENDING_AGENT_ID;
+  const toggleCodexPlanMode = codexPlanModeSelectable
+    ? () => setCodexPlanMode((armed) => !armed)
+    : undefined;
+  const codexPlanToggleLabel = codexPlanMode ? "Exit Plan mode" : "Enter Plan mode";
   const selectDirectMode = (mode: string) => {
     if (!selectedNativeHarness) return;
     if (supportsPermissionMode) setPermissionMode(mode);
@@ -6990,22 +6994,14 @@ export function NewChatLandingScreen() {
                         onPlan={
                           directModeOptions.some((mode) => mode.value === "plan")
                             ? () => selectDirectMode("plan")
-                            : codexPlanModeSelectable
-                              ? () => setCodexPlanMode((armed) => !armed)
-                              : undefined
+                            : toggleCodexPlanMode
                         }
                         planActive={
                           (supportsPermissionMode && permissionMode === "plan") ||
                           (supportsCursorMode && cursorExecMode === "plan") ||
                           (codexPlanModeSelectable && codexPlanMode)
                         }
-                        planLabel={
-                          codexPlanModeSelectable
-                            ? codexPlanMode
-                              ? "Exit Plan mode"
-                              : "Enter Plan mode"
-                            : undefined
-                        }
+                        planLabel={codexPlanModeSelectable ? codexPlanToggleLabel : undefined}
                         planUnavailableReason={
                           selectedNativeHarness === "codex-native" &&
                           effectiveAgentId === PENDING_AGENT_ID

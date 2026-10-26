@@ -2825,10 +2825,11 @@ async def test_create_session_rejects_other_users_host(
     # user can bind it. Session-scoped agents are owned by one session
     # and would block Bob at the agent-access check before the host
     # check (see designs/BUILTIN_AGENTS.md); creating a template here
-    # isolates the host-owner check.
+    # isolates the host-owner check. It and the bundle run Codex, so a
+    # Plan-mode check placed before the owner check would answer 409.
     SqlAlchemyAgentStore(db_uri).create(
         "f2b40a7cc3eaec4ee8cbb151e1021c75",
-        "builtin-xuser-agent",
+        "codex-native-ui",
         "f2b40a7cc3eaec4ee8cbb151e1021c75/bundle",
     )
 
@@ -2845,7 +2846,10 @@ async def test_create_session_rejects_other_users_host(
             files={
                 "bundle": (
                     "agent.tar.gz",
-                    build_agent_bundle(name="bob-xuser-bundle"),
+                    build_agent_bundle(
+                        name="bob-xuser-bundle",
+                        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+                    ),
                     "application/gzip",
                 )
             },

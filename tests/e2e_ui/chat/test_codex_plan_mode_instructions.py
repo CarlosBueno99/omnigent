@@ -89,3 +89,10 @@ def test_codex_plan_mode_toggle_sends_plan_mode_instructions(
         f"Plan-mode turn reached the model without Codex Plan Mode instructions: "
         f"{collaboration_messages!r}"
     )
+    developer_text = json.dumps(
+        [item for item in plan_requests[0].get("input") or [] if item.get("role") == "developer"]
+    )
+    # The wrapper agent's prompt, which Codex reads from its session config.toml.
+    assert "Codex is running in the session terminal" in developer_text, (
+        "Plan-mode turn dropped the agent's own instructions"
+    )
