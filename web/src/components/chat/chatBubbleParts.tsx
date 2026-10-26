@@ -15,6 +15,7 @@ import {
 import {
   ArrowUpIcon,
   CheckIcon,
+  ClockIcon,
   CopyIcon,
   FileTextIcon,
   FolderIcon,
@@ -93,7 +94,7 @@ import {
 // Matches both wordings the native executors emit: "[Attached: <path>]"
 // (claude/pi/cursor) and "[Attached file: <path>]" (codex). Capturing group
 // is the path. Global so all markers in a message are found / stripped.
-const ATTACHED_RE = /\[Attached(?: file)?:\s*([^\]]*)\]\s*/g;
+const ATTACHED_RE = /\[Attached(?: file)?:\s*([^\]]*)\][ \t]*(?:\r?\n)*/g;
 
 const COLLAPSE_THRESHOLD = 12000;
 
@@ -112,7 +113,7 @@ export function extractUserText(content: MessageContentBlock[]): string {
     .map((c) => c.text)
     .join("")
     .replace(ATTACHED_RE, "")
-    .trim();
+    .trimEnd();
 }
 
 // An absolute filesystem path in any form a native executor might materialize
@@ -218,6 +219,7 @@ export function buildPendingBubbles(
       // No server item id yet; tempId keeps React keys stable until promotion.
       itemId: p.tempId,
       pending: true,
+      ...(p.sentMidTurn ? { awaitingAgent: true } : {}),
       content: p.content,
       ...(author !== null ? { createdBy: author } : {}),
       // Stamped once at send time; absent for snapshot-replayed entries,
@@ -908,6 +910,16 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
             )}
           </MessageContent>
         </div>
+        {/* Always visible: a mid-turn message can wait minutes behind a long tool call. */}
+        {bubble.pending && bubble.awaitingAgent && (
+          <div
+            className="flex items-center gap-1 pt-1 text-[11px] leading-4 text-muted-foreground"
+            data-testid="message-awaiting-agent"
+          >
+            <ClockIcon size={12} aria-hidden />
+            The agent will read this after its current step
+          </div>
+        )}
         {/* 40%-visible on touch, hover/focus-reveal on desktop. */}
         <div className="flex items-center justify-end gap-3 py-1 opacity-40 transition-opacity md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100">
           {ts && (
@@ -1065,6 +1077,10 @@ function AssistantBubble({
   // A bubble carrying an error but no prose stands alone as a thread-level
   // element — the hover footer belongs to assistant text, not to the error.
   const errorOnly = hasError && !markdownText;
+  // A bubble whose items are all errors (e.g. an undelivered-message notice) is a
+  // thread-level card, not an assistant reply, so it takes the "error" role; a
+  // failed turn that still produced tool or reasoning output keeps the assistant role.
+  const errorNotice = hasError && bubble.items.every((it) => it.kind === "error");
   const spansFullColumn = isWide || hasError;
 
   return (
@@ -1072,7 +1088,7 @@ function AssistantBubble({
       <Message
         from="assistant"
         data-testid="message-bubble"
-        data-role="assistant"
+        data-role={errorNotice ? "error" : "assistant"}
         data-response-stable-id={bubble.stableId}
         data-message-id={bubble.responseId}
         className={spansFullColumn ? "max-w-full" : "max-w-[var(--chat-prose-width)]"}
@@ -1668,7 +1684,7 @@ export function LatestTurnSpacer({
   // Bounded rAF retries for capturing the anchor when committed blocks exist but
   // their rows haven't mounted yet (windowed transcript, published a frame
   // before the virtualizer fills its window). A resize we could observe isn't
-  // guaranteed — the wrapper height is fixed to the estimate — so we drive the
+  // guaranteed — the wrapper's height tracks the estimate — so we drive the
   // retry ourselves rather than wait for one. When the budget runs out (e.g. a
   // tool-only trailing turn that never has an anchor) capture settles to `null`.
   const captureFrameRef = useRef(0);
