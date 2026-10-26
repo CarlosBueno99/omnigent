@@ -77,6 +77,7 @@ from omnigent.harnesses.claude_native.submit_verification import (
     SubmitBoundary,
     capture_submit_boundary,
     has_matching_hook_refusal,
+    queued_prompts,
 )
 from omnigent.harnesses.diagnostics import (
     detect_sign_in_prompt,
@@ -4439,13 +4440,7 @@ def _paste_and_submit(
             "Claude is waiting for an explicit answer; message not sent."
         )
     delivery_diagnostics.set_stage("submitting")
-    transcript_path = read_transcript_path(bridge_dir)
-    native_session_id = read_claude_session_id(bridge_dir)
-    submit_boundary = (
-        capture_submit_boundary(transcript_path, native_session_id)
-        if transcript_path is not None and native_session_id is not None
-        else None
-    )
+    submit_boundary = capture_transcript_boundary(bridge_dir)
     _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Enter")
     delivery_diagnostics.record_details(submit_sent=True)
     if not draft_seen:
@@ -4612,17 +4607,22 @@ def _fresh_matching_hook_block(
     bridge_dir: Path, boundary: SubmitBoundary, submitted_text: str
 ) -> bool:
     """A matching refusal prevents retries; it never establishes input ownership."""
-    if read_claude_session_id(bridge_dir) != boundary.native_session_id:
-        return False
-    path = read_transcript_path(bridge_dir)
-    try:
-        if path is None or path.resolve() != boundary.path:
-            return False
-    except (OSError, ValueError, RuntimeError):
+    if not _boundary_is_current(bridge_dir, boundary):
         return False
     return has_matching_hook_refusal(
         boundary, submitted_text, normalize_prompt=_unwrap_pasted_content_markers
     )
+
+
+def _boundary_is_current(bridge_dir: Path, boundary: SubmitBoundary) -> bool:
+    """Whether hooks still report the session and transcript *boundary* was pinned to."""
+    if read_claude_session_id(bridge_dir) != boundary.native_session_id:
+        return False
+    path = read_transcript_path(bridge_dir)
+    try:
+        return path is not None and path.resolve() == boundary.path
+    except (OSError, ValueError, RuntimeError):
+        return False
 
 
 def _count_unknown_command_rejections(pane: str, needle: str) -> int:
@@ -5829,6 +5829,39 @@ def has_pending_user_prompt(bridge_dir: Path) -> bool:
     if not isinstance(socket_path, str) or not isinstance(target, str):
         return False
     return _user_prompt_visible(_capture_pane(socket_path, target))
+
+
+def capture_transcript_boundary(bridge_dir: Path) -> SubmitBoundary | None:
+    """Pin the end of the session's native transcript, or ``None`` before hooks name it."""
+    transcript_path = read_transcript_path(bridge_dir)
+    native_session_id = read_claude_session_id(bridge_dir)
+    if transcript_path is None or native_session_id is None:
+        return None
+    return capture_submit_boundary(transcript_path, native_session_id)
+
+
+def unstarted_queued_prompts(bridge_dir: Path, boundary: SubmitBoundary) -> list[str | None]:
+    """
+    List prompts queued in Claude Code after *boundary* that it has not taken yet.
+
+    Empty once the session or transcript changed, or the pane's process exited:
+    the queue lives only in that process.
+
+    :param bridge_dir: The session's native bridge directory.
+    :param boundary: Transcript boundary from :func:`capture_transcript_boundary`.
+    :returns: Queued prompt texts, oldest first; ``None`` for non-text entries.
+    """
+    if not _boundary_is_current(bridge_dir, boundary):
+        return []
+    info = _read_json_file(bridge_dir / _TMUX_FILE)
+    socket_path, target = info.get("socket_path"), info.get("tmux_target")
+    if (
+        isinstance(socket_path, str)
+        and isinstance(target, str)
+        and _claude_pane_state(socket_path, target).alive is False
+    ):
+        return []
+    return queued_prompts(boundary)
 
 
 def auto_mode_billing_notice_visible(pane: str) -> bool:

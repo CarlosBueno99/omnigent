@@ -24,6 +24,7 @@ from omnigent.harnesses.claude_native.bridge import (
     ClaudeUserPromptPending,
     TmuxSessionNotAdvertised,
     cancellable_injection,
+    capture_transcript_boundary,
     has_pending_user_prompt,
     inject_slash_command,
     inject_user_message,
@@ -34,7 +35,9 @@ from omnigent.harnesses.claude_native.bridge import (
     read_launch_model,
     read_model_env,
     read_model_picker_values,
+    unstarted_queued_prompts,
 )
+from omnigent.harnesses.claude_native.submit_verification import SubmitBoundary
 from omnigent.inner.executor import (
     EnqueuedContent,
     Executor,
@@ -97,6 +100,9 @@ class ClaudeNativeExecutor(Executor):
         # ``/model`` when the model actually changes. Seeded lazily from the
         # spawn ``launch_model`` on the first turn (``None`` = not yet known).
         self._applied_model: str | None = None
+        # Transcript end captured while none of this executor's messages sat in
+        # Claude Code's queue; its queue log since then is replayed before typing.
+        self._queue_boundary: SubmitBoundary | None = None
 
     def supports_streaming(self) -> bool:
         """:returns: ``False`` because output is emitted by the transcript forwarder."""
@@ -132,6 +138,7 @@ class ClaudeNativeExecutor(Executor):
             return False
         try:
             async with self._inject_lock:
+                await self._wait_for_queued_slash_prompt()
                 await self._inject_prompt(text, framework_notices(content))
         except RuntimeError:
             return False
@@ -146,6 +153,7 @@ class ClaudeNativeExecutor(Executor):
     ) -> None:
         """Apply a routed ``/model`` switch, then inject the message, in one lock hold."""
         async with self._inject_lock:
+            await self._wait_for_queued_slash_prompt()
             context_path = self._bridge_dir / CLAUDE_FRAMEWORK_CONTEXT_FILE
             context_path.unlink(missing_ok=True)
             if wanted_model_arg is not None:
@@ -194,6 +202,49 @@ class ClaudeNativeExecutor(Executor):
             if not pending:
                 return True
         return False
+
+    async def _wait_for_queued_slash_prompt(self) -> None:
+        """
+        Hold the next message while a message starting with ``/`` waits in Claude's queue.
+
+        While a turn runs, Claude Code folds queued prompts into it at the next tool
+        call but keeps a ``/``-led one (a command, skill or absolute path) for the
+        turn's end, so a message typed now would overtake it. The hold shares
+        :data:`_ANSWER_HOLD_S`; past it the message is delivered anyway.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _ANSWER_HOLD_S
+        queued = await self._unstarted_queued_prompts()
+        if _has_slash_led_prompt(queued):
+            _logger.info(
+                "claude-native: holding the message until Claude takes a queued /-led message",
+                extra={"session_id": self._request_session_id},
+            )
+            while _has_slash_led_prompt(queued) and loop.time() < deadline:
+                await asyncio.sleep(_ANSWER_POLL_S)
+                queued = await self._unstarted_queued_prompts()
+            if _has_slash_led_prompt(queued):
+                _logger.warning(
+                    "claude-native: a queued /-led message is still waiting; delivering anyway",
+                    extra={"session_id": self._request_session_id},
+                )
+        if not queued:
+            try:
+                boundary = await asyncio.to_thread(capture_transcript_boundary, self._bridge_dir)
+            except (OSError, ValueError):
+                boundary = None
+            self._queue_boundary = boundary
+
+    async def _unstarted_queued_prompts(self) -> list[str | None]:
+        """Prompts this executor's messages left in Claude's queue; empty when unknown."""
+        if self._queue_boundary is None:
+            return []
+        try:
+            return await asyncio.to_thread(
+                unstarted_queued_prompts, self._bridge_dir, self._queue_boundary
+            )
+        except (OSError, ValueError):
+            return []
 
     async def _inject_prompt(self, text: str, notices: list[str]) -> None:
         """Inject user text with one-shot context while holding the injection lock."""
@@ -629,6 +680,11 @@ def _content_to_text(content: EnqueuedContent, bridge_dir: Path) -> str:
         parts = attachment_lines + text_parts
         return "\n\n".join(parts)
     return ""
+
+
+def _has_slash_led_prompt(prompts: list[str | None]) -> bool:
+    """Whether Claude Code withholds any of *prompts* from a running turn."""
+    return any(prompt is not None and prompt.strip().startswith("/") for prompt in prompts)
 
 
 def _latest_framework_notices(messages: list[Message]) -> list[str]:

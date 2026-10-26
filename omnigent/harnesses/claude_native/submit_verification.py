@@ -90,6 +90,32 @@ def read_fresh_submit_records(boundary: SubmitBoundary) -> list[JsonObject]:
         return []
 
 
+def queued_prompts(boundary: SubmitBoundary) -> list[str | None]:
+    """
+    Replay Claude Code's queue log after *boundary*: prompts still queued, oldest first.
+
+    A ``dequeue`` names no prompt and takes the oldest one. Prompts queued before
+    the boundary are unknown here; an entry without text content is ``None``.
+    """
+    queued: list[str | None] = []
+    for entry in read_fresh_submit_records(boundary):
+        if (
+            entry.get("type") != "queue-operation"
+            or entry.get("sessionId") != boundary.native_session_id
+        ):
+            continue
+        content = entry.get("content")
+        prompt = content if isinstance(content, str) else None
+        operation = entry.get("operation")
+        if operation == "enqueue":
+            queued.append(prompt)
+        elif operation == "dequeue" and queued:
+            queued.pop(0)
+        elif operation in ("remove", "popAll") and prompt in queued:
+            queued.remove(prompt)
+    return queued
+
+
 def has_matching_hook_refusal(
     boundary: SubmitBoundary,
     submitted_text: str,
