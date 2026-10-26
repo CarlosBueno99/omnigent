@@ -773,6 +773,7 @@ async def _hold_elicitation_for_terminal_answer(
 
     try:
         if not unparked.resolved_elsewhere.is_set():
+            # A cold status cache keeps the normal unanswered expiry.
             if _session_status_cache.get(session_id) not in _MID_TURN_STATUSES:
                 return False
             tombstone = _harness_pre_resolved_elicitations.get(elicitation_id)

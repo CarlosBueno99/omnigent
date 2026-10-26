@@ -38,11 +38,7 @@ interface ExitPlanModeReviewProps {
 
 /** The plan body without the review actions. */
 export function PlanMarkdown({ plan }: { plan: string }) {
-  // text-foreground: the plan body is the card's primary content, so it
-  // renders in normal text color like a regular assistant message —
-  // escaping AlertDescription's muted default (which otherwise washes
-  // the whole plan out). The short lead-in caption above stays muted
-  // for hierarchy, matching the Codex command card.
+  // Plan body uses normal text color, not AlertDescription's muted default.
   return (
     <div className="text-ui text-foreground">
       <FilePathAwareMessageResponse>{plan}</FilePathAwareMessageResponse>

@@ -2482,20 +2482,26 @@ async def _next_elicitation_event(collector: Any) -> dict[str, Any]:
             return event
 
 
-async def _sever_claude_hook_mid_turn(
+async def _sever_hook_mid_turn(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
     agent_name: str,
     *,
     sever_every_poll: bool = True,
+    elicitation_id: str = _REATTACH_ELICITATION_ID,
+    executor: dict[str, Any] | None = None,
+    grace_s: float = 0.2,
 ) -> tuple[str, dict[str, Any], Any]:
     """
-    Park a Claude prompt in a running session, then sever its hook.
+    Park a native hook prompt in a running session, then sever its hook.
 
     :param client: Test HTTP client.
     :param monkeypatch: Pytest monkeypatch fixture.
     :param agent_name: Unique test agent name.
     :param sever_every_poll: ``False`` keeps re-parked polls connected.
+    :param elicitation_id: Hook-supplied id, e.g. ``"elicit_kimi_" + "0" * 32``.
+    :param executor: Agent executor config, or ``None`` for the default agent.
+    :param grace_s: Re-park grace in seconds.
     :returns: The session id, the hook payload, and a collector that has
         already consumed the original elicitation request.
     """
@@ -2512,15 +2518,15 @@ async def _sever_claude_hook_mid_turn(
         await asyncio.Event().wait()
 
     monkeypatch.setattr(sessions_route, "_poll_request_disconnect", _sever)
-    monkeypatch.setattr(sessions_route, "_HARNESS_ELICITATION_REPARK_GRACE_S", 0.2)
+    monkeypatch.setattr(sessions_route, "_HARNESS_ELICITATION_REPARK_GRACE_S", grace_s)
     monkeypatch.setattr(sessions_route, "_HARNESS_TERMINAL_FALLBACK_POLL_S", 0.02)
     pending_elicitations.reset_for_tests()
-    agent = await create_test_agent(client, agent_name)
+    agent = await create_test_agent(client, agent_name, executor=executor)
     session_id = await _create_session(client, agent["id"])
     monkeypatch.setitem(sessions_route._session_status_cache, session_id, "running")
     payload = {
         **(await _claude_permission_payload()),
-        "_omnigent_elicitation_id": _REATTACH_ELICITATION_ID,
+        "_omnigent_elicitation_id": elicitation_id,
     }
     collector = await start_session_stream_collector(session_id)
     first = await client.post(f"/v1/sessions/{session_id}/hooks/permission-request", json=payload)
@@ -2570,7 +2576,7 @@ async def test_unanswered_claude_prompt_waits_in_terminal_until_turn_ends(
             "_publish_elicitation_request_to_ancestors",
             _mirror_fails_for_terminal_card,
         )
-    session_id, _payload, collector = await _sever_claude_hook_mid_turn(
+    session_id, _payload, collector = await _sever_hook_mid_turn(
         client, monkeypatch, f"test-terminal-fallback-unanswered-{ancestor_mirror_fails}"
     )
     try:
@@ -2616,7 +2622,7 @@ async def test_reattach_id_waiting_in_terminal_rejected_for_other_session(
     """Another session cannot adopt the id of a prompt waiting in a terminal."""
     from omnigent.runtime import pending_elicitations
 
-    session_id, payload, collector = await _sever_claude_hook_mid_turn(
+    session_id, payload, collector = await _sever_hook_mid_turn(
         client, monkeypatch, "test-terminal-fallback-id-owner"
     )
     try:
@@ -2653,7 +2659,7 @@ async def test_chat_answer_stranded_by_hook_exit_is_reported_undelivered(
     """
     from omnigent.runtime import pending_elicitations
 
-    session_id, payload, collector = await _sever_claude_hook_mid_turn(
+    session_id, payload, collector = await _sever_hook_mid_turn(
         client,
         monkeypatch,
         "test-terminal-fallback-undelivered",
@@ -2693,19 +2699,29 @@ async def test_chat_answer_stranded_by_hook_exit_is_reported_undelivered(
         pending_elicitations.reset_for_tests()
 
 
+@pytest.mark.parametrize("answered_during_grace", [False, True])
 async def test_terminal_answer_clears_card_waiting_in_terminal(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
+    answered_during_grace: bool,
 ) -> None:
-    """The gated tool's mirrored result clears a card waiting in the terminal."""
+    """
+    The gated tool's mirrored result clears the card as answered.
+
+    An answer given during the re-park grace never points the card to the terminal.
+    """
     from omnigent.runtime import pending_elicitations
 
-    session_id, payload, collector = await _sever_claude_hook_mid_turn(
-        client, monkeypatch, "test-terminal-fallback-answered"
+    session_id, payload, collector = await _sever_hook_mid_turn(
+        client,
+        monkeypatch,
+        f"test-terminal-fallback-answered-{answered_during_grace}",
+        grace_s=1.0 if answered_during_grace else 0.2,
     )
     try:
-        waiting = await _next_elicitation_event(collector)
-        assert waiting["params"]["terminal_fallback"] == {"answer_undelivered": False}
+        if not answered_during_grace:
+            waiting = await _next_elicitation_event(collector)
+            assert waiting["params"]["terminal_fallback"] == {"answer_undelivered": False}
 
         sessions_route._signal_terminal_resolved_harness_elicitation(
             session_id, payload["tool_name"], {"command": "ls -la"}
@@ -2717,6 +2733,38 @@ async def test_terminal_answer_clears_card_waiting_in_terminal(
         }
         assert pending_elicitations.count_for(session_id) == 0
         await _finish_deferred_clears()
+    finally:
+        await collector.stop()
+        pending_elicitations.reset_for_tests()
+
+
+@pytest.mark.parametrize("vendor", ["kimi", "devin"])
+async def test_non_claude_prompt_severed_mid_turn_expires_unanswered(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    vendor: str,
+) -> None:
+    """Only Claude keeps its picker open after the hook exits; other cards expire."""
+    from omnigent.runtime import pending_elicitations
+
+    elicitation_id = f"elicit_{vendor}_" + "0" * 32
+    session_id, _payload, collector = await _sever_hook_mid_turn(
+        client,
+        monkeypatch,
+        f"test-terminal-fallback-{vendor}",
+        elicitation_id=elicitation_id,
+        executor={"type": "omnigent", "config": {"harness": f"{vendor}-native"}},
+    )
+    try:
+        expired = await _next_elicitation_event(collector)
+        assert expired == {
+            "type": "response.elicitation_resolved",
+            "elicitation_id": elicitation_id,
+            "reason": "unanswered",
+        }
+        assert pending_elicitations.count_for(session_id) == 0
+        await _finish_deferred_clears()
+        assert elicitation_id not in _harness_unparked_elicitations
     finally:
         await collector.stop()
         pending_elicitations.reset_for_tests()
