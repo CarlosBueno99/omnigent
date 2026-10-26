@@ -25,7 +25,9 @@ from omnigent._wrapper_labels import (
 )
 from tests._helpers.session import bundle_files, post_session_bundle
 
-NativeHarness = Literal["antigravity", "claude", "codex", "cursor", "goose", "kiro", "hermes", "pi"]
+NativeHarness = Literal[
+    "antigravity", "claude", "codex", "cursor", "goose", "kiro", "hermes", "pi"
+]
 
 
 def create_native_session(
