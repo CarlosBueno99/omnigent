@@ -3804,7 +3804,10 @@ def _publish_runner_launch_env(record: _HostDaemonRecord | None) -> None:
 
     :param record: Daemon record being reused, or ``None`` when it vanished.
     """
-    if record is None or record.log_path is None:
+    from omnigent.runner.identity import RUNNER_PARENT_PID_ENV_VAR
+
+    # A CLI run from a session's tools must not change other sessions' runner credentials.
+    if record is None or record.log_path is None or RUNNER_PARENT_PID_ENV_VAR in os.environ:
         return
     from omnigent.host.connect import overlay_runner_env, refreshable_runner_env_names
 

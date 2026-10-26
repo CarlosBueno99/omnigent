@@ -247,10 +247,14 @@ def test_still_owner_delete_and_mismatch(tmp_path: Path) -> None:
     assert lock.still_owner() is True
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Owner and mode checks are POSIX-only.")
 def test_runner_env_is_owner_only_and_bound_to_its_daemon_pid(tmp_path: Path) -> None:
+    path = runner_env_path("local", base_dir=tmp_path)
+    delete_runner_env("local", pid=None, base_dir=tmp_path)
+    assert not path.parent.exists()
+
     write_runner_env("local", pid=4242, env={"OPENAI_API_KEY": "sk-test"}, base_dir=tmp_path)
 
-    path = runner_env_path("local", base_dir=tmp_path)
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     assert read_runner_env("local", pid=4242, base_dir=tmp_path) == {"OPENAI_API_KEY": "sk-test"}
@@ -263,7 +267,10 @@ def test_runner_env_is_owner_only_and_bound_to_its_daemon_pid(tmp_path: Path) ->
     assert not path.exists()
 
     path.write_text("not json")
+    path.chmod(0o600)
     assert read_runner_env("local", pid=4242, base_dir=tmp_path) is None
+    delete_runner_env("local", pid=4243, base_dir=tmp_path)
+    assert not path.exists()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Owner and mode checks are POSIX-only.")
@@ -278,29 +285,63 @@ def test_runner_env_ignores_shared_or_linked_files(tmp_path: Path) -> None:
     path.chmod(0o640)
     assert read_runner_env("local", pid=4242, base_dir=tmp_path) is None
 
+    delete_runner_env("local", pid=4243, base_dir=tmp_path)
+    assert path.exists()
+    delete_runner_env("local", pid=4242, base_dir=tmp_path)
+    assert not path.exists()
+
 
 @pytest.mark.skipif(sys.platform == "win32", reason="flock is POSIX-only.")
-def test_update_runner_env_merges_current_values_under_a_lock(tmp_path: Path) -> None:
+def test_runner_env_changes_hold_the_sidecar_lock_for_the_live_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import fcntl
 
+    from omnigent.host import daemon_lifecycle
+
+    owner = DaemonLifecycleLock.for_target("local", base_dir=tmp_path, pid=4242)
+    assert owner.try_acquire() is True
+    write_daemon_record(_record("local", 4242), base_dir=tmp_path)
     write_runner_env("local", pid=4242, env={"FIRST": "1"}, base_dir=tmp_path)
     lock_path = runner_env_path("local", base_dir=tmp_path).with_suffix(".lock")
 
-    def _merge(current: dict[str, str]) -> dict[str, str]:
+    def _assert_locked() -> None:
         fd = os.open(lock_path, os.O_RDWR)
         try:
             with pytest.raises(BlockingIOError):
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         finally:
             os.close(fd)
+
+    def _merge(current: dict[str, str]) -> dict[str, str]:
+        _assert_locked()
         return {**current, "SECOND": "2"}
 
-    update_runner_env("local", pid=4242, merge=_merge, base_dir=tmp_path)
-    assert read_runner_env("local", pid=4242, base_dir=tmp_path) == {"FIRST": "1", "SECOND": "2"}
-    assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
+    try:
+        update_runner_env("local", pid=4242, merge=_merge, base_dir=tmp_path)
+        assert read_runner_env("local", pid=4242, base_dir=tmp_path) == {
+            "FIRST": "1",
+            "SECOND": "2",
+        }
+        assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
 
-    update_runner_env("local", pid=4243, merge=lambda current: current, base_dir=tmp_path)
-    assert read_runner_env("local", pid=4243, base_dir=tmp_path) == {}
+        update_runner_env("local", pid=4243, merge=lambda _: {"STALE": "1"}, base_dir=tmp_path)
+        assert read_runner_env("local", pid=4243, base_dir=tmp_path) is None
+    finally:
+        owner.release()
+
+    update_runner_env("local", pid=4242, merge=lambda _: {"AFTER_EXIT": "1"}, base_dir=tmp_path)
+    assert read_runner_env("local", pid=4242, base_dir=tmp_path) == {"FIRST": "1", "SECOND": "2"}
+
+    published_pid = daemon_lifecycle._published_runner_env_pid
+
+    def _locked_published_pid(path: Path) -> int | None:
+        _assert_locked()
+        return published_pid(path)
+
+    monkeypatch.setattr(daemon_lifecycle, "_published_runner_env_pid", _locked_published_pid)
+    delete_runner_env("local", pid=4242, base_dir=tmp_path)
+    assert not runner_env_path("local", base_dir=tmp_path).exists()
 
 
 def test_record_flock_is_held_states(tmp_path: Path) -> None:
@@ -365,10 +406,24 @@ def test_background_daemon_claims_record_before_connecting(
 
     monkeypatch.setattr("omnigent.host.connect.run_host_process", _run)
     write_runner_env(target, pid=os.getpid(), env={"OPENAI_API_KEY": "sk-stale"})
+    from omnigent.host import daemon_lifecycle
+
+    delete_runner_env_impl = daemon_lifecycle.delete_runner_env
+    owner_held_at_delete: list[bool | None] = []
+
+    def _delete_runner_env(*args: object, **kwargs: object) -> None:
+        owner_held_at_delete.append(
+            record_flock_is_held(daemon_record_path(target, base_dir=tmp_path))
+        )
+        delete_runner_env_impl(*args, **kwargs)
+
+    monkeypatch.setattr(daemon_lifecycle, "delete_runner_env", _delete_runner_env)
 
     _daemon_entry.main()
 
     assert not runner_env_path(target, base_dir=tmp_path).exists()
+    # Exit cleanup runs only after publishers can see this daemon is gone.
+    assert owner_held_at_delete == [True, False]
     payload = json.loads(daemon_record_path(target, base_dir=tmp_path).read_text())
     assert payload["pid"] == os.getpid()
     assert payload["host_id"] == _HOST_ID

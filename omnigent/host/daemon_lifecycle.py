@@ -24,7 +24,7 @@ import json
 import logging
 import os
 import threading
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -591,6 +591,41 @@ def read_runner_env(
     return {name: value for name, value in env.items() if isinstance(value, str)}
 
 
+@contextlib.contextmanager
+def _runner_env_lock(path: Path) -> Iterator[None]:
+    """Hold the sidecar lock that serializes changes to the runner env file *path*.
+
+    :param path: Runner env file from :func:`runner_env_path`.
+    :raises OSError: When the lock file cannot be opened, e.g. its directory is missing.
+    """
+    lock_fd = os.open(
+        path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0), 0o600
+    )
+    try:
+        if fcntl is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(lock_fd)
+
+
+def _daemon_owns_target(target: str, *, pid: int, base_dir: Path | None) -> bool:
+    """Whether the daemon process *pid* is still the live owner of *target*.
+
+    :param target: Normalized daemon target, e.g. ``"local"``.
+    :param pid: Daemon process expected to own *target*.
+    :param base_dir: Data-directory override; defaults to :func:`data_dir`.
+    :returns: ``True`` while *target*'s record names *pid* and its owner holds the
+        record lock, or is still running where that lock cannot be probed.
+    """
+    record_path = daemon_record_path(target, base_dir=base_dir)
+    record = read_daemon_record(record_path)
+    if record is None or record.pid != pid:
+        return False
+    held = record_flock_is_held(record_path)
+    return held if held is not None else pid_is_recorded_daemon(record)
+
+
 def update_runner_env(
     target: str,
     *,
@@ -600,39 +635,52 @@ def update_runner_env(
 ) -> None:
     """Replace the values published for the daemon process *pid* with ``merge(current)``.
 
-    Publishers serialize on a sidecar lock so concurrent updates cannot drop each other's names.
+    Where ``fcntl`` is available, publishers and :func:`delete_runner_env` serialize on a
+    sidecar lock, so updates keep each other's names and none outlives its daemon.
 
     :param target: Normalized daemon target, e.g. ``"local"``.
-    :param pid: Daemon process the values apply to.
+    :param pid: Daemon process the values apply to; nothing is written once it no
+        longer owns *target*.
     :param merge: Builds the new values from the current ones (``{}`` when none).
     :param base_dir: Data-directory override; defaults to :func:`data_dir`.
     :raises OSError: When the lock or file cannot be opened or written.
     """
     path = runner_env_path(target, base_dir=base_dir)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    lock_fd = os.open(
-        path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0), 0o600
-    )
-    try:
-        if fcntl is not None:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    with _runner_env_lock(path):
+        if not _daemon_owns_target(target, pid=pid, base_dir=base_dir):
+            return
         current = read_runner_env(target, pid=pid, base_dir=base_dir) or {}
         write_runner_env(target, pid=pid, env=merge(current), base_dir=base_dir)
-    finally:
-        os.close(lock_fd)
+
+
+def _published_runner_env_pid(path: Path) -> int | None:
+    """Return the daemon pid recorded in the runner env file *path*, trusted or not.
+
+    :param path: Runner env file from :func:`runner_env_path`.
+    :returns: The recorded pid, or ``None`` when the file is absent or malformed.
+    """
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    recorded = payload.get("pid") if isinstance(payload, dict) else None
+    return recorded if isinstance(recorded, int) else None
 
 
 def delete_runner_env(target: str, *, pid: int | None, base_dir: Path | None = None) -> None:
     """Remove runner env values published for the daemon process *pid*, if any.
 
     :param target: Normalized daemon target, e.g. ``"local"``.
-    :param pid: Daemon process whose values to remove; another daemon's are kept.
-        ``None`` removes values regardless of the process they were published for.
+    :param pid: Daemon process whose values to remove; a file naming another
+        daemon is kept. ``None`` removes the file regardless of its owner.
     :param base_dir: Data-directory override; defaults to :func:`data_dir`.
     """
-    if pid is None or read_runner_env(target, pid=pid, base_dir=base_dir) is not None:
-        with contextlib.suppress(OSError):
-            runner_env_path(target, base_dir=base_dir).unlink()
+    path = runner_env_path(target, base_dir=base_dir)
+    with contextlib.suppress(OSError), _runner_env_lock(path):
+        recorded = _published_runner_env_pid(path)
+        if pid is None or recorded is None or recorded == pid:
+            path.unlink()
 
 
 def write_daemon_record(

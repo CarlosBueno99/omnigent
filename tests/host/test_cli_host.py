@@ -22,8 +22,9 @@ from omnigent import cli as cli_module
 from omnigent.cli import _add_daemon_host_status, _ensure_host_daemon, _host_daemon_alive, cli
 from omnigent.cli_diagnostics import suppresses_recovery_hint
 from omnigent.host.connect import RUNNER_ENV_PASSTHROUGH_ENV_VAR
-from omnigent.host.daemon_lifecycle import read_runner_env
+from omnigent.host.daemon_lifecycle import DaemonLifecycleLock, read_runner_env
 from omnigent.host.local_server import LocalServerStartup
+from omnigent.runner.identity import RUNNER_PARENT_PID_ENV_VAR
 
 
 @dataclass(frozen=True)
@@ -1546,6 +1547,7 @@ def test_host_background_reuses_same_workspace_daemon_only_when_online(
 def test_host_background_reuses_daemon_on_another_url_for_the_workspace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> None:
     """
     A second URL for the same workspace reuses the running daemon.
@@ -1558,6 +1560,12 @@ def test_host_background_reuses_daemon_on_another_url_for_the_workspace(
         "omnigent.cli._pid_alive", lambda checked: checked in {4242, _SAME_WORKSPACE_PID}
     )
     _seed_same_workspace_daemon(monkeypatch, tmp_path)
+    owner = DaemonLifecycleLock.for_target(
+        _WORKSPACE_API, base_dir=tmp_path, pid=_SAME_WORKSPACE_PID
+    )
+    assert owner.try_acquire() is True
+    request.addfinalizer(owner.release)
+    monkeypatch.delenv(RUNNER_PARENT_PID_ENV_VAR, raising=False)
     monkeypatch.setenv(RUNNER_ENV_PASSTHROUGH_ENV_VAR, "ISAAC_LAUNCH_MODE")
     monkeypatch.setenv("ISAAC_LAUNCH_MODE", "omni")
 

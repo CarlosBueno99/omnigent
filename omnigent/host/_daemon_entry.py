@@ -143,10 +143,11 @@ def main() -> None:
             lifecycle_lock=lifecycle_lock,
         )
     finally:
-        delete_runner_env(daemon_target, pid=os.getpid())
         if workspace_lock is not None:
             workspace_lock.release()
         lifecycle_lock.release()
+        # After the release, publishers see this daemon as gone and stop writing for it.
+        delete_runner_env(daemon_target, pid=os.getpid())
 
 
 def _claim_workspace(

@@ -20,7 +20,7 @@ import subprocess
 import sys
 import textwrap
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -49,8 +49,9 @@ from omnigent.cli import (
     cli as cli_group,
 )
 from omnigent.host.connect import RUNNER_ENV_PASSTHROUGH_ENV_VAR
-from omnigent.host.daemon_lifecycle import read_runner_env, runner_env_path
+from omnigent.host.daemon_lifecycle import DaemonLifecycleLock, read_runner_env, runner_env_path
 from omnigent.host.local_server import LocalServerStartup
+from omnigent.runner.identity import RUNNER_PARENT_PID_ENV_VAR
 
 
 @pytest.fixture(autouse=True)
@@ -484,6 +485,21 @@ def test_host_daemon_does_not_forward_session_profile_credentials(
 _REUSED_SERVER = "https://server.example.com"
 
 
+@pytest.fixture
+def hold_daemon_lock(tmp_path: Path) -> Iterator[Callable[[str, int], None]]:
+    """Hold registry record locks the way live daemons do until teardown."""
+    locks: list[DaemonLifecycleLock] = []
+
+    def _hold(target: str, pid: int) -> None:
+        lock = DaemonLifecycleLock.for_target(target, base_dir=tmp_path, pid=pid)
+        assert lock.try_acquire() is True
+        locks.append(lock)
+
+    yield _hold
+    for lock in locks:
+        lock.release()
+
+
 def _register_reusable_server_daemon(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, background: bool
 ) -> dict[str, object]:
@@ -504,6 +520,7 @@ def _register_reusable_server_daemon(
     )
     monkeypatch.setattr(cli, "_pid_is_recorded_daemon", lambda record: True)
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.delenv(RUNNER_PARENT_PID_ENV_VAR, raising=False)
     monkeypatch.setenv(
         RUNNER_ENV_PASSTHROUGH_ENV_VAR, "ISAAC_LAUNCH_MODE,ANTHROPIC_CUSTOM_HEADERS"
     )
@@ -511,16 +528,18 @@ def _register_reusable_server_daemon(
 
 
 def test_reused_background_daemon_receives_only_approved_runner_values(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hold_daemon_lock: Callable[[str, int], None]
 ) -> None:
     """Reuse publishes what a fresh daemon would give runners, owner-only, until deregistration."""
     from omnigent.inference_config import inference_config_scope
 
     captured = _register_reusable_server_daemon(monkeypatch, tmp_path, background=True)
+    hold_daemon_lock(_REUSED_SERVER, 4242)
     monkeypatch.setenv("ISAAC_LAUNCH_MODE", "omni")
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "X-Launch: first")
     monkeypatch.setenv("UNLISTED_SECRET", "must-not-publish")
     monkeypatch.setenv("SESSION_TOKEN", "session-only-credential")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "remote-daemons-never-get-ambient-keys")
     profile = {
         "providers": {"session": {"kind": "key", "openai": {"api_key_ref": "env:SESSION_TOKEN"}}}
     }
@@ -543,9 +562,10 @@ def test_reused_background_daemon_receives_only_approved_runner_values(
 
 
 def test_reused_daemon_keeps_earlier_published_values_and_takes_changed_ones(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hold_daemon_lock: Callable[[str, int], None]
 ) -> None:
     _register_reusable_server_daemon(monkeypatch, tmp_path, background=True)
+    hold_daemon_lock(_REUSED_SERVER, 4242)
     monkeypatch.setenv("ISAAC_LAUNCH_MODE", "omni")
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "X-Launch: first")
     _ensure_host_daemon(_REUSED_SERVER)
@@ -553,6 +573,8 @@ def test_reused_daemon_keeps_earlier_published_values_and_takes_changed_ones(
     monkeypatch.delenv("ISAAC_LAUNCH_MODE")
     monkeypatch.setenv(RUNNER_ENV_PASSTHROUGH_ENV_VAR, "ANTHROPIC_CUSTOM_HEADERS")
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "X-Launch: second")
+    _ensure_host_daemon(_REUSED_SERVER)
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "")
     _ensure_host_daemon(_REUSED_SERVER)
 
     published = read_runner_env(_REUSED_SERVER, pid=4242, base_dir=tmp_path)
@@ -564,11 +586,25 @@ def test_reused_daemon_keeps_earlier_published_values_and_takes_changed_ones(
     assert published["ANTHROPIC_CUSTOM_HEADERS"] == "X-Launch: second"
 
 
-def test_reused_foreground_host_keeps_its_own_runner_env(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    ("background", "parent_runner_pid"),
+    [
+        pytest.param(False, None, id="foreground-host"),
+        pytest.param(True, "4300", id="cli-run-by-a-session-tool"),
+    ],
+)
+def test_reused_host_runner_env_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    hold_daemon_lock: Callable[[str, int], None],
+    background: bool,
+    parent_runner_pid: str | None,
 ) -> None:
-    captured = _register_reusable_server_daemon(monkeypatch, tmp_path, background=False)
+    captured = _register_reusable_server_daemon(monkeypatch, tmp_path, background=background)
+    hold_daemon_lock(_REUSED_SERVER, 4242)
     monkeypatch.setenv("ISAAC_LAUNCH_MODE", "omni")
+    if parent_runner_pid is not None:
+        monkeypatch.setenv(RUNNER_PARENT_PID_ENV_VAR, parent_runner_pid)
 
     assert _ensure_host_daemon(_REUSED_SERVER) is False
 
@@ -661,7 +697,7 @@ def test_ensure_host_daemon_local_daemon_serves_requested_url_is_noop(
 
 
 def test_reused_local_daemon_serving_the_url_receives_runner_values(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hold_daemon_lock: Callable[[str, int], None]
 ) -> None:
     captured: dict[str, object] = {}
     _patch_daemon_spawn(monkeypatch, tmp_path, captured)
@@ -673,12 +709,15 @@ def test_reused_local_daemon_serving_the_url_receives_runner_values(
         server_url=None,
         log_path=str(tmp_path / "daemon.log"),
     )
+    hold_daemon_lock("local", 4242)
     monkeypatch.setattr(cli, "_pid_is_recorded_daemon", lambda record: True)
     monkeypatch.setattr(cli, "_pid_alive", lambda pid: True)
     monkeypatch.setattr(cli, "local_server_url_if_healthy", lambda: "http://127.0.0.1:8123")
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.delenv(RUNNER_PARENT_PID_ENV_VAR, raising=False)
     monkeypatch.setenv(RUNNER_ENV_PASSTHROUGH_ENV_VAR, "ISAAC_LAUNCH_MODE")
     monkeypatch.setenv("ISAAC_LAUNCH_MODE", "omni")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-local")
 
     assert _ensure_host_daemon("http://127.0.0.1:8123") is False
 
@@ -686,6 +725,7 @@ def test_reused_local_daemon_serving_the_url_receives_runner_values(
     published = read_runner_env("local", pid=4242, base_dir=tmp_path)
     assert published is not None
     assert published["ISAAC_LAUNCH_MODE"] == "omni"
+    assert published["ANTHROPIC_API_KEY"] == "sk-local"
 
 
 def test_ensure_host_daemon_reuses_healthy_background_daemon(

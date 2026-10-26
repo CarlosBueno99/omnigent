@@ -871,7 +871,7 @@ def overlay_runner_env(
     updates: Mapping[str, str],
     refreshable: frozenset[str],
 ) -> dict[str, str]:
-    """Return *base_env* with the *refreshable* names from *updates* added or replaced.
+    """Return *base_env* with the non-empty *refreshable* values from *updates* added or replaced.
 
     The passthrough list becomes the union of both lists, so names approved
     earlier keep forwarding after a later invocation approves different ones.
@@ -882,7 +882,9 @@ def overlay_runner_env(
     :returns: The refreshed environment.
     """
     merged = dict(base_env)
-    merged.update({name: value for name, value in updates.items() if name in refreshable})
+    merged.update(
+        {name: value for name, value in updates.items() if value and name in refreshable}
+    )
     passthrough = runner_env_passthrough_names(base_env) | runner_env_passthrough_names(updates)
     if passthrough:
         merged[RUNNER_ENV_PASSTHROUGH_ENV_VAR] = ",".join(sorted(passthrough))
