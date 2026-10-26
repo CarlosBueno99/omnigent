@@ -52,7 +52,9 @@ def test_attachment_default_and_safe_rollback(tmp_path: Path) -> None:
     engine.dispose()
 
 
-@pytest.mark.parametrize("parent", ["no1a2b3c4d5e", "np1a2b3c4d5e", "c8e4f2a6b901"])
+@pytest.mark.parametrize(
+    "parent", ["no1a2b3c4d5e", "np1a2b3c4d5e", "c8e4f2a6b901", "nq1a2b3c4d5e", "b2e4f6a8c013"]
+)
 def test_sandbox_schema_merges_with_main(tmp_path: Path, parent: str) -> None:
     uri = f"sqlite:///{tmp_path / 'merged.db'}"
     config = _build_alembic_config(uri)
@@ -70,6 +72,6 @@ def test_sandbox_schema_merges_with_main(tmp_path: Path, parent: str) -> None:
         with engine.connect() as connection:
             assert connection.execute(
                 sa.text("SELECT version_num FROM alembic_version")
-            ).scalars().all() == ["nq1a2b3c4d5e"]
+            ).scalars().all() == ["nr1a2b3c4d5e"]
     finally:
         engine.dispose()
