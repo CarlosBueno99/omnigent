@@ -269,18 +269,20 @@ def test_workspace_host_does_not_depend_on_claude_url() -> None:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="uv POSIX archive layout and shell helper")
-@pytest.mark.parametrize("archive_exists", [False, True])
+@pytest.mark.parametrize(
+    "archive_mode", [None, 0o644, 0o755], ids=["missing", "not-executable", "working"]
+)
 @pytest.mark.parametrize("launcher_name", ["ucode", "ug"])
 def test_auth_helper_survives_uv_archive_cleanup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, archive_exists: bool, launcher_name: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, archive_mode: int | None, launcher_name: str
 ) -> None:
     """A generated helper keeps its workspace/profile through cache cleanup."""
     archive_bin = tmp_path / "archive-v0" / "ephemeral" / "bin"
     archive_bin.mkdir(parents=True)
-    archived = archive_bin / "ucode"
-    if archive_exists:
+    archived = archive_bin / launcher_name
+    if archive_mode is not None:
         archived.write_text("#!/bin/sh\nprintf 'ephemeral-token'\n")
-        archived.chmod(0o755)
+        archived.chmod(archive_mode)
     persistent_bin = tmp_path / "installed tools"
     persistent_bin.mkdir()
     launcher = persistent_bin / launcher_name
@@ -312,9 +314,9 @@ def test_auth_helper_survives_uv_archive_cleanup(
     assert state is not None
     agent = state.agent("codex")
     assert agent is not None and agent.auth_command is not None
-    expected = [str(launcher), *argv[1:]]
+    expected = argv if archive_mode == 0o755 else [str(launcher), *argv[1:]]
     assert shlex.split(agent.auth_command) == expected
-    assert agent.auth == {"command": str(launcher), "args": argv[1:]}
+    assert agent.auth == {"command": str(archived), "args": argv[1:]}
     result = subprocess.run(
         ["/bin/sh", "-c", agent.auth_command],
         capture_output=True,
@@ -322,7 +324,9 @@ def test_auth_helper_survives_uv_archive_cleanup(
         timeout=5,
         check=True,
     )
-    assert result.stdout.splitlines() == argv[1:]
+    assert result.stdout.splitlines() == (
+        ["ephemeral-token"] if archive_mode == 0o755 else argv[1:]
+    )
     assert state_file.read_bytes() == original_state
 
 
@@ -334,13 +338,25 @@ def test_auth_helper_survives_uv_archive_cleanup(
         "/tmp/archive-v0/old/bin/ucode auth-token --host https://example.databricks.com | cat",
         "/tmp/archive-v0/old/bin/ucode auth-token --custom-option value",
         "/tmp/archive-v0/old/bin/ucode auth-token --profile $PROFILE",
+        "/tmp/archive-v0/old/bin/ucode auth-token --profile ~",
+        "/tmp/archive-v0/old/bin/ucode auth-token --profile ~/gateway",
+        "/tmp/archive-v0/old/bin/ucode auth-token --profile gateway*",
+        "/tmp/archive-v0/old/bin/ucode auth-token --profile gateway?",
+        "/tmp/archive-v0/old/bin/ucode auth-token --profile gateway[12]",
+        "/tmp/archive-v0/old/bin/ucode auth-token --profile #comment",
         "printf token",
     ],
 )
-def test_auth_helper_preserves_custom_commands(command: str) -> None:
+def test_auth_helper_preserves_custom_commands(
+    command: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Only generated uv-cache helpers are eligible for launcher replacement."""
     from omnigent.onboarding.ucode_state import _parse_agent_state
 
+    monkeypatch.setenv("PATH", "/opt")
+    monkeypatch.setattr(
+        "omnigent.onboarding.ucode_state.shutil.which", lambda name, path: f"/opt/{name}"
+    )
     assert _parse_agent_state({"auth_command": command}).auth_command == command
 
 
@@ -356,19 +372,21 @@ def test_auth_helper_keeps_archive_when_no_persistent_launcher_exists(
 
 
 @pytest.mark.skipif(os.name != "posix", reason="uv POSIX archive layout and shell helper")
-def test_auth_helper_repairs_shell_wrapped_auth(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("archive_exists", [False, True])
+def test_auth_helper_does_not_substitute_unrelated_ug(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, archive_exists: bool
 ) -> None:
-    """Older state can carry the generated token helper inside sh -c."""
+    """The ug executable on PATH can belong to ugrep instead of ucode."""
     from omnigent.onboarding.ucode_state import _parse_agent_state
 
-    launcher = tmp_path / "ucode"
+    archived = tmp_path / "archive-v0" / "old" / "bin" / "ucode"
+    if archive_exists:
+        archived.parent.mkdir(parents=True)
+        archived.write_text("#!/bin/sh\nprintf 'ephemeral-token'\n")
+        archived.chmod(0o755)
+    launcher = tmp_path / "ug"
     launcher.write_text("#!/bin/sh\nexit 0\n")
     launcher.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path))
-    command = "/tmp/archive-v0/old/bin/ucode auth-token --profile gateway"
-    agent = _parse_agent_state({"auth": {"command": "sh", "args": ["-c", command]}})
-    assert agent.auth == {
-        "command": "sh",
-        "args": ["-c", shlex.join([str(launcher), "auth-token", "--profile", "gateway"])],
-    }
+    command = shlex.join([str(archived), "auth-token", "--profile", "gateway"])
+    assert _parse_agent_state({"auth_command": command}).auth_command == command

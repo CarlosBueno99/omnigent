@@ -108,29 +108,30 @@ class UcodeWorkspaceState:
 
 
 def _persistent_ucode_executable(executable: str) -> str:
-    """Prefer an installed launcher over a disposable uv archive executable."""
+    """Replace an unavailable uv archive helper with an installed namesake."""
     path = Path(executable)
     if (
         not path.is_absolute()
         or path.name not in {"ucode", "ug"}
         or path.parent.name != "bin"
         or path.parent.parent.parent.name != "archive-v0"
+        or os.access(path, os.X_OK)
     ):
         return executable
-    names = (path.name, "ug" if path.name == "ucode" else "ucode")
-    for name in names:
-        for directory in os.get_exec_path():
-            candidate = shutil.which(name, path=directory)
-            if candidate is None or not Path(candidate).is_absolute():
-                continue
-            if Path(candidate).parent.parent.parent.name != "archive-v0":
-                return candidate
+    # Do not try the other alias: ug can be an unrelated ugrep executable.
+    for directory in os.get_exec_path():
+        candidate = shutil.which(path.name, path=directory)
+        if candidate is None or not Path(candidate).is_absolute():
+            continue
+        if Path(candidate).parent.parent.parent.name != "archive-v0":
+            _logger.debug("Using %s for unavailable ucode auth helper %s", candidate, executable)
+            return candidate
     return executable
 
 
 def _persistent_ucode_auth_command(command: str) -> str:
     """Rebind generated token helpers without rewriting custom shell commands."""
-    if any(char in command for char in "$`|;&<>()\n"):
+    if any(char in command for char in "$`|;&<>()\n~*?[#"):
         return command
     try:
         argv = shlex.split(command)
@@ -167,14 +168,6 @@ def _parse_agent_state(raw: object) -> UcodeAgentState:
     if refresh_raw is None and isinstance(auth_raw, dict):
         # ucode writes Codex's cadence inside its ``auth`` table.
         refresh_raw = auth_raw.get("refresh_interval_ms")
-    auth = dict(auth_raw) if isinstance(auth_raw, dict) else {}
-    command = auth.get("command")
-    args = auth.get("args")
-    if isinstance(command, str) and isinstance(args, list):
-        if args and args[0] == "auth-token":
-            auth["command"] = _persistent_ucode_executable(command)
-        elif command == "sh" and len(args) == 2 and args[0] == "-c" and isinstance(args[1], str):
-            auth["args"] = ["-c", _persistent_ucode_auth_command(args[1])]
     return UcodeAgentState(
         model=raw.get("model") if isinstance(raw.get("model"), str) else None,
         base_url=raw.get("base_url") if isinstance(raw.get("base_url"), str) else None,
@@ -191,7 +184,7 @@ def _parse_agent_state(raw: object) -> UcodeAgentState:
         auth_refresh_interval_ms=(
             refresh_raw if type(refresh_raw) is int and refresh_raw > 0 else None
         ),
-        auth=auth,
+        auth=dict(auth_raw) if isinstance(auth_raw, dict) else {},
         env={str(key): str(value) for key, value in env_raw.items()}
         if isinstance(env_raw, dict)
         else {},
