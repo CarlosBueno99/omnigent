@@ -310,6 +310,20 @@ def pytest_addoption(parser):
 
 
 @pytest.fixture(autouse=True)
+def _no_workspace_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep tests off the network: the host's workspace probe answers "unknown".
+
+    Any CLI path that starts or checks a host daemon on a server URL probes
+    that server. Tests that need an answer patch the probe themselves.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(
+        "omnigent.host.daemon_lifecycle.probe_workspace_id", lambda url, **_kwargs: None
+    )
+
+
+@pytest.fixture(autouse=True)
 def _reset_runner_catalog_cache() -> Generator[None, None, None]:
     """
     Clear smart routing's per-session runner-catalog cache after every test.
@@ -471,6 +485,47 @@ def _stub_untracked_cache_start(
     if "untracked_cache_start" in request.fixturenames:
         return
     monkeypatch.setattr(GitFilesystemRegistry, "start", lambda self: None)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_origin_identity(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep debug-log workspace attribution off the network and out of later tests.
+
+    Host startup and CLI server resolution probe a workspace-hosted server once
+    when nothing records its workspace id. Unstubbed, that probe would consume a
+    response a test scripted into a patched ``httpx.get`` (or hit the real host),
+    and the published env would carry into later tests. The probe's own tests
+    request ``origin_identity_probe``.
+
+    :param request: Pytest request, inspected for the opt-in fixture.
+    :param monkeypatch: Pytest monkeypatch fixture; restores the env and probe
+        at teardown.
+    :returns: None.
+    """
+    from omnigent import debug_logging
+
+    monkeypatch.delenv(debug_logging.ORIGIN_WORKSPACE_ID_ENV_VAR, raising=False)
+    monkeypatch.setattr(debug_logging, "_probed_workspace_ids", {})
+    if "origin_identity_probe" in request.fixturenames:
+        return
+    monkeypatch.setattr(debug_logging, "_probe_workspace_id", lambda api_base: None)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_databricks_org_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Register the org pin with monkeypatch so direct os.environ writes are undone."""
+    from omnigent.cli_auth import PINNED_DATABRICKS_ORG_ENV_VAR
+
+    monkeypatch.setenv(PINNED_DATABRICKS_ORG_ENV_VAR, "")
+    monkeypatch.delenv(PINNED_DATABRICKS_ORG_ENV_VAR)
+
+
+@pytest.fixture
+def origin_identity_probe() -> None:
+    """Opt in to the real workspace-id probe (see ``_isolate_origin_identity``)."""
 
 
 @pytest.fixture(scope="session", autouse=True)
