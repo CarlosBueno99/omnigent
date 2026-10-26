@@ -3439,8 +3439,43 @@ def _databricks_codex_gateway(host: str, profile: str) -> tuple[str, str, int | 
         workspace_state = None
     agent = workspace_state.agent("codex") if workspace_state is not None else None
     if agent is not None and agent.base_url and agent.auth_command:
-        return agent.base_url, agent.auth_command, agent.auth_refresh_interval_ms
+        return (
+            agent.base_url,
+            _refresh_ucode_auth_command(agent.auth_command),
+            agent.auth_refresh_interval_ms,
+        )
     return _databricks_codex_base_url(host), _databricks_codex_auth_command(host, profile), None
+
+
+def _refresh_ucode_auth_command(command: str) -> str:
+    """Replace a deleted uv archive helper while retaining its auth-token arguments."""
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return command
+    if len(argv) < 2 or argv[1] != "auth-token":
+        return command
+    executable = Path(argv[0])
+    if (
+        not executable.is_absolute()
+        or executable.name != "ucode"
+        or executable.parent.name != "bin"
+        or executable.parent.parent.parent.name != "archive-v0"
+        or executable.exists()
+    ):
+        return command
+    # Only ucode's generated, literal auth-token argv is eligible, never a shell pipeline.
+    if shlex.join(argv) != command:
+        return command
+    from click import ClickException
+
+    from omnigent.onboarding.ucode_setup import find_ucode_command
+
+    try:
+        prefix = find_ucode_command()
+    except ClickException:
+        return command
+    return shlex.join([*prefix, *argv[1:]])
 
 
 # DATABRICKS-PATCH(codex-live-model-discovery)

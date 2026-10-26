@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -224,6 +226,75 @@ def test_build_codex_native_server_defaults_cadence_without_one_in_ucode_state(
 
     assert json.dumps(_UCODE_AUTH) in overrides
     assert "refresh_interval_ms=900000" in overrides
+
+
+@pytest.mark.parametrize("installed", [False, True])
+def test_ucode_auth_survives_removed_uv_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed: bool
+) -> None:
+    """A regenerated launch uses a usable helper without changing its authority."""
+    expired = tmp_path / "uv" / "archive-v0" / "removed" / "bin" / "ucode"
+    helper = tmp_path / "current helper" / "ucode"
+    helper.parent.mkdir()
+    helper.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
+    helper.chmod(0o700)
+    argv = ["auth-token", "--host", _UCODE_HOST, "--profile", "profile with space", "--use-pat"]
+    command = shlex.join([str(expired), *argv])
+    from omnigent.onboarding.ucode_setup import _UCODE_UVX_SOURCE
+
+    prefix = [str(helper)] if installed else [str(helper), "--from", _UCODE_UVX_SOURCE, "ucode"]
+
+    def find_tool(name: str) -> str | None:
+        return str(helper) if name == ("ucode" if installed else "uvx") else None
+
+    monkeypatch.setattr("omnigent.onboarding.ucode_setup.shutil.which", find_tool)
+    overrides = _ucode_codex_overrides(
+        tmp_path,
+        monkeypatch,
+        {"base_url": _UCODE_BASE_URL, "auth_command": command, "auth_refresh_interval_ms": 60000},
+    )
+    config = tomllib.loads(overrides)
+    provider = config["model_providers"]["omnigent_databricks"]
+    assert provider["base_url"] == _UCODE_BASE_URL
+    auth = provider["auth"]
+    assert auth["refresh_interval_ms"] == 60000
+    assert auth["command"] == "sh"
+    assert shlex.split(auth["args"][1]) == [*prefix, *argv]
+    completed = subprocess.run([auth["command"], *auth["args"]], capture_output=True, text=True)
+    assert completed.returncode == 0
+    assert completed.stdout.splitlines() == [*prefix[1:], *argv]
+
+
+@pytest.mark.parametrize("case", ["existing", "custom", "relative", "shell", "no-helper"])
+def test_ucode_auth_repair_preserves_other_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    import click
+
+    binary = tmp_path / "archive-v0" / "entry" / "bin" / "ucode"
+    if case == "existing":
+        binary.parent.mkdir(parents=True)
+        binary.write_text("installed helper")
+    elif case == "custom":
+        binary = tmp_path / "custom" / "ucode"
+    command = shlex.join([str(binary), "auth-token", "--host", _UCODE_HOST])
+    if case == "relative":
+        command = "ucode auth-token --host " + _UCODE_HOST
+    elif case == "shell":
+        command += " | custom-filter"
+
+    def helper_prefix() -> list[str]:
+        if case != "no-helper":
+            raise AssertionError("preserved commands must not trigger helper discovery")
+        raise click.ClickException("helper not installed")
+
+    monkeypatch.setattr("omnigent.onboarding.ucode_setup.find_ucode_command", helper_prefix)
+    overrides = _ucode_codex_overrides(
+        tmp_path, monkeypatch, {"base_url": _UCODE_BASE_URL, "auth_command": command}
+    )
+    provider = tomllib.loads(overrides)["model_providers"]["omnigent_databricks"]
+    assert provider["auth"]["args"][1] == command
+    assert provider["base_url"] == _UCODE_BASE_URL
 
 
 def test_build_codex_native_server_keeps_profile_path_when_ucode_state_is_unreadable(
