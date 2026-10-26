@@ -17517,13 +17517,15 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
       const raw = pendingElicitationRaw(eid, "Approve?");
       sinks.at(-1)!.push(sse("response.elicitation_request", raw));
       await drainAsync();
-      useChatStore.setState((state) => ({
-        blocks: state.blocks.map((block) =>
-          block.type === "elicitation" && block.elicitationId === eid
-            ? { ...block, status: "responded", response: { action: "accept" } }
-            : block,
-        ),
-      }));
+      const markAnswered = () =>
+        useChatStore.setState((state) => ({
+          blocks: state.blocks.map((block) =>
+            block.type === "elicitation" && block.elicitationId === eid
+              ? { ...block, status: "responded", response: { action: "accept" } }
+              : block,
+          ),
+        }));
+      markAnswered();
 
       const inTerminal = {
         ...raw,
@@ -17563,6 +17565,21 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
       await drainAsync();
       expect(elicitationCards()).toHaveLength(1);
       expect(elicitationCards()[0]!.terminalFallback).toEqual({ answerUndelivered: false });
+
+      // Repeating the same hold leaves the card's local state alone.
+      markAnswered();
+      if (recovery === "live") {
+        sinks.at(-1)!.push(sse("response.elicitation_request", heldAgain));
+      } else {
+        seedPendingElicitations(sid, [heldAgain]);
+        sinks.at(-1)!.error();
+      }
+      await drainAsync();
+      expect(elicitationCards()).toHaveLength(1);
+      expect(elicitationCards()[0]).toMatchObject({
+        status: "responded",
+        response: { action: "accept" },
+      });
 
       // A hook that re-parks makes the prompt answerable from chat again.
       if (recovery === "live") {

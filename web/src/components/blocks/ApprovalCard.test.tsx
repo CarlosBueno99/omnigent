@@ -1858,10 +1858,17 @@ describe("ApprovalCard — prompt waiting in the terminal", () => {
     "offers Open terminal when viewed from $viewer: $opensTerminal",
     ({ requester, sideChatId, opensTerminal }) => {
       const setView = vi.fn();
-      const terminalFirst = {
+      const terminalFirst: TerminalFirstContextValue = {
+        isClaudeNative: true,
+        isNativeWrapper: true,
         isTerminalFirst: true,
+        isShellView: false,
+        view: "chat",
+        terminalViewKey: null,
         setView,
-      } as unknown as TerminalFirstContextValue;
+        terminalsAvailable: true,
+        terminalStartingUp: false,
+      };
       render(
         <QueryClientProvider client={new QueryClient()}>
           <MemoryRouter>

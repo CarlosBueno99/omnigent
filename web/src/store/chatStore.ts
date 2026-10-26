@@ -5372,6 +5372,13 @@ async function reconcileActiveSessionStatus(
   }
 }
 
+/** Whether a re-publish moves a prompt into or out of the terminal hold, or re-holds it. */
+function terminalHoldChanged(incoming: ElicitationBlock, current: ElicitationBlock): boolean {
+  return (
+    incoming.terminalFallback?.answerUndelivered !== current.terminalFallback?.answerUndelivered
+  );
+}
+
 /**
  * Reconcile rendered ApprovalCards against a reconnect snapshot's
  * pending-elicitation list.
@@ -5433,8 +5440,7 @@ function reconcileElicitationBlocks(
     // The prompt moved between chat and the agent's terminal, or was re-held, during the gap.
     if (
       currentDelivery &&
-      currentDelivery.terminalFallback?.answerUndelivered !==
-        b.terminalFallback?.answerUndelivered &&
+      terminalHoldChanged(currentDelivery, b) &&
       preGapCards.get(b.elicitationId) === b &&
       !b.nativeDeliveryResolved
     ) {
@@ -6688,8 +6694,8 @@ export function isStaleCompletedResponse(s: { activeResponse: ActiveResponse | n
  * still waiting for a verdict. Otherwise only an `auto_resolved` card
  * is revived: a card carrying a real user verdict means an answer is
  * already in flight, and `submitApproval` owns rolling that back if
- * its POST fails. A re-publish entering or leaving the terminal hold
- * replaces any card, since the server re-asks only while unanswered.
+ * its POST fails. A re-publish that changes the terminal hold replaces
+ * any card, since the server re-asks only while unanswered.
  */
 function revivePendingElicitationBlock(
   set: Setter,
@@ -6710,7 +6716,7 @@ function revivePendingElicitationBlock(
     }
     // The server re-asks only while the prompt is still unanswered, so this
     // replaces even a card showing the user's undelivered answer.
-    if (incoming && (incoming.terminalFallback || target.terminalFallback)) {
+    if (incoming && terminalHoldChanged(incoming, target)) {
       const updated = { ...incoming, ctx: target.ctx };
       return { blocks: [...s.blocks.slice(0, idx), updated, ...s.blocks.slice(idx + 1)] };
     }
@@ -6927,14 +6933,8 @@ export async function pumpStreamEvents(
         seenItemIds.add(block.ctx.itemId);
       }
 
-      // Elicitations are keyed by elicitationId, never itemId (they are
-      // not persisted items), so the dedupe above can't see them. The
-      // server re-publishes the same id whenever a severed harness wait
-      // re-parks (hook retries reuse their id), so an already-rendered
-      // id must not append a second card: a pending card (or one
-      // carrying an in-flight user verdict) stays untouched, and a card
-      // the deferred clear flipped to "Resolved elsewhere" is revived
-      // to answerable in place. A terminal-hold re-publish replaces it.
+      // Elicitations aren't persisted items, and a re-park re-publishes the same
+      // elicitationId, so dedupe by that id instead of appending a second card.
       if (block.type === "elicitation") {
         const eid = block.elicitationId;
         const buffered = buffer.findIndex(
@@ -6943,8 +6943,7 @@ export async function pumpStreamEvents(
         if (buffered !== -1) {
           if (
             block.nativeDelivery ||
-            block.terminalFallback ||
-            (buffer[buffered] as ElicitationBlock).terminalFallback
+            terminalHoldChanged(block, buffer[buffered] as ElicitationBlock)
           )
             buffer[buffered] = { ...block, ctx: buffer[buffered].ctx };
           continue;
