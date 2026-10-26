@@ -24,7 +24,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, SupportsIndex, SupportsInt, TypeVar, cast
@@ -4070,11 +4070,21 @@ class HostProcess:
         if self._capabilities_initialized:
             return
         generation = self._capability_generation
+        started_at = time.monotonic()
+        completed_probes: set[str] = set()
+
+        async def track_probe(name: str, probe: Awaitable[_T]) -> _T:
+            result = await probe
+            completed_probes.add(name)
+            return result
+
         try:
             configured, gateway = await asyncio.wait_for(
                 asyncio.gather(
-                    self._probe_configured_harnesses(startup=True),
-                    self._probe_gateway_inference(startup=True),
+                    track_probe(
+                        "configured_harnesses", self._probe_configured_harnesses(startup=True)
+                    ),
+                    track_probe("gateway_inference", self._probe_gateway_inference(startup=True)),
                 ),
                 timeout=_HOST_CAPABILITY_INIT_TIMEOUT_S,
             )
@@ -4083,6 +4093,14 @@ class HostProcess:
             _logger.error(
                 "Host capability discovery exceeded %.0fs; continuing with unknown metadata",
                 _HOST_CAPABILITY_INIT_TIMEOUT_S,
+                extra=debug_event(
+                    "host_capability_discovery_timeout",
+                    timeout_s=_HOST_CAPABILITY_INIT_TIMEOUT_S,
+                    elapsed_ms=round((time.monotonic() - started_at) * 1000),
+                    configured_harnesses_completed="configured_harnesses" in completed_probes,
+                    gateway_inference_completed="gateway_inference" in completed_probes,
+                    capability_generation=generation,
+                ),
             )
             print(
                 "⚠ Host capability discovery timed out; connecting with readiness unknown.",
