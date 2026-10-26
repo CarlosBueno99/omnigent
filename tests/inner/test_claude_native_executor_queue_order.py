@@ -159,12 +159,7 @@ def send(request: pytest.FixtureRequest) -> Send:
 async def test_a_message_waits_for_the_queued_slash_led_message(
     claude: _ClaudeCode, send: Send, tmp_path: Path
 ) -> None:
-    """
-    The model sees a ``/``-led message and the two sent after it in send order.
-
-    Without the hold the next tool call folded "bravo" in first, so the model
-    saw bravo, the ``/``-led message, then charlie.
-    """
+    """The model sees a ``/``-led message and the two sent after it in send order."""
     executor = ClaudeNativeExecutor(tmp_path / "bridge")
     claude.busy = True
     await send(executor, _SLASH_LED)
