@@ -41,7 +41,7 @@ if sys.platform != "win32":
     import tty
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -97,7 +97,7 @@ from omnigent.harnesses.claude_native.bridge import (
     bridge_dir_for_bridge_id,
     prepare_bridge_dir,
     read_active_session_id,
-    read_user_effort_level,
+    resolve_launch_effort_level,
     url_component,
     validate_claude_hook_interpreter_compatibility,
 )
@@ -2375,7 +2375,7 @@ def _fetch_external_session_id_for_redirect(
         if resp.status_code >= 400:
             return None
         payload = resp.json()
-    except Exception:  # noqa: BLE001
+    except Exception:
         _logger.warning(
             "failed to fetch external Claude session id for redirect; session=%s",
             session_id,
@@ -2878,7 +2878,7 @@ def _ucode_config_for_profile(
             live_catalog = discover_databricks_claude_catalog(creds.host, creds.token)
             live_models = live_catalog.families
             routable_models = live_catalog.model_ids
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # Recoverable fallback; frames are debug-only so a TTY-mirrored
             # host console stays concise.
             _logger.warning(
@@ -3638,7 +3638,7 @@ def _wrapper_spec_raw_instructions(spec_path: Path) -> str | None:
 
     try:
         spec = load_agent_spec(spec_path, expand_env=False)
-    except Exception:  # noqa: BLE001
+    except Exception:
         _logger.warning(
             "Could not resolve raw instructions from wrapper spec %s",
             spec_path,
@@ -3951,7 +3951,7 @@ async def _attach_direct_tmux(
                 await watcher
             except asyncio.CancelledError:
                 pass
-            except Exception:  # noqa: BLE001 - watcher failure is secondary to attach outcome
+            except Exception:  # watcher failure is secondary to attach outcome
                 _logger.warning(
                     "direct-tmux pane watcher failed during attach cleanup", exc_info=True
                 )
@@ -4074,7 +4074,7 @@ async def _attach_with_transcript_forwarder(
                 await forwarder
             except asyncio.CancelledError:
                 pass
-            except Exception:  # noqa: BLE001
+            except Exception:
                 # The forwarder is best-effort mirroring. A bug there
                 # (corrupt transcript JSONL, file-system error, anything
                 # uncaught in the parser) must not skip the Omnigent terminal
@@ -4172,7 +4172,7 @@ async def _attach_with_reconnect(
         if not first_attempt and recover is not None:
             try:
                 await recover()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _logger.warning(
                     "%s-native reconnect recovery callback raised; retrying attach anyway",
                     session_name.lower(),
@@ -4667,6 +4667,7 @@ async def _prepare_claude_terminal_via_daemon(
                     client,
                     session_bundle,
                     bridge_id=None,
+                    claude_args=tuple(persist_args),
                     terminal_launch_args=persist_args or None,
                 ),
                 wait_for_host_online(client, host_id, timeout_s=_DAEMON_HOST_ONLINE_TIMEOUT_S),
@@ -5118,6 +5119,7 @@ async def _prepare_claude_terminal(
                 client,
                 session_bundle,
                 bridge_id=bridge_id,
+                claude_args=claude_args,
             )
             _mark_startup_step(
                 startup_profiler,
@@ -5682,7 +5684,7 @@ def _claude_transcript_records_from_session_items(
                         "subtype": "compact_boundary",
                         "content": "Conversation compacted",
                         "isMeta": False,
-                        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                        "timestamp": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
                         "uuid": boundary_uuid,
                         "level": "info",
                         # Claude scans every compact_boundary and destructures
@@ -5885,7 +5887,7 @@ def _claude_transcript_record_from_session_item(
         "userType": "external",
         "sessionId": session_id,
         "cwd": str(cwd),
-        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "message": message,
         **extra,
     }
@@ -6231,6 +6233,7 @@ async def _create_claude_session(
     bundle: bytes,
     *,
     bridge_id: str | None,
+    claude_args: tuple[str, ...] = (),
     terminal_launch_args: list[str] | None = None,
 ) -> str:
     """
@@ -6251,6 +6254,9 @@ async def _create_claude_session(
         convention the runner's own auto-create path uses, so a
         daemon-routed launch (where the runner brings the terminal up)
         stays consistent. See designs/NATIVE_RUNNER_SERVER_LAUNCH.md.
+    :param claude_args: Pass-through ``claude`` CLI args, e.g.
+        ``("--effort", "xhigh")``; a valid ``--effort`` here is stamped as
+        the session's ``reasoning_effort`` over settings.json's default.
     :param terminal_launch_args: Pass-through ``claude`` CLI args to
         persist on the session, e.g.
         ``["--dangerously-skip-permissions"]``. The runner reads these
@@ -6266,8 +6272,8 @@ async def _create_claude_session(
     metadata: _JsonObject = {"labels": labels}
     if terminal_launch_args:
         metadata["terminal_launch_args"] = terminal_launch_args
-    # Stamp the wrapped claude's real effortLevel so the pill isn't a guess.
-    effort = read_user_effort_level()
+    # Stamp the wrapped claude's real effort so the pill isn't a guess.
+    effort = resolve_launch_effort_level(claude_args)
     if effort is not None:
         metadata["reasoning_effort"] = effort
     resp = await client.post(
