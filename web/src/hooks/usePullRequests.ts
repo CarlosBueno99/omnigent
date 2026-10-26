@@ -5,6 +5,8 @@
 //
 //   usePullRequestInfo           — GET /resources/github
 //                                  repo / branch / base ref / associated PR + CI summary.
+//   usePullRequestInfos          — GET /resources/github?pr_url=<url> per tracked PR
+//                                  each PR's state + CI summary for the multi-PR strip.
 //   usePullRequestChangedFiles   — GET /resources/github/changes
 //                                  the PR's changed files (sidebar list).
 //   usePullRequestDiff           — GET /resources/github/diff
@@ -34,7 +36,7 @@
 // Runner-offline (503 runner_unavailable) and no-os_env (404) are handled the
 // same way as the workspace filesystem hooks — reusing their helpers.
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { GitProviderDisplay } from "@/lib/gitProviders";
 import { authenticatedFetch } from "@/lib/identity";
 import { isTempConvId } from "@/lib/tempConversationId";
@@ -492,6 +494,30 @@ export function usePullRequestInfo(
             : computePullRequestPollInterval(query.state.data)
       : false,
     refetchIntervalInBackground: false,
+  });
+}
+
+/**
+ * Every tracked PR's info, sharing {@link usePullRequestInfo}'s per-PR cache
+ * entries, for the panel's multi-PR strip. Not polled and no turn-end
+ * invalidate of its own: the panel's selected-PR query does both for the session.
+ */
+export function usePullRequestInfos(
+  rawConversationId: string | undefined,
+  prUrls: readonly string[],
+) {
+  const conversationId = isTempConvId(rawConversationId) ? undefined : rawConversationId;
+  const serveable = useWorkspaceServeable(conversationId);
+  const retry = useRunnerOfflineRetry(serveable !== false);
+  return useQueries({
+    queries: prUrls.map((prUrl) => ({
+      queryKey: ["github-info", conversationId, prUrl],
+      queryFn: () => fetchPullRequestInfo(conversationId!, prUrl),
+      enabled: !!conversationId && serveable !== false,
+      retry,
+      retryDelay: runnerOfflineRetryDelay,
+      staleTime: 30_000,
+    })),
   });
 }
 

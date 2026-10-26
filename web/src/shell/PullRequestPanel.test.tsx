@@ -2,7 +2,7 @@
 // hooks and the heavy MonacoDiffViewer are mocked; IntersectionObserver (absent
 // in jsdom) is stubbed to fire immediately so lazy sections mount.
 
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import { parsePatchFiles } from "@pierre/diffs";
 import type * as DiffsModule from "@pierre/diffs";
 import userEvent from "@testing-library/user-event";
@@ -65,6 +65,8 @@ const state = vi.hoisted(() => ({
     error: null as Error | null,
   },
   updateReviewers: { mutate: vi.fn(), isError: false, error: null as Error | null },
+  // Each tracked PR's resolved details for the multi-PR strip, keyed by URL.
+  stripPrs: {} as Record<string, PullRequest>,
 }));
 
 vi.mock("@/hooks/usePullRequests", async (importOriginal) => {
@@ -92,6 +94,8 @@ vi.mock("@/hooks/usePullRequests", async (importOriginal) => {
     }),
     uploadPullRequestAttachment: vi.fn(),
     usePullRequestInfo: vi.fn(() => state.info),
+    usePullRequestInfos: (_conversationId: string, urls: readonly string[]) =>
+      urls.map((url) => ({ data: state.stripPrs[url] && { pr: state.stripPrs[url] } })),
     usePullRequestChangedFiles: vi.fn(() => state.changes),
     usePullRequestDiff: () => ({
       data: state.diff,
@@ -294,6 +298,7 @@ beforeEach(() => {
   state.canEdit = true;
   state.repoLabels = { data: undefined, isPending: true, isError: false, error: null };
   state.updateLabels = { mutate: vi.fn(), isError: false, error: null };
+  state.stripPrs = {};
 });
 
 afterEach(() => {
@@ -1528,7 +1533,7 @@ describe("PullRequestPanel", () => {
       expect(screen.queryByText(/GitHub/)).toBeNull();
     });
 
-    it("labels linked PRs with a !, leaving out forge.example.test but not other hosts", async () => {
+    it("labels linked PRs with a ! and the host of each", () => {
       const other = "https://other.example.test/fabrikam/api/_git/svc/pullrequest/12";
       state.info!.data = forge({
         tracking_available: true,
@@ -1550,14 +1555,17 @@ describe("PullRequestPanel", () => {
         "placeholder",
         "Pull request URL",
       );
-      const picker = screen.getByRole("combobox", { name: "Session pull request" });
-      expect(picker).toHaveTextContent("contoso/web/app !7 — Add the widget");
-      fireEvent.click(picker);
+      const strip = screen.getByRole("group", { name: "Session pull requests" });
       expect(
-        screen.getByRole("option", {
+        within(strip).getByRole("button", {
+          name: "forge.example.test/contoso/web/app !7 — Add the widget",
+        }),
+      ).toHaveTextContent(/^!7Add the widget$/);
+      expect(
+        within(strip).getByRole("button", {
           name: "other.example.test/fabrikam/api/svc !12 (from branch)",
         }),
-      ).toBeVisible();
+      ).toHaveTextContent(/^!12fabrikam\/api\/svc$/);
     });
 
     it("goes straight to the PR when signed in without the Example Forge CLI", () => {
@@ -2076,10 +2084,12 @@ describe("derivePullRequestPanelState", () => {
 });
 
 describe("session PR selection", () => {
-  it("keeps the selector and repository identity while PR details load or fail", async () => {
+  it("keeps the strip and repository identity while PR details load or fail", async () => {
     const user = userEvent.setup();
     const one = "https://github.com/example/one/pull/42";
     const two = "https://github.com/example/two/pull/42";
+    const oneLabel = "example/one #42 — First repository";
+    const twoLabel = "example/two #42 — Second repository";
     state.info = {
       isLoading: false,
       error: null,
@@ -2114,47 +2124,27 @@ describe("session PR selection", () => {
       },
     };
     const { rerender } = renderPanel();
-    const picker = screen.getByRole("combobox", { name: "Session pull request" });
-    expect(picker).toHaveTextContent("example/one #42 — First repository");
-    expect(picker).not.toHaveAttribute("title");
-    await user.hover(picker);
-    expect(await screen.findByRole("tooltip")).toHaveTextContent(
-      "example/one #42 — First repository",
-    );
-    await user.unhover(picker);
-    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
-    await user.click(picker);
-    await waitFor(() =>
-      expect(
-        screen.getByRole("option", { name: "example/one #42 — First repository" }),
-      ).toHaveAttribute("aria-selected", "true"),
-    );
-    const secondOption = screen.getByRole("option", {
-      name: "example/two #42 — Second repository",
-    });
-    expect(secondOption).toBeVisible();
-    expect(secondOption).not.toHaveAttribute("title");
-    await user.hover(secondOption);
-    expect(await screen.findByRole("tooltip")).toHaveTextContent(
-      "example/two #42 — Second repository",
-    );
-    await user.click(secondOption);
-    expect(picker).toHaveTextContent("example/two #42 — Second repository");
-    expect(picker).not.toHaveAttribute("title");
-    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    // Several PRs swap the dropdown for the card strip under a titled header.
+    expect(screen.queryByRole("combobox", { name: "Session pull request" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Pull Requests" })).toBeInTheDocument();
+    const strip = screen.getByRole("group", { name: "Session pull requests" });
+    const card = (name: string) => within(strip).getByRole("button", { name });
+    expect(card(oneLabel)).toHaveAttribute("aria-current", "true");
+    expect(card(twoLabel)).not.toHaveAttribute("aria-current");
+    await user.hover(card(twoLabel));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(twoLabel);
+    await user.unhover(card(twoLabel));
+    await user.click(card(twoLabel));
+    expect(card(twoLabel)).toHaveAttribute("aria-current", "true");
+    expect(card(oneLabel)).not.toHaveAttribute("aria-current");
     expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", { poll: true, prUrl: two });
-    await user.hover(picker);
-    expect(await screen.findByRole("tooltip")).toHaveTextContent(
-      "example/two #42 — Second repository",
-    );
-    await user.unhover(picker);
 
     state.info = { isLoading: true, error: null, isFetching: true };
     rerender(<PullRequestPanel conversationId="conv_1" />);
-    expect(screen.getByRole("combobox", { name: "Session pull request" })).toBe(picker);
-    expect(picker).toHaveTextContent("example/two #42 — Second repository");
+    expect(screen.getByRole("group", { name: "Session pull requests" })).toBe(strip);
+    expect(card(twoLabel)).toHaveAttribute("aria-current", "true");
     expect(screen.getByText("Loading pull requests…")).toBeInTheDocument();
-    expect(screen.queryByText("First repository")).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /First repository/ })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Link a PR" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Unlink PR" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Refresh" })).toHaveTextContent(/^$/);
@@ -2162,19 +2152,18 @@ describe("session PR selection", () => {
 
     state.info = { isLoading: false, error: new Error("Metadata unavailable"), isFetching: false };
     rerender(<PullRequestPanel conversationId="conv_1" />);
-    expect(screen.getByRole("combobox", { name: "Session pull request" })).toBe(picker);
-    expect(picker).toHaveTextContent("example/two #42 — Second repository");
+    expect(screen.getByRole("group", { name: "Session pull requests" })).toBe(strip);
+    expect(card(twoLabel)).toHaveAttribute("aria-current", "true");
     const errorMessage = screen.getByText(/Metadata unavailable/);
     const fallback = screen.getByRole("link", { name: "Open the PR on GitHub" });
     expect(errorMessage.parentElement).toContainElement(fallback);
     expect(fallback).toHaveAttribute("href", two);
-    await user.click(picker);
-    await user.click(screen.getByRole("option", { name: "example/one #42 — First repository" }));
+    await user.click(card(oneLabel));
     expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", { poll: true, prUrl: one });
 
     state.info = { isLoading: true, error: null, isFetching: true };
     rerender(<PullRequestPanel conversationId="conv_other" />);
-    expect(screen.queryByRole("combobox", { name: "Session pull request" })).toBeNull();
+    expect(screen.queryByRole("group", { name: "Session pull requests" })).toBeNull();
   });
 
   it.each([undefined, null, "", "   "])(
@@ -2204,7 +2193,7 @@ describe("session PR selection", () => {
     },
   );
 
-  it("keeps the host and inferred marker alongside a trimmed PR title", () => {
+  it("keeps the host and inferred marker alongside a trimmed PR title", async () => {
     const url = "https://github.example.com/example/one/pull/42";
     Object.assign(state.info!.data!, {
       tracking_available: true,
@@ -2225,6 +2214,9 @@ describe("session PR selection", () => {
     const label = "github.example.com/example/one #42 (from branch) — Fix session selection";
     expect(picker).toHaveTextContent(label);
     expect(picker).not.toHaveAttribute("title");
+    await userEvent.hover(picker);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(label);
+    await userEvent.unhover(picker);
     fireEvent.click(picker);
     expect(screen.getByRole("option", { name: label })).toBeVisible();
   });

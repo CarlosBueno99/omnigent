@@ -82,6 +82,7 @@ import { RunnerOfflineError, useWorkspaceAsleep } from "@/hooks/useWorkspaceChan
 import { readFileViewPreferences, writeFileViewPreferences } from "@/lib/fileViewPreferences";
 import { gitProviderCopy, type GitProviderCopy } from "@/lib/gitProviders";
 import { parseHttpUrl } from "@/lib/openLinkInApp";
+import { pullRequestLabel } from "@/lib/pullRequestDisplay";
 import { absoluteTime, relativeTime } from "@/lib/relativeTime";
 import {
   fetchPullRequestFileContents,
@@ -92,7 +93,6 @@ import {
   useSetPullRequestPreference,
   useUpdateSessionPr,
   type NormalizedPullRequestInfo,
-  type PullRequestAssociation,
   type PullRequestChangedFile,
   type PullRequestCheckRun,
   type PullRequestChecks,
@@ -107,6 +107,7 @@ import {
 import { PullRequestLabels } from "./PullRequestLabels";
 import { PullRequestMerge } from "./PullRequestMerge";
 import { PullRequestReviewers } from "./PullRequestReviewers";
+import { PullRequestStrip } from "./PullRequestStrip";
 
 // Shiki bundled themes matching the app's editor look; the concrete side is
 // chosen by `themeType` from the app's resolved light/dark mode.
@@ -1006,16 +1007,6 @@ function SidebarNode({
   );
 }
 
-/** A PR's picker label, in its own provider's copy (else the session's). */
-function pullRequestLabel(pr: PullRequestAssociation, sessionProvider?: string | null): string {
-  const copy = gitProviderCopy(pr.provider ?? sessionProvider, undefined, pr.provider_display);
-  const host = pr.host === copy.defaultHost ? "" : `${pr.host}/`;
-  const inferred = pr.relationship === "inferred" ? " (from branch)" : "";
-  const identity = `${host}${pr.repository} ${copy.prNumberPrefix}${pr.number}${inferred}`;
-  const title = pr.title?.trim();
-  return title ? `${identity} — ${title}` : identity;
-}
-
 export function PullRequestPanel({ conversationId }: { conversationId: string }) {
   const isMobileViewport = useIsMobileViewport();
   const [selection, setSelection] = useState<{ sessionId: string; url?: string }>();
@@ -1158,13 +1149,15 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
       </div>
     ) : undefined;
   const showTrackingControls = !!associations?.tracking_available && !linkInEmptyState;
+  // Several PRs get the scrolling card strip below the header instead of the dropdown.
+  const showStrip = showTrackingControls && prs.length > 1;
   return (
     <div className="flex h-full min-h-0 flex-col">
       {showTrackingControls ? (
         <div className="flex h-11 shrink-0 items-center gap-2 border-b border-border px-2">
-          <PanelTitle copy={copy} showTitle={prs.length === 0} />
+          <PanelTitle copy={copy} showTitle={prs.length === 0 || showStrip} />
           <div className="ml-auto flex min-w-0 flex-1 items-center gap-2">
-            {prs.length > 0 && (
+            {prs.length === 1 && (
               <TooltipProvider>
                 <Select
                   open={prPickerOpen}
@@ -1265,6 +1258,15 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
           {refreshButton}
         </div>
       ) : null}
+      {showStrip && (
+        <PullRequestStrip
+          conversationId={conversationId}
+          prs={prs}
+          selectedUrl={selected ?? associations.selected_pr_url}
+          sessionProvider={associations.provider}
+          onSelect={changeSelection}
+        />
+      )}
       {showTrackingControls && (linking || update.isError) && (
         <div className="shrink-0 border-b border-border p-2 [&>:first-child]:mt-0">
           {linkControls}
