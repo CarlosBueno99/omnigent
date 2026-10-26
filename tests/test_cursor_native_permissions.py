@@ -970,16 +970,55 @@ def test_pane_shows_accept_prompt(pane: str, expected: bool) -> None:
     assert cnp._pane_shows_accept_prompt(pane) is expected
 
 
+@pytest.mark.parametrize(
+    "metadata_state", ["missing", "invalid", "oversized", "valid", "valid-parent", "unreadable"]
+)
 async def test_send_cursor_keys_reports_undelivered_keystroke(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    metadata_state: str,
 ) -> None:
     """A tmux send that raises reports failure rather than a silent success."""
+    failed_index = 1 if metadata_state == "valid-parent" else 0
+    keys = ("Down", "Space", "Enter") if failed_index else ("y",)
+    sent: list[str] = []
 
     def _boom(_bridge: Path, _key: str) -> None:
-        raise RuntimeError("cursor-native tmux target not advertised")
+        sent.append(_key)
+        if len(sent) - 1 == failed_index:
+            raise RuntimeError("cursor-native tmux target not advertised")
 
+    if metadata_state.startswith("valid"):
+        if metadata_state == "valid-parent":
+            (tmp_path / "private-target").mkdir()
+        cnb.write_tmux_target(
+            tmp_path, socket_path=tmp_path / "private-target" / "tmux.sock", tmux_target="private"
+        )
+    elif metadata_state == "invalid":
+        (tmp_path / "tmux.json").write_text("private malformed content")
+    elif metadata_state == "oversized":
+        (tmp_path / "tmux.json").write_text("x" * 16385)
+    elif metadata_state == "unreadable":
+        (tmp_path / "tmux.json").symlink_to("tmux.json")
     monkeypatch.setattr(cnp, "send_cursor_pane_keys", _boom)
-    assert await cnp._send_cursor_keys(tmp_path, "conv_dead", "y") is False
+    assert await cnp._send_cursor_keys(tmp_path, "conv_dead", *keys) is False
+    assert sent == list(keys[: failed_index + 1])
+    event = next(r for r in caplog.records if getattr(r, "event_name", None))
+    assert event.event_name == "cursor_permission_key_delivery_failed"
+    assert event.session_id == "conv_dead"
+    assert event.attributes["terminal_metadata_state"] == metadata_state.removesuffix("-parent")
+    assert event.attributes["failed_key_index"] == failed_index
+    assert event.attributes["key_count"] == len(keys)
+    if metadata_state.startswith("valid"):
+        assert event.attributes["terminal_socket_state"] == "missing"
+        assert event.attributes["terminal_socket_directory_present"] is (
+            metadata_state == "valid-parent"
+        )
+        assert len(event.attributes["terminal_binding_sha256"]) == 64
+        assert event.attributes["terminal_metadata_age_ms"] >= 0
+    assert "private" not in repr(event.attributes)
+    assert str(tmp_path) not in repr(event.attributes)
 
     monkeypatch.setattr(cnp, "send_cursor_pane_keys", lambda *_a, **_k: None)
     assert await cnp._send_cursor_keys(tmp_path, "conv_live", "y") is True

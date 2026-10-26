@@ -37,16 +37,20 @@ design and why the transcript channel replaced it).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import enum
 import hashlib
 import json
 import logging
 import re
+import stat
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
+from omnigent.debug_logging import debug_event
 from omnigent.harnesses.cursor_native.bridge import capture_cursor_pane, send_cursor_pane_keys
 
 # Reuse the forwarder's store discovery and WAL-aware blob reader so the
@@ -127,6 +131,47 @@ async def _park_cursor_elicitation(
     return result if isinstance(result, dict) else None
 
 
+def _terminal_observation_at_failure(bridge_dir: Path) -> dict[str, object]:
+    """Observe the current binding after failure without logging paths or pane content."""
+    fields: dict[str, object] = {"terminal_metadata_state": "unreadable"}
+    with contextlib.suppress(Exception):
+        try:
+            with (bridge_dir / "tmux.json").open("rb") as metadata:
+                raw = metadata.read(16385)
+        except FileNotFoundError:
+            fields["terminal_metadata_state"] = "missing"
+            return fields
+        if len(raw) > 16384:
+            fields["terminal_metadata_state"] = "oversized"
+            return fields
+        fields["terminal_metadata_state"] = "invalid"
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return fields
+        socket_path, target = data.get("socket_path"), data.get("tmux_target")
+        if not isinstance(socket_path, str) or not socket_path:
+            return fields
+        if not isinstance(target, str) or not target:
+            return fields
+        fields["terminal_metadata_state"] = "valid"
+        fields["terminal_binding_sha256"] = hashlib.sha256(
+            (socket_path + "\0" + target).encode()
+        ).hexdigest()
+        updated_at = data.get("updated_at")
+        if isinstance(updated_at, (int, float)) and not isinstance(updated_at, bool):
+            with contextlib.suppress(ValueError, OverflowError):
+                fields["terminal_metadata_age_ms"] = int((time.time() - updated_at) * 1000)
+        socket = Path(socket_path)
+        fields["terminal_socket_state"] = "inaccessible"
+        try:
+            mode = socket.stat().st_mode
+            fields["terminal_socket_state"] = "socket" if stat.S_ISSOCK(mode) else "not_socket"
+        except FileNotFoundError:
+            fields["terminal_socket_state"] = "missing"
+        fields["terminal_socket_directory_present"] = socket.parent.is_dir()
+    return fields
+
+
 async def _send_cursor_keys(bridge_dir: Path, session_id: str, *keys: str) -> bool:
     """Send tmux keys to the cursor pane ONE AT A TIME, with settle pauses.
 
@@ -144,14 +189,25 @@ async def _send_cursor_keys(bridge_dir: Path, session_id: str, *keys: str) -> bo
     """
     if not keys:
         return True
-    for key in keys:
+    for key_index, key in enumerate(keys):
         if key == "Enter":
             await asyncio.sleep(_KEY_ENTER_SETTLE_S)
         try:
             await asyncio.to_thread(send_cursor_pane_keys, bridge_dir, key)
-        except RuntimeError:
+        except RuntimeError as exc:
+            extra = debug_event("cursor_permission_key_delivery_failed", session_id=session_id)
+            extra["attributes"] = {
+                "failed_key_index": key_index,
+                "key_count": len(keys),
+                "exception_type": type(exc).__name__,
+                **_terminal_observation_at_failure(bridge_dir),
+            }
             _logger.exception(
-                "failed to send cursor keystroke %r (of %r); session=%s", key, keys, session_id
+                "failed to send cursor keystroke %r (of %r); session=%s",
+                key,
+                keys,
+                session_id,
+                extra=extra,
             )
             return False
         await asyncio.sleep(_KEY_INTERVAL_S)
