@@ -436,7 +436,8 @@ real device. Name the engine/device profile you actually drove — e.g. "desktop
 Chromium at an iPhone viewport" — in the facet's `evidence`; a `mobile` facet
 you verdict `not_reproduced` or `needs_manual_review` that omits it is rejected.
 This is distinct from a stand-in on which you *did* reproduce the failure
-(that is `likely_repro`, with the stand-in named in `environment_fidelity`).
+(that is `likely_repro`, with the stand-in named in `environment_fidelity`,
+unless only a limit you chose produced it; see Step 2).
 Set `environment_fidelity: real` when you drove the surface the ticket reports.
 
 **Prefer a user-facing surface — reserve `api` for the genuinely invisible.**
@@ -554,7 +555,8 @@ retryable rather than becoming a product verdict.
   Capture the evidence (snapshot, response, log excerpt).
 - Failure reproduces, but only against a **stand-in** for the reported
   environment you could not drive (for example the CI egress proxy standing in
-  for a Databricks-network host) → **`likely_repro`**. Name the stand-in in
+  for a Databricks-network host) → **`likely_repro`**, unless only a limit you
+  chose produced it (see the chosen-limit case below). Name the stand-in in
   `environment_fidelity` (see below). It still dispatches the fix workflow.
 - The failure depends on **native behaviour this environment cannot exercise**
   (the iOS soft keyboard, WebKit-only rendering, a native-chrome layout) and the
