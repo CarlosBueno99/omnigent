@@ -46,6 +46,23 @@ def _queue(operation: str, content: str | None = None, **fields: str) -> JsonObj
         ),
         pytest.param(
             [],
+            [_queue("enqueue", "/a"), _queue("remove", "/a")],
+            [],
+            id="slash-led-removed",
+        ),
+        pytest.param(
+            [],
+            [
+                _queue("enqueue", "/a"),
+                _queue("enqueue", "b"),
+                _queue("popAll", "/a"),
+                _queue("popAll", "b"),
+            ],
+            [],
+            id="pop-all-entries",
+        ),
+        pytest.param(
+            [],
             [_queue("enqueue", "/a"), {**_queue("enqueue", "/b"), "sessionId": "other"}],
             ["/a"],
             id="other-session",
