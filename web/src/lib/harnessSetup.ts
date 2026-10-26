@@ -67,6 +67,11 @@ export const HARNESS_CREDENTIAL_COPY: Record<HarnessCredentialKind, HarnessReadi
   },
 };
 
+export const GATEWAY_CREDENTIAL_COPY: HarnessReadinessExplanation = {
+  label: "Gateway",
+  description: "Credential provided by the configured AI gateway",
+};
+
 export interface HarnessReadiness {
   state: HarnessReadinessState;
   reason: HarnessReadinessReason;

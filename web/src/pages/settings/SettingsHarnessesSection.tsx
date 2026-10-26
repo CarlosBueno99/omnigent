@@ -28,7 +28,9 @@ import { ApiError } from "@/lib/sessionsApi";
 import { INVENTORY_HARNESS_IDS } from "@/hooks/useHarnessInventory";
 import { BRAND_HARNESSES } from "@/components/onboarding/harnessBrand";
 import {
+  GATEWAY_CREDENTIAL_COPY,
   HARNESS_CREDENTIAL_COPY,
+  harnessCredentialFamily,
   harnessInstallableOnHost,
   harnessReadinessOnHost,
   harnessWarningBadgeText,
@@ -117,6 +119,7 @@ export const SettingsHarnessesSection = () => {
   // it off the setup dialog has no runnable install step, so we show status
   // only (no button that opens a dead-end dialog).
   const canSetup = isFeatureEnabled(info, "harness_install");
+  const databricksFeatures = info !== "loading" && info.databricks_features;
 
   // Online hosts first, then offline (disabled in the menu). Default the
   // selection to the first online host; the picker can override.
@@ -163,6 +166,7 @@ export const SettingsHarnessesSection = () => {
           entry={detail}
           host={selectedHost}
           canSetup={canSetup}
+          databricksFeatures={databricksFeatures}
           installable={harnessInstallableOnHost(info, detail.harness, selectedHost)}
           credentialKind={
             selectedHost
@@ -228,6 +232,7 @@ export const SettingsHarnessesSection = () => {
                 entry={entry}
                 host={selectedHost}
                 canSetup={canSetup}
+                databricksFeatures={databricksFeatures}
                 installable={harnessInstallableOnHost(info, entry.harness, selectedHost)}
                 credentialKind={
                   selectedHost
@@ -373,13 +378,14 @@ function harnessStatus(harness: string, host: Host | null) {
 function credentialPresentation(
   host: Host | null,
   harness: string,
+  databricksFeatures: boolean,
   override?: HarnessCredentialKind,
 ) {
   if (override === "personal") {
     return HARNESS_CREDENTIAL_COPY.personal;
   }
   if (override === "isaac" || host?.gateway_inference?.[harness] === true) {
-    return HARNESS_CREDENTIAL_COPY.isaac;
+    return databricksFeatures ? HARNESS_CREDENTIAL_COPY.isaac : GATEWAY_CREDENTIAL_COPY;
   }
   return { label: "Signed in", description: "Uses the harness's own login on this host" };
 }
@@ -483,6 +489,7 @@ function HarnessCard({
   entry,
   host,
   canSetup,
+  databricksFeatures,
   installable,
   credentialKind,
   onFix,
@@ -490,6 +497,7 @@ function HarnessCard({
   entry: HarnessEntry;
   host: Host | null;
   canSetup: boolean;
+  databricksFeatures: boolean;
   installable: boolean;
   credentialKind?: HarnessCredentialKind;
   onFix: (mode: HarnessFixMode) => void;
@@ -511,7 +519,8 @@ function HarnessCard({
               enhanced={canSetup}
               configuredCredential={
                 status.ready && canSetup
-                  ? credentialPresentation(host, entry.harness, credentialKind).label
+                  ? credentialPresentation(host, entry.harness, databricksFeatures, credentialKind)
+                      .label
                   : undefined
               }
             />
@@ -568,6 +577,7 @@ function HarnessDetail({
   entry,
   host,
   canSetup,
+  databricksFeatures,
   installable,
   credentialKind,
   readyNotice,
@@ -576,17 +586,19 @@ function HarnessDetail({
   entry: HarnessEntry;
   host: Host | null;
   canSetup: boolean;
+  databricksFeatures: boolean;
   installable: boolean;
   credentialKind?: HarnessCredentialKind;
   readyNotice: { harness: string; hostId: string; version?: string } | null;
   onFix: (mode: HarnessFixMode) => void;
 }) {
   const status = harnessStatus(entry.harness, host);
-  const mode = fixMode(status.reason);
+  const credentialProblem = isCredentialProblem(status.reason, entry.harness);
+  const mode = credentialProblem ? "reconfigure" : fixMode(status.reason);
   const canFix = canSetup && !!host && !host.sandbox_provider;
   const gateway = host?.gateway_inference?.[entry.harness] === true;
   const credential = canSetup
-    ? credentialPresentation(host, entry.harness, credentialKind)
+    ? credentialPresentation(host, entry.harness, databricksFeatures, credentialKind)
     : gateway
       ? {
           label: "Unity Gateway",
@@ -614,10 +626,13 @@ function HarnessDetail({
   );
   const credentialCard = (
     <CredentialCard
-      label={credential.label}
-      description={credential.description}
+      label={credentialProblem ? "Not signed in" : credential.label}
+      description={
+        credentialProblem && host ? missingCredentialCopy(entry, host) : credential.description
+      }
       ready={status.ready}
-      actionable={status.needsSetup && canFix}
+      warning={credentialProblem}
+      actionable={credentialProblem && canFix}
       showStatus={canSetup}
       statusLabel={
         status.reason === "binary-missing" || status.reason === "unconfigured"
@@ -630,7 +645,7 @@ function HarnessDetail({
   const settings = host ? (
     <div className="flex flex-col gap-6">
       {readyNotice && <ReadyNotice entry={entry} host={host} version={readyNotice.version} />}
-      {status.needsSetup && (
+      {status.needsSetup && !credentialProblem && (
         <HarnessWarning
           entry={entry}
           host={host}
@@ -673,14 +688,16 @@ function HarnessDetail({
           </>
         ) : canFix ? (
           <>
-            <HarnessWarning
-              entry={entry}
-              host={host}
-              mode={mode}
-              reason={status.reason}
-              installable={installable}
-              onFix={onFix}
-            />
+            {!credentialProblem && (
+              <HarnessWarning
+                entry={entry}
+                host={host}
+                mode={mode}
+                reason={status.reason}
+                installable={installable}
+                onFix={onFix}
+              />
+            )}
             {credentialCard}
             <StartupSettings host={host} harness={entry.harness} />
           </>
@@ -698,6 +715,25 @@ function fixMode(reason: string | null): HarnessFixMode {
   if (reason === "version-too-low") return "update";
   if (reason === "binary-missing" || reason === "unconfigured") return "install";
   return "reconfigure";
+}
+
+function isCredentialProblem(reason: string | null, harness: string): boolean {
+  return (
+    reason === "needs-auth" ||
+    (reason === "unconfigured" && harnessCredentialFamily(harness) !== null)
+  );
+}
+
+function missingCredentialCopy(entry: HarnessEntry, host: Host): string {
+  const family = harnessCredentialFamily(entry.harness);
+  const credential = entry.harness.includes("codex")
+    ? "ChatGPT account or API key"
+    : entry.harness.includes("claude")
+      ? "Claude subscription or API key"
+      : family !== null
+        ? "API key or gateway credential"
+        : "credential";
+  return `No ${credential} on ${host.name}, so new sessions can’t use ${entry.name}.`;
 }
 
 function MachineField({ host }: { host: Host }) {
@@ -887,6 +923,7 @@ function CredentialCard({
   label,
   description,
   ready,
+  warning,
   actionable,
   showStatus,
   statusLabel,
@@ -895,6 +932,7 @@ function CredentialCard({
   label: string;
   description: string;
   ready: boolean;
+  warning: boolean;
   actionable: boolean;
   showStatus: boolean;
   statusLabel: string;
@@ -902,14 +940,28 @@ function CredentialCard({
 }) {
   const body = (
     <>
-      <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
-        <KeyRoundIcon className="size-4 text-muted-foreground" />
+      <span
+        className={cn(
+          "flex size-8 shrink-0 items-center justify-center rounded-lg",
+          warning ? "bg-amber-500/15" : "bg-muted",
+        )}
+      >
+        <KeyRoundIcon
+          className={cn(
+            "size-4",
+            warning ? "text-amber-600 dark:text-amber-500" : "text-muted-foreground",
+          )}
+        />
       </span>
       <span className="flex min-w-0 flex-1 flex-col text-left">
         <span className="text-ui font-medium">{label}</span>
         <span className="text-xs text-muted-foreground">{description}</span>
       </span>
-      {showStatus && (
+      {actionable ? (
+        <Button size="sm" className="pointer-events-auto relative z-10" onClick={onClick}>
+          Reconfigure
+        </Button>
+      ) : showStatus ? (
         <span
           className={cn(
             "text-xs",
@@ -918,7 +970,7 @@ function CredentialCard({
         >
           {ready ? "Configured" : statusLabel}
         </span>
-      )}
+      ) : null}
     </>
   );
   return (
@@ -927,16 +979,31 @@ function CredentialCard({
         Credential
       </h2>
       {actionable ? (
-        <button
-          type="button"
-          aria-label="Reconfigure credential"
-          className="flex w-full items-center gap-3 rounded-xl border border-border p-3 transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
-          onClick={onClick}
+        <div
+          className={cn(
+            "relative w-full rounded-xl border p-3 transition-colors",
+            warning
+              ? "border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/15"
+              : "border-border hover:bg-muted/50",
+          )}
+        >
+          <button
+            type="button"
+            aria-label="Reconfigure credential"
+            className="absolute inset-0 rounded-xl focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
+            onClick={onClick}
+          />
+          <div className="pointer-events-none relative flex items-center gap-3">{body}</div>
+        </div>
+      ) : (
+        <div
+          className={cn(
+            "flex items-center gap-3 rounded-xl border p-3",
+            warning ? "border-amber-500/30 bg-amber-500/10" : "border-border",
+          )}
         >
           {body}
-        </button>
-      ) : (
-        <div className="flex items-center gap-3 rounded-xl border border-border p-3">{body}</div>
+        </div>
       )}
     </section>
   );

@@ -143,8 +143,10 @@ vi.mock("@/hooks/useHarnessInventory", async (importActual) => ({
 // The "Set up" button is gated on the harness_install feature (like New Chat),
 // so drive that flag through the server-info mock.
 let harnessInstall = true;
+let databricksFeatures = true;
 vi.mock("@/lib/CapabilitiesContext", () => ({
   useServerInfo: () => ({
+    databricks_features: databricksFeatures,
     features: { harness_install: harnessInstall },
     installable_harnesses: [
       "claude-native",
@@ -250,6 +252,7 @@ afterEach(() => {
   hosts = [];
   inventory = INVENTORY;
   harnessInstall = true;
+  databricksFeatures = true;
   fixDialogProps.mockReset();
   startupCalls.mockClear();
   startupData = STARTUP;
@@ -414,7 +417,7 @@ describe("Harness card navigation", () => {
 
     fireEvent.click(screen.getByTestId("harness-settings-codex-native"));
     expect(selected("Settings")).toBe("true");
-    expect(screen.getByText(/Codex can’t sign in on my-laptop/)).toBeTruthy();
+    expect(screen.getByText(/No ChatGPT account or API key on my-laptop/)).toBeTruthy();
   });
 });
 
@@ -439,6 +442,18 @@ describe("Harness details", () => {
     for (const arg of STARTUP.args ?? []) expect(screen.getAllByText(arg)).toHaveLength(1);
     expect(screen.getByText(/Sessions and workspaces may override/)).toBeTruthy();
     expect(screen.getByText(/harness.claude-native in ~\/.omnigent\/config.yaml/)).toBeTruthy();
+  });
+
+  it("uses a neutral Gateway label off Databricks", () => {
+    databricksFeatures = false;
+    hosts = [{ ...ONLINE, gateway_inference: { "claude-native": true } }];
+    renderHarnesses();
+
+    expect(within(card("claude-native")).getByText("· Gateway")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("harness-settings-claude-native"));
+    expect(screen.getByText("Gateway")).toBeTruthy();
+    expect(screen.getByText("Credential provided by the configured AI gateway")).toBeTruthy();
+    expect(screen.queryByText("Isaac")).toBeNull();
   });
 
   it("keeps tool discovery lazy and shows host-reported details", () => {
@@ -503,11 +518,17 @@ describe("Harness details", () => {
     expect(screen.queryByRole("tab", { name: /MCP servers/ })).toBeNull();
   });
 
-  it("shows tabs, a warning, and reconfiguration controls for a broken harness", () => {
+  it("uses the credential card as the warning for a missing credential", () => {
     hosts = [ONLINE];
     renderHarnesses("codex-native");
 
-    expect(screen.getByText(/Codex can’t sign in on my-laptop/)).toBeTruthy();
+    expect(screen.queryByText(/Codex can’t sign in on my-laptop/)).toBeNull();
+    expect(
+      screen.getByText(
+        "No ChatGPT account or API key on my-laptop, so new sessions can’t use Codex.",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByText("Not signed in")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Reconfigure" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Reconfigure credential" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: /MCP servers/ })).toBeTruthy();
@@ -525,6 +546,12 @@ describe("Harness details", () => {
     hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": "version-too-low" } }];
     renderHarnesses("codex-native");
 
+    expect(
+      screen.getByText(
+        "Codex is out of date on my-laptop. Update it so new sessions can use Codex.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText("Not signed in")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Update" }));
     expect(screen.getByTestId("fix-dialog")).toHaveAttribute("data-mode", "update");
   });
@@ -547,24 +574,32 @@ describe("Harness details", () => {
     expect(screen.getByTestId("fix-dialog")).toHaveAttribute("data-mode", "update");
   });
 
-  it("uses Set up instead of Reconfigure for a non-installable Cursor harness", () => {
+  it("uses the credential-card Reconfigure action for Cursor needs-auth", () => {
     hosts = [{ ...ONLINE, configured_harnesses: { "cursor-native": "needs-auth" } }];
     renderHarnesses("cursor-native");
 
-    expect(screen.queryByRole("button", { name: "Reconfigure" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Set up" }));
+    expect(screen.queryByRole("button", { name: "Set up" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Reconfigure" }));
     expect(screen.getByTestId("fix-dialog")).toHaveAttribute("data-mode", "reconfigure");
   });
 
-  it.each([
-    ["binary-missing", "Not installed"],
-    [false, "Not configured"],
-  ])("never calls an install state %s reconfiguration", (reason, label) => {
-    hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": reason } }];
+  it("never calls a missing binary reconfiguration", () => {
+    hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": "binary-missing" } }];
     renderHarnesses("codex-native");
 
-    expect(screen.getAllByText(label)).toHaveLength(2);
+    expect(screen.getAllByText("Not installed")).toHaveLength(2);
     expect(screen.queryByText("Needs reconfiguration")).toBeNull();
+  });
+
+  it("treats an unconfigured credential family as a credential problem", () => {
+    hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": false } }];
+    renderHarnesses("codex-native");
+
+    expect(screen.getByText("Not configured")).toBeTruthy();
+    expect(screen.queryByText(/Codex isn’t set up on my-laptop/)).toBeNull();
+    expect(screen.getByText(/No ChatGPT account or API key on my-laptop/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Reconfigure" }));
+    expect(screen.getByTestId("fix-dialog")).toHaveAttribute("data-mode", "reconfigure");
   });
 
   it("uses dedicated recovery copy for a readiness error", () => {

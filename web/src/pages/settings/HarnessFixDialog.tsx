@@ -72,7 +72,8 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     if (canonicalHarness === "pi" || canonicalHarness === "pi-native") return null;
     return setupSteps[canonicalHarness]?.find((step) => step.kind === "auth")?.command ?? null;
   }, [canonicalHarness, harness, setupSteps]);
-  const isaacSupported = credentialFamily !== null;
+  const isaacSupported =
+    info !== "loading" && info.databricks_features && credentialFamily !== null;
   const personalSupported =
     loginCommand !== null &&
     (isCodexHarness(harness) ||
@@ -80,6 +81,11 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
       canonicalHarness === "claude-native");
   const hasCredentialCards = isaacSupported || personalSupported;
   const canUseCredentialForm = harnessAuthableOnHost(info, harness, host);
+  const credentialChoicePhase: Phase = hasCredentialCards
+    ? "choose"
+    : canUseCredentialForm
+      ? "credentials"
+      : "setup";
   const installable = harnessInstallableOnHost(info, harness, host);
   const requiresManualSetup = !installable && (mode === "install" || mode === "update");
   const initialPhase: Phase = requiresManualSetup
@@ -88,9 +94,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
       ? "progress"
       : mode === "install" && !hasCredentialCards
         ? "install"
-        : hasCredentialCards
-          ? "choose"
-          : "setup";
+        : credentialChoicePhase;
 
   const [phase, setPhase] = useState<Phase>(initialPhase);
   const [choice, setChoice] = useState<HarnessCredentialKind>(
@@ -137,8 +141,8 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
 
   const needsSetup = useCallback(() => {
     setUpdatedNeedsSetup(mode === "update");
-    setPhase(hasCredentialCards ? "choose" : "setup");
-  }, [hasCredentialCards, mode]);
+    setPhase(credentialChoicePhase);
+  }, [credentialChoicePhase, mode]);
 
   const start = useCallback(async () => {
     if (requiresManualSetup) {
@@ -162,7 +166,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
       }
       if (mode === "update") needsSetup();
       else if (hasCredentialCards) authenticate(choice);
-      else setPhase("setup");
+      else setPhase(credentialChoicePhase);
     } catch (reason) {
       fail(reason, id);
     }
@@ -173,6 +177,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     finish,
     harness,
     hasCredentialCards,
+    credentialChoicePhase,
     installHarness,
     mode,
     needsSetup,

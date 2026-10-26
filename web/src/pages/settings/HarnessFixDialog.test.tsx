@@ -11,8 +11,10 @@ import { HarnessFixDialog, type HarnessFixDialogProps } from "./HarnessFixDialog
 vi.mock("@/lib/identity", () => ({ authenticatedFetch: vi.fn() }));
 vi.mock("@/components/ui/toast", () => ({ showToast: vi.fn() }));
 vi.mock("@/lib/clipboard", () => ({ copyText: vi.fn().mockResolvedValue(undefined) }));
+let databricksFeatures = true;
 vi.mock("@/lib/CapabilitiesContext", () => ({
   useServerInfo: () => ({
+    databricks_features: databricksFeatures,
     features: { harness_install: true },
     installable_harnesses: [
       "claude-native",
@@ -92,6 +94,7 @@ function renderDialog(overrides: Partial<HarnessFixDialogProps> = {}) {
 }
 
 beforeEach(() => {
+  databricksFeatures = true;
   vi.clearAllMocks();
   vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
     if (String(input) === "/v1/harnesses") return json(catalog);
@@ -483,11 +486,45 @@ describe("HarnessFixDialog", () => {
     });
   });
 
-  it("offers Isaac but not Personal for Pi", async () => {
+  it.each([
+    ["claude-native", "Claude Code"],
+    ["codex-native", "Codex"],
+    ["pi-native", "Pi"],
+  ])("offers and preselects Isaac for %s on Databricks", (harness, harnessLabel) => {
+    renderDialog({ harness, harnessLabel });
+
+    expect(screen.getByRole("radio", { name: /Isaac/ })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it.each([
+    ["claude-native", "Claude Code"],
+    ["codex-native", "Codex"],
+  ])("preselects Personal subscription for %s off Databricks", async (harness, harnessLabel) => {
+    databricksFeatures = false;
+    renderDialog({ harness, harnessLabel });
+
+    expect(screen.queryByRole("radio", { name: /Isaac/ })).not.toBeInTheDocument();
+    expect(await screen.findByRole("radio", { name: /Personal subscription/ })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+  });
+
+  it("opens the API key and gateway form for Pi off Databricks", async () => {
+    databricksFeatures = false;
+    vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/credentials/detected")) return json({ credentials: [] });
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+
     renderDialog({ harness: "pi-native", harnessLabel: "Pi" });
 
-    expect(screen.getByRole("radio", { name: /Isaac/ })).toBeVisible();
+    expect(screen.queryByRole("radio", { name: /Isaac/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("radio", { name: /Personal subscription/ })).not.toBeInTheDocument();
+    expect(await screen.findByText("Use an API key")).toBeVisible();
+    expect(screen.getByText("Connect a gateway")).toBeVisible();
   });
 
   it("does not offer credential forms before installing a harness", () => {
