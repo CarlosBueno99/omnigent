@@ -6,6 +6,10 @@ import configparser
 import json
 import os
 import stat
+import subprocess
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import httpx
@@ -13,6 +17,7 @@ import pytest
 
 from omnigent.host import databricks_credential as dc
 from omnigent.host.identity import HOST_TOKEN_ENV_VAR
+from tests._helpers.polling import poll_until
 
 
 class _Resp:
@@ -34,6 +39,25 @@ def _isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv(HOST_TOKEN_ENV_VAR, "host-tok")
     monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(tmp_path / ".databrickscfg"))
     monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
+
+
+@pytest.fixture
+def _credential_env(tmp_path: Path) -> dict[str, str]:
+    source = Path(__file__).resolve().parents[2]
+    credential_home = tmp_path / "home"
+    credential_home.mkdir()
+    return {
+        "HOME": str(credential_home),
+        "PYTHONPATH": os.pathsep.join(
+            str(source / entry) for entry in (".", "sdks/python-client", "sdks/ui")
+        ),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "IS_SANDBOX": "1",
+        HOST_TOKEN_ENV_VAR: "host-tok",
+        "DATABRICKS_CONFIG_FILE": str(tmp_path / ".databrickscfg"),
+        "OMNIGENT_CONFIG_HOME": str(tmp_path / "config"),
+        "OMNIGENT_DATA_DIR": str(tmp_path / "data"),
+    }
 
 
 def _patch_get(monkeypatch: pytest.MonkeyPatch, resp_or_exc) -> dict:
@@ -159,6 +183,119 @@ def test_sidecar_records_broker_coords_privately(
         assert not sidecar.exists()
     expected_files = [".databrickscfg"] + ([dc._SIDECAR_NAME] if expected_token else [])
     assert sorted(path.name for path in tmp_path.iterdir()) == expected_files
+
+
+def test_cli_reads_complete_sidecar_during_host_reconfiguration(
+    tmp_path: Path, _credential_env: dict[str, str]
+) -> None:
+    """A separate CLI reader sees old coordinates until the writer publishes new ones."""
+    workspace = "https://workspace.example.test"
+    received: list[tuple[str, str | None]] = []
+
+    class BrokerHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            identity = self.headers.get("X-Omnigent-Host-Token")
+            received.append((self.path, identity))
+            body = json.dumps(
+                {"connected": True, "token": f"bearer-{identity}", "workspace_host": workspace}
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), BrokerHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    writer = None
+    sidecar = tmp_path / dc._SIDECAR_NAME
+    writing = tmp_path / "writing"
+    writer_code = """
+import os
+import sys
+from pathlib import Path
+from omnigent.host import databricks_credential as dc
+from omnigent.host.identity import HOST_TOKEN_ENV_VAR
+
+server, marker = sys.argv[1:]
+assert dc.configure_host_databricks(server, "host")
+original_dump = dc.json.dump
+def paused_dump(payload, handle):
+    handle.write('{"server":')
+    handle.flush()
+    Path(marker).touch()
+    assert sys.stdin.readline() == "publish\\n"
+    handle.seek(0)
+    handle.truncate()
+    original_dump(payload, handle)
+dc.json.dump = paused_dump
+os.environ[HOST_TOKEN_ENV_VAR] = "new-host-tok"
+assert dc.configure_host_databricks(server, "host")
+"""
+
+    def read_token() -> str:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "omnigent.host.databricks_credential",
+                "token",
+                "--coords",
+                str(sidecar),
+                "--workspace",
+                workspace,
+            ],
+            env=_credential_env,
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip()
+
+    try:
+        writer = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                writer_code,
+                f"http://127.0.0.1:{server.server_port}",
+                str(writing),
+            ],
+            env=_credential_env,
+            cwd=tmp_path,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        poll_until(
+            lambda: writing.exists() or writer.poll() is not None, timeout_s=10, interval_s=0.02
+        )
+        assert writer.poll() is None, writer.communicate(timeout=1)
+        assert read_token() == "bearer-host-tok"
+        _, stderr = writer.communicate("publish\n", timeout=10)
+        assert writer.returncode == 0, stderr
+        assert read_token() == "bearer-new-host-tok"
+        assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600
+        assert "bearer-" not in sidecar.read_text()
+        assert not list(tmp_path.glob(f".{dc._SIDECAR_NAME}.*"))
+        assert received == [
+            ("/v1/hosts/host/credentials/databricks", identity)
+            for identity in ("host-tok", "new-host-tok", "host-tok", "new-host-tok")
+        ]
+    finally:
+        if writer is not None and writer.poll() is None:
+            writer.kill()
+            writer.communicate(timeout=5)
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+        assert not server_thread.is_alive()
 
 
 def test_preserves_existing_profiles(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
