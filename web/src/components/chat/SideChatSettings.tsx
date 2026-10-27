@@ -58,15 +58,9 @@ export function SideChatSettings({
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
-  const sessionOptions = state.codexModelOptions.length
-    ? state.codexModelOptions
-    : session.codexModelOptions?.length
-      ? session.codexModelOptions
-      : nativeSide
-        ? parentState.codexModelOptions.length
-          ? parentState.codexModelOptions
-          : (parent?.codexModelOptions ?? [])
-        : [];
+  const catalogs = [state.codexModelOptions, session.codexModelOptions];
+  if (nativeSide) catalogs.push(parentState.codexModelOptions, parent?.codexModelOptions);
+  const sessionOptions = catalogs.find((catalog) => catalog?.length) ?? [];
   const capabilities = nativeSide
     ? { ...session, labels: { ...session.labels, "omnigent.wrapper": "codex-native-ui" } }
     : session;
@@ -98,7 +92,10 @@ export function SideChatSettings({
   const modelLabel = selectedModel
     ? nativeModelLabel(selectedModel)
     : (model ?? defaultModelLabel(options));
-  const effort = draft?.settings?.reasoningEffort ?? session.reasoningEffort ?? null;
+  const effort =
+    draft?.settings?.reasoningEffort !== undefined
+      ? draft.settings.reasoningEffort
+      : (session.reasoningEffort ?? null);
   const supportsEffort = shouldShowEffortPicker(capabilities, family);
   const efforts = supportsEffort ? effortLevelsForConv(capabilities, options, model, family) : [];
   const showModels = kind !== null && options.length > 0;
@@ -112,7 +109,7 @@ export function SideChatSettings({
   async function save(updates: SideChatModelSettings) {
     if (disabled || savingRef.current) return;
     if (draft) {
-      draft.onChange({ ...(model ? { modelOverride: model } : {}), ...updates });
+      draft.onChange(updates);
       return;
     }
     savingRef.current = true;
@@ -160,15 +157,11 @@ export function SideChatSettings({
                     const nextEfforts = supportsEffort
                       ? effortLevelsForConv(capabilities, options, option.id, family)
                       : [];
-                    const nextEffort =
-                      nextEfforts.length > 0
-                        ? effort && nextEfforts.includes(effort)
-                          ? effort
-                          : (option.defaultReasoningEffort ?? nextEfforts[0])
-                        : undefined;
+                    let nextEffort = option.defaultReasoningEffort ?? nextEfforts[0] ?? null;
+                    if (effort && nextEfforts.includes(effort)) nextEffort = effort;
                     void save({
                       modelOverride: option.id,
-                      ...(nextEffort ? { reasoningEffort: nextEffort } : {}),
+                      ...(supportsEffort ? { reasoningEffort: nextEffort } : {}),
                     });
                   },
                   data: { "data-model-id": option.id },

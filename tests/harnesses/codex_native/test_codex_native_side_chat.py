@@ -47,6 +47,7 @@ _CATALOG: _JsonObject = {
         "data": [
             {
                 "id": model,
+                "defaultReasoningEffort": "medium",
                 "supportedReasoningEfforts": [{"reasoningEffort": effort} for effort in efforts],
             }
             for model, efforts in (
@@ -208,22 +209,29 @@ async def test_fork_returns_none_when_response_has_no_thread_id() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("settings", [{}, {"model": "gpt-6-sol", "effort": "max"}])
-async def test_submit_side_turn_targets_child_thread(settings: dict[str, str]) -> None:
-    client = _FakeCodexClient({"turn/start": {"result": {"turn": {"id": "turn_1"}}}})
+@pytest.mark.parametrize(
+    "settings",
+    [{}, {"model": "gpt-6-sol", "effort": "max"}, {"model": "gpt-6-sol", "reset_effort": True}],
+)
+async def test_submit_side_turn_targets_child_thread(settings: dict[str, Any]) -> None:
+    client = _FakeCodexClient(
+        {"turn/start": {"result": {"turn": {"id": "turn_1"}}}, "model/list": _CATALOG}
+    )
 
     turn_id = await side_chat.submit_side_turn(
         client, "thread_side", "why is the sky blue?", **settings
     )
 
     assert turn_id == "turn_1"
-    method, params = client.calls[0]
+    method, params = client.calls[-1]
     assert method == "turn/start"
     assert params["threadId"] == "thread_side"
     assert params["input"] == [{"type": "text", "text": "why is the sky blue?"}]
     assert "collaborationMode" not in params
-    for key in ("model", "effort"):
-        assert params.get(key) == settings.get(key)
+    assert params.get("model") == settings.get("model")
+    assert params.get("effort") == (
+        "medium" if settings.get("reset_effort") else settings.get("effort")
+    )
 
 
 @pytest.mark.parametrize(
@@ -506,9 +514,12 @@ def test_peek_side_chat_requests_discards_corrupt_payloads(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("settings", [None, {"model": "gpt-6-sol", "effort": "max"}])
+@pytest.mark.parametrize(
+    "settings",
+    [None, {"model": "gpt-6-sol", "effort": "max"}, {"model": "gpt-6-sol", "effort": None}],
+)
 async def test_drive_side_chat_requests_forks_on_the_forwarder_client(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settings: dict[str, str] | None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settings: dict[str, str | None] | None
 ) -> None:
     """The drain loop must fork on the connection it was handed.
 
@@ -517,6 +528,7 @@ async def test_drive_side_chat_requests_forks_on_the_forwarder_client(
     """
     client = _FakeCodexClient(
         {
+            "model/list": _CATALOG,
             "thread/fork": {"result": {"thread": {"id": "thread_side"}}},
             "turn/start": {"result": {"turn": {"id": "turn_1"}}},
         }
@@ -528,7 +540,7 @@ async def test_drive_side_chat_requests_forks_on_the_forwarder_client(
     )
 
     async def register(*_args: Any, **_kwargs: Any) -> str:
-        assert [method for method, _ in client.calls] == ["thread/fork"]
+        assert [method for method, _ in client.calls if method != "model/list"] == ["thread/fork"]
         return "conv_side"
 
     monkeypatch.setattr(fwd, "_register_child_session", register)
@@ -545,19 +557,25 @@ async def test_drive_side_chat_requests_forks_on_the_forwarder_client(
             target=SimpleNamespace(thread_id="thread_parent", session_id="conv_parent"),
         )
 
-    assert [m for m, _ in client.calls] == ["thread/fork", "turn/start"]
-    assert client.calls[0][1]["threadId"] == "thread_parent"
-    assert client.calls[0][1]["ephemeral"] is True
-    assert client.calls[1][1]["threadId"] == "thread_side"  # first turn on the fork
+    turns = [(method, params) for method, params in client.calls if method != "model/list"]
+    assert [method for method, _ in turns] == ["thread/fork", "turn/start"]
+    assert turns[0][1]["threadId"] == "thread_parent"
+    assert turns[0][1]["ephemeral"] is True
+    assert turns[1][1]["threadId"] == "thread_side"  # first turn on the fork
     assert side_chat.peek_side_chat_requests(tmp_path) == []  # request consumed after forking
 
     if settings:
-        assert client.calls[0][1]["model"] == settings["model"]
-        assert client.calls[0][1]["config"] == {"model_reasoning_effort": "max"}
-        assert client.calls[1][1]["effort"] == "max"
+        expected_effort = settings["effort"] or "medium"
+        assert turns[0][1]["model"] == settings["model"]
+        assert turns[0][1]["config"] == {"model_reasoning_effort": expected_effort}
+        assert turns[1][1]["effort"] == expected_effort
         ap_client.patch.assert_awaited_once_with(
             "/v1/sessions/conv_side",
-            json={"silent": True, "model_override": "gpt-6-sol", "reasoning_effort": "max"},
+            json={
+                "silent": True,
+                "model_override": "gpt-6-sol",
+                "reasoning_effort": settings["effort"] or "default",
+            },
         )
     else:
         ap_client.patch.assert_not_awaited()

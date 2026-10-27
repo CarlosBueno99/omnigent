@@ -236,6 +236,78 @@ function DraftPane({ id }: { id: string }) {
   );
 }
 
+it("does not pin a runner-reported model when changing only draft effort", async () => {
+  const onChange = vi.fn();
+  render(
+    <QueryClientProvider client={cache}>
+      <SideChatSettings
+        session={{
+          ...child,
+          id: "parent",
+          parentSessionId: null,
+          harness: "claude-native",
+          labels: { "omnigent.wrapper": "claude-code-native-ui" },
+          modelOverride: null,
+          llmModel: "reported-model[1m]",
+        }}
+        draft={{ onChange, disabled: false }}
+      />
+    </QueryClientProvider>,
+  );
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Side chat model and effort" }));
+  await user.click(screen.getByTestId("side-chat-model-edit"));
+  await user.click(screen.getByRole("menuitemcheckbox", { name: "Low" }));
+  expect(onChange).toHaveBeenCalledWith({ reasoningEffort: "low" });
+  expect(sessionsApi.updateSession).not.toHaveBeenCalled();
+});
+
+it.each([false, true])(
+  "clears stale effort for a model with no effort choices (draft=%s)",
+  async (draft) => {
+    const onChange = vi.fn();
+    const session = {
+      ...child,
+      codexModelOptions: [
+        models[0],
+        { id: "model-without-effort", displayName: "No effort model" },
+      ],
+    };
+    cache.setQueryData(["session", "side"], session);
+    cache.setQueryData(["session", "parent"], parent);
+    const view = render(
+      <QueryClientProvider client={cache}>
+        <SideChatSettings
+          session={session}
+          draft={draft ? { onChange, disabled: false } : undefined}
+        />
+      </QueryClientProvider>,
+    );
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Side chat model and effort" }));
+    await user.click(screen.getByTestId("side-chat-model-edit"));
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "No effort model" }));
+    const updates = { modelOverride: "model-without-effort", reasoningEffort: null };
+    if (draft) expect(onChange).toHaveBeenCalledWith(updates);
+    else expect(sessionsApi.updateSession).toHaveBeenCalledWith("side", updates);
+    await waitFor(() =>
+      expect(screen.getByRole("menuitemcheckbox", { name: "No effort model" })).toBeEnabled(),
+    );
+    view.rerender(
+      <QueryClientProvider client={cache}>
+        <SideChatSettings
+          session={draft ? session : { ...session, ...updates }}
+          draft={draft ? { settings: updates, onChange, disabled: false } : undefined}
+        />
+      </QueryClientProvider>,
+    );
+    expect(
+      screen.getByRole("button", { name: "Side chat model and effort" }),
+    ).not.toHaveTextContent("High");
+    expect(screen.queryByTestId("side-chat-efforts")).not.toBeInTheDocument();
+  },
+);
+
 it("keeps unsent settings per draft across remounts without updating the parent", async () => {
   const user = userEvent.setup();
   const view = render(

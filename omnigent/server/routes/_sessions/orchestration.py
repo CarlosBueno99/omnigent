@@ -6324,7 +6324,7 @@ def _build_native_terminal_message_event(
         event["side_chat_settings"] = {
             key: value
             for key, value in (("model", side_model), ("effort", side_effort))
-            if value is not None
+            if value is not None or (key == "effort" and key in side_settings)
         }
     if agent_revision is not None:
         event["agent_revision"] = agent_revision
@@ -7818,7 +7818,7 @@ async def _forward_codex_side_chat_turn(
             **({"model_override": conv.model_override} if conv.model_override is not None else {}),
             **(
                 {"reasoning_effort": conv.reasoning_effort}
-                if conv.reasoning_effort is not None
+                if conv.reasoning_effort is not None or conv.model_override is not None
                 else {}
             ),
         },

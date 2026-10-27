@@ -2421,7 +2421,7 @@ async def _drive_side_chat_requests(
                     async def configure_child(
                         child_thread_id: str,
                         parent_thread_id: str = parent_thread_id,
-                        settings: dict[str, str] = request.settings or {},
+                        settings: dict[str, str | None] = request.settings or {},
                     ) -> None:
                         child_session_id = await _register_child_session(
                             ap_client,
@@ -2442,7 +2442,7 @@ async def _drive_side_chat_requests(
                                     else {}
                                 ),
                                 **(
-                                    {"reasoning_effort": settings["effort"]}
+                                    {"reasoning_effort": settings["effort"] or "default"}
                                     if "effort" in settings
                                     else {}
                                 ),

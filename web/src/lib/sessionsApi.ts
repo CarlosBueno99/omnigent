@@ -821,7 +821,7 @@ export async function forkSession(
     upToResponseId?: string;
     config?: {
       modelOverride?: string;
-      reasoningEffort?: string;
+      reasoningEffort?: string | null;
       terminalLaunchArgs?: string[];
       codexBypassSandbox?: boolean;
     };
@@ -836,7 +836,7 @@ export async function forkSession(
     agent_id?: string;
     up_to_response_id?: string;
     model_override?: string;
-    reasoning_effort?: string;
+    reasoning_effort?: string | null;
     terminal_launch_args?: string[];
     codex_bypass_sandbox?: boolean;
     host_type?: "managed";

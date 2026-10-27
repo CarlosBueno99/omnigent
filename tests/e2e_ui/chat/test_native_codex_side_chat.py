@@ -132,6 +132,21 @@ def test_native_codex_side_chat_inherits_context_and_closes_independently(
     assert picked_effort.value.ok
     page.keyboard.press("Escape")
     expect(settings).to_contain_text("Max")
+    expected_followup_effort = "max"
+    if mobile:
+        # A cleared pick must reset the thread's effort rather than inherit the previous turn.
+        reset = httpx.patch(
+            f"{base_url}/v1/sessions/{child_id}",
+            json={"reasoning_effort": "default"},
+            timeout=10.0,
+        )
+        reset.raise_for_status()
+        assert reset.json()["reasoning_effort"] is None
+        expected_followup_effort = next(
+            model["defaultReasoningEffort"]
+            for model in parent["model_options"]
+            if model["id"] == "gpt-6-sol"
+        )
     page.get_by_test_id("side-chat-input").fill(followup)
     expect(page.get_by_test_id("side-chat-send")).to_be_enabled(timeout=30_000)
     page.get_by_test_id("side-chat-send").click()
@@ -165,7 +180,7 @@ def test_native_codex_side_chat_inherits_context_and_closes_independently(
     assert side_requests
     assert {
         (request["model"], request.get("reasoning", {}).get("effort")) for request in side_requests
-    } == {("gpt-6-sol", "max")}
+    } == {("gpt-6-sol", expected_followup_effort)}
 
     with page.expect_response(f"**/v1/sessions/{child_id}/events") as stopped:
         page.get_by_role("button", name="Close Side chat 1", exact=True).click()

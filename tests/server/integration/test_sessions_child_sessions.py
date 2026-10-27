@@ -1907,8 +1907,9 @@ async def _create_native_child(client: httpx.AsyncClient, name: str) -> dict[str
     return child_resp.json()
 
 
+@pytest.mark.parametrize("effort", ["max", "default"])
 async def test_codex_side_settings_are_saved_and_forwarded_only_to_child_turn(
-    client: httpx.AsyncClient, db_uri: str, monkeypatch: pytest.MonkeyPatch
+    client: httpx.AsyncClient, db_uri: str, monkeypatch: pytest.MonkeyPatch, effort: str
 ) -> None:
     from omnigent.server.routes._sessions.orchestration import _forward_codex_side_chat_turn
     from omnigent.server.routes.sessions import routes_core
@@ -1938,16 +1939,17 @@ async def test_codex_side_settings_are_saved_and_forwarded_only_to_child_turn(
         pytest.fail("A side-thread setting must not drive a terminal")
 
     monkeypatch.setattr(routes_core, "_forward_session_change_to_runner", no_terminal_change)
+    saved_effort = None if effort == "default" else effort
     response = await client.patch(
         f"/v1/sessions/{child['id']}",
         json={
             "model_override": "gpt-6-sol",
-            "reasoning_effort": "max",
+            "reasoning_effort": effort,
         },
     )
     assert response.status_code == 200, response.text
     assert response.json()["model_override"] == "gpt-6-sol"
-    assert response.json()["reasoning_effort"] == "max"
+    assert response.json()["reasoning_effort"] == saved_effort
     repeated = await client.post(
         f"/v1/sessions/{parent['id']}/events",
         json={
@@ -1984,7 +1986,7 @@ async def test_codex_side_settings_are_saved_and_forwarded_only_to_child_turn(
             "content": [{"type": "input_text", "text": "Follow up"}],
             "codex_side_thread_id": "thread-side",
             "model_override": "gpt-6-sol",
-            "reasoning_effort": "max",
+            "reasoning_effort": saved_effort,
         }
     ]
     parent_after = store.get_conversation(child["parent_session_id"])

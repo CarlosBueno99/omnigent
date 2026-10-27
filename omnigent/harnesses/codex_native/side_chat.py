@@ -182,6 +182,7 @@ async def submit_side_turn(
     collaboration_mode: _JsonObject | None = None,
     model: str | None = None,
     effort: str | None = None,
+    reset_effort: bool = False,
 ) -> str | None:
     """
     Submit one user turn to a side-chat thread over the app-server.
@@ -197,8 +198,13 @@ async def submit_side_turn(
     :param collaboration_mode: Optional Codex collaboration mode payload.
     :param model: Side-thread model override for this and subsequent turns.
     :param effort: Side-thread reasoning effort for this and subsequent turns.
+    :param reset_effort: Resolve the selected model's default instead of inheriting effort.
     :returns: The started turn id, or ``None`` when absent.
     """
+    if reset_effort:
+        from omnigent.harnesses.codex_native.app_server import resolve_codex_effort_for_model
+
+        effort = await resolve_codex_effort_for_model(codex_client, None, model)
     params: _JsonObject = {
         "threadId": child_thread_id,
         "input": [{"type": "text", "text": text}],
@@ -267,7 +273,7 @@ async def open_side_chat_on_client(
     question: str,
     bridge_dir: Path | None = None,
     developer_instructions: str | None = SIDE_REFERENCE_ONLY_INSTRUCTIONS,
-    settings_override: Mapping[str, str] | None = None,
+    settings_override: Mapping[str, str | None] | None = None,
     before_turn: Callable[[str], Awaitable[None]] | None = None,
 ) -> str | None:
     """
@@ -295,7 +301,17 @@ async def open_side_chat_on_client(
         if bridge_dir is not None
         else None
     )
-    settings = {**(settings or {}), **(settings_override or {})}
+    overrides = settings_override or {}
+    settings = {
+        **(settings or {}),
+        **{key: value for key, value in overrides.items() if value is not None},
+    }
+    if "effort" in overrides and overrides["effort"] is None:
+        from omnigent.harnesses.codex_native.app_server import resolve_codex_effort_for_model
+
+        settings["effort"] = await resolve_codex_effort_for_model(
+            codex_client, None, settings.get("model")
+        )
     child_thread_id = await fork_ephemeral_side_thread(
         codex_client,
         parent_thread_id,
@@ -306,13 +322,12 @@ async def open_side_chat_on_client(
         return None
     if before_turn is not None:
         await before_turn(child_thread_id)
-    overrides = settings_override or {}
     await submit_side_turn(
         codex_client,
         child_thread_id,
         question,
         model=overrides.get("model"),
-        effort=overrides.get("effort"),
+        effort=settings.get("effort") if "effort" in overrides else None,
     )
     return child_thread_id
 
@@ -414,7 +429,7 @@ async def register_side_fork_child(
 
 
 def request_side_chat(
-    bridge_dir: Path, question: str, *, settings: Mapping[str, str] | None = None
+    bridge_dir: Path, question: str, *, settings: Mapping[str, str | None] | None = None
 ) -> None:
     """
     Record a ``/side`` question for the forwarder to fork.
@@ -437,7 +452,7 @@ class SideChatRequest(NamedTuple):
 
     path: Path
     question: str
-    settings: dict[str, str] | None = None
+    settings: dict[str, str | None] | None = None
 
 
 def peek_side_chat_requests(bridge_dir: Path) -> list[SideChatRequest]:
@@ -474,7 +489,8 @@ def peek_side_chat_requests(bridge_dir: Path) -> list[SideChatRequest]:
             if settings is not None and (
                 not isinstance(settings, dict)
                 or any(
-                    key not in {"model", "effort"} or not isinstance(value, str)
+                    key not in {"model", "effort"}
+                    or (not isinstance(value, str) and not (key == "effort" and value is None))
                     for key, value in settings.items()
                 )
             ):

@@ -289,9 +289,16 @@ def test_wrapper_label_session_is_native_without_resolving_harness(
     assert sessions_routes._is_native_terminal_session(conv) is True
 
 
-@pytest.mark.parametrize("settings", [{"model": "gpt-6-sol", "effort": "max"}, {"effort": "high"}])
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"model": "gpt-6-sol", "effort": "max"},
+        {"effort": "high"},
+        {"model": "gpt-6-sol", "effort": None},
+    ],
+)
 def test_native_side_chat_settings_are_forwarded_without_changing_parent(
-    settings: dict[str, str],
+    settings: dict[str, str | None],
 ) -> None:
     from omnigent.server.routes import sessions as routes
 

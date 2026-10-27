@@ -6464,6 +6464,8 @@ def create_runner_app(
                         _side_text,
                         model=body.get("model_override"),
                         effort=body.get("reasoning_effort"),
+                        reset_effort="reasoning_effort" in body
+                        and body["reasoning_effort"] is None,
                     )
             except CodexAppServerResponseError as exc:
                 # Codex refused the turn (e.g. typing into a multi-agent-v2

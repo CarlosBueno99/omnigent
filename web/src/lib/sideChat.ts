@@ -60,5 +60,5 @@ export function isSideChatCommand(text: string): boolean {
 /** Optional model and effort picks for a side chat’s first turn. */
 export interface SideChatModelSettings {
   modelOverride?: string;
-  reasoningEffort?: string;
+  reasoningEffort?: string | null;
 }
