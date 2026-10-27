@@ -21,6 +21,7 @@ from tests.harnesses.codex_native.session._support import (
     _elicitation_tracker,
     _expected_status_data,
     _FakeCodexAppServerClient,
+    _forwarder_context,
     _recording_forwarder_client,
     _usage_coalescer,
     _write_forwarder_bridge,
@@ -577,6 +578,130 @@ def test_subscribe_until_ready_replays_completed_turn_status(
     state = read_bridge_state(tmp_path)
     assert state is not None
     assert state.active_turn_id is None
+
+
+def _user_message_item(item_id: str, text: str) -> dict[str, Any]:
+    return {"type": "userMessage", "id": item_id, "content": [{"type": "text", "text": text}]}
+
+
+def _replay_then_live_user_posts(
+    tmp_path: Path, *, replayed_text: str, live_text: str, live_first: bool
+) -> list[dict[str, Any]]:
+    """Subscribe after ``turn/start``, deliver its user input live, and return user posts."""
+    _write_forwarder_bridge(tmp_path, active_turn_id="turn_123")
+    fake_client = _FakeCodexAppServerClient(
+        response={
+            "result": {
+                "thread": {
+                    "id": "thread_123",
+                    "turns": [
+                        {"id": "turn_123", "items": [_user_message_item("item-1", replayed_text)]}
+                    ],
+                }
+            }
+        }
+    )
+    forwarder_state = codex_native_forwarder._CodexForwarderState(
+        parent_session_id="conv_123",
+        codex_client=fake_client,  # type: ignore[arg-type]
+    )
+    live_event = {
+        "method": "item/completed",
+        "params": {
+            "threadId": "thread_123",
+            "turnId": "turn_123",
+            "item": _user_message_item("0b6f1c2e-live-user", live_text),
+        },
+    }
+    posted: list[dict[str, Any]] = []
+
+    async def run() -> None:
+        async with _recording_forwarder_client(posted) as client:
+
+            async def deliver_live() -> None:
+                await codex_native_forwarder._handle_event(
+                    client,
+                    **_forwarder_context(client, tmp_path),
+                    event=live_event,
+                    expected_thread_id="thread_123",
+                    forwarder_state=forwarder_state,
+                )
+
+            if live_first:
+                await deliver_live()
+            await codex_native_forwarder._subscribe_until_ready(
+                fake_client,  # type: ignore[arg-type]
+                client,
+                session_id="conv_123",
+                bridge_dir=tmp_path,
+                thread_id="thread_123",
+                usage_coalescer=_usage_coalescer(client),
+                elicitation_tracker=_elicitation_tracker(),
+                forwarder_state=forwarder_state,
+            )
+            if not live_first:
+                await deliver_live()
+
+    asyncio.run(run())
+
+    assert fake_client.requests == [("thread/resume", {"threadId": "thread_123"})]
+    return [
+        payload
+        for payload in posted
+        if payload["type"] == "external_conversation_item"
+        and payload["data"]["item_data"]["role"] == "user"
+    ]
+
+
+@pytest.mark.parametrize("live_first", [False, True], ids=["replay_first", "live_first"])
+def test_resume_replay_and_live_delivery_post_one_user_input_once(
+    tmp_path: Path, live_first: bool
+) -> None:
+    user_posts = _replay_then_live_user_posts(
+        tmp_path,
+        replayed_text="Can you check if linear tickets are up-to-date?",
+        live_text="Can you check if linear tickets are up-to-date?",
+        live_first=live_first,
+    )
+
+    assert [payload["data"]["item_data"]["content"][0]["text"] for payload in user_posts] == [
+        "Can you check if linear tickets are up-to-date?"
+    ], [payload["data"]["source_id"] for payload in user_posts]
+
+
+def test_resume_replay_and_live_delivery_keep_distinct_user_inputs(tmp_path: Path) -> None:
+    user_posts = _replay_then_live_user_posts(
+        tmp_path,
+        replayed_text="Can you check if linear tickets are up-to-date?",
+        live_text="Also list the stale ones.",
+        live_first=False,
+    )
+
+    assert [payload["data"]["item_data"]["content"][0]["text"] for payload in user_posts] == [
+        "Can you check if linear tickets are up-to-date?",
+        "Also list the stale ones.",
+    ]
+
+
+def test_late_resume_keeps_identical_live_user_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A connection that resumes late missed the snapshot's live copy, so a later match is new."""
+    monkeypatch.setattr(
+        _FakeCodexAppServerClient, "is_subscribed_to_thread", lambda _self, _thread_id: False
+    )
+
+    user_posts = _replay_then_live_user_posts(
+        tmp_path,
+        replayed_text="Run the tests again.",
+        live_text="Run the tests again.",
+        live_first=False,
+    )
+
+    assert [payload["data"]["item_data"]["content"][0]["text"] for payload in user_posts] == [
+        "Run the tests again.",
+        "Run the tests again.",
+    ]
 
 
 @pytest.mark.parametrize(

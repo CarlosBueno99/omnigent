@@ -89,6 +89,35 @@ async def test_rejected_request_traceback_identifies_rpc(method: str) -> None:
     assert "private prompt" not in rendered
 
 
+async def test_client_tracks_threads_it_started_or_resumed() -> None:
+    """Only successful thread starts and resumes make the connection receive notifications."""
+    client = CodexAppServerClient(ws_url="ws://127.0.0.1:12345")
+    websocket = AsyncMock(spec=ClientConnection)
+    client._ws = cast(ClientConnection, websocket)
+    replies: list[dict[str, object]] = [
+        {"error": {"code": -32600, "message": "thread not found"}},
+        {"result": {"thread": {"id": "thread_read"}}},
+        {"result": {"thread": {"id": "thread_started"}}},
+        {"result": {}},
+    ]
+
+    async def reply(raw: str) -> None:
+        request_id = json.loads(raw)["id"]
+        client._pending_requests.pop(request_id).set_result({"id": request_id, **replies.pop(0)})
+
+    websocket.send.side_effect = reply
+    with pytest.raises(CodexAppServerResponseError):
+        await client.request("thread/resume", {"threadId": "thread_missing"})
+    await client.request("thread/read", {"threadId": "thread_read"})
+    await client.request("thread/start", {})
+    await client.request("thread/resume", {"threadId": "thread_resumed"})
+
+    assert not client.is_subscribed_to_thread("thread_missing")
+    assert not client.is_subscribed_to_thread("thread_read")
+    assert client.is_subscribed_to_thread("thread_started")
+    assert client.is_subscribed_to_thread("thread_resumed")
+
+
 @pytest.mark.parametrize(
     "reader_error", [ConnectionClosedError(None, None), ConnectionClosedOK(None, None)]
 )
