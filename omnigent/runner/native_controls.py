@@ -479,7 +479,7 @@ def build_native_controls(
             ):
                 return False
             _logger.info(
-                "Recreating unreachable owned Codex backend before settings update for session=%s",
+                "Recreating unreachable owned Codex backend for session=%s",
                 conv_id,
                 extra={"session_id": conv_id},
             )
@@ -673,7 +673,7 @@ def build_native_controls(
                         "detail": "Codex did not confirm the settings update in time.",
                     },
                 ), settings
-        except Exception as exc:  # surface app-server settings failures.
+        except Exception as exc:  # noqa: BLE001 - surface app-server settings failures.
             _logger.warning(
                 "Codex-native thread/settings/update failed for session=%s thread=%s settings=%s",
                 conv_id,
@@ -933,15 +933,18 @@ def build_native_controls(
             )
         return JSONResponse(status_code=200, content={"approval_mode": preset.value})
 
-    async def _codex_native_model_options(conv_id: str) -> list[_JsonObject]:
+    async def _codex_native_model_options(
+        conv_id: str, *, retry_unreachable: bool = True
+    ) -> list[_JsonObject]:
         from omnigent.harnesses.codex_native.app_server import (
             client_for_transport,
             list_codex_model_options,
             mark_launch_default,
         )
         from omnigent.harnesses.codex_native.bridge import read_codex_home_config_model
+        from omnigent.runner.native.orchestration import _AUTO_CODEX_APP_SERVERS
 
-        state = await _codex_native_bridge_state_for_session(
+        state, bridge_dir = await _codex_native_bridge_state_and_dir_for_session(
             conv_id,
             action="model options",
             missing_state_log_level=logging.DEBUG,
@@ -953,8 +956,25 @@ def build_native_controls(
             state.socket_path,
             client_name="omnigent-codex-native-runner",
         )
+        failed_backend = _AUTO_CODEX_APP_SERVERS.get(conv_id)
         try:
-            await codex_client.connect()
+            try:
+                await codex_client.connect()
+            except (ConnectionRefusedError, FileNotFoundError):
+                if not retry_unreachable:
+                    raise
+                # Only retire the same stopped, owned launch. Its replacement and
+                # the one catalog retry share a single recovery budget.
+                async with asyncio.timeout(_CODEX_SETTINGS_READY_TIMEOUT_S):
+                    if not await _close_unreachable_owned_codex(
+                        conv_id, state, bridge_dir, failed_backend
+                    ):
+                        raise
+                    if await _ready_codex_bridge_for_settings(conv_id) is None:
+                        raise _CodexNativeModelOptionsNotReady(
+                            "Codex-native model options are not ready yet."
+                        ) from None
+                    return await _codex_native_model_options(conv_id, retry_unreachable=False)
             rows = await list_codex_model_options(codex_client)
         finally:
             with contextlib.suppress(Exception):
@@ -998,7 +1018,7 @@ def build_native_controls(
             await asyncio.to_thread(
                 model_catalog_store.write_catalog, "codex-native", fingerprint, shaped
             )
-        except Exception:  # write-back is best-effort
+        except Exception:  # noqa: BLE001 - write-back is best-effort
             _logger.debug(
                 "codex model-catalog write-back skipped",
                 exc_info=True,
@@ -1318,7 +1338,7 @@ def build_native_controls(
                 await asyncio.to_thread(
                     confirm_dialog_if_open, bridge_dir, hint=SWITCH_MODEL_DIALOG_HINT
                 )
-            except Exception:  # best-effort; the report reconciles
+            except Exception:  # noqa: BLE001 - best-effort; the report reconciles
                 _logger.debug(
                     "late model-dialog watch errored for session=%s",
                     conv_id,
