@@ -3,27 +3,21 @@
 // assistant's prose reads first; per-tool views plug in through `toolViews.ts`.
 
 import {
-  CheckIcon,
   ChevronRightIcon,
   CircleSlashIcon,
-  CopyIcon,
   Loader2Icon,
   Maximize2Icon,
   Minimize2Icon,
-  WrapTextIcon,
   XCircleIcon,
 } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  CodeBlock,
   CodeBlockActions,
   type CodeColorScheme,
   type CodeLanguage,
   CodeBlockContainer,
   CodeBlockContent,
-  CodeBlockHeader,
-  CodeBlockTitle,
 } from "@/components/ai-elements/code-block";
 import { useResolvedThemeMode } from "@/components/theme/useResolvedThemeMode";
 import { useTerminalIsDark } from "@/components/theme/useTerminalIsDark";
@@ -31,7 +25,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { RenderItem, ToolState } from "@/lib/renderItems";
 import { dropTrailingPartialEscape, showControlCharacters, stripAnsi } from "@/lib/ansi";
@@ -60,8 +53,9 @@ import {
 } from "@/lib/toolValue";
 import { resolveChatFilePath } from "@/hooks/useWorkspaceChangedFiles";
 import { useFileViewer, useWorkspacePaths } from "@/shell/FileViewerContext";
+import { CodePanel, CopyTextButton, WrapTextButton } from "./ToolCodePanel";
 import { ToolValueView } from "./ToolValueView";
-import { type ToolBodyProps, toolViewFor } from "./toolViews";
+import { type ToolBodyProps, type ToolView, toolViewFor } from "./toolViews";
 
 const OUTPUT_PREVIEW_LINE_LIMIT = 80;
 const OUTPUT_PREVIEW_CHAR_LIMIT = 12_000;
@@ -220,7 +214,6 @@ export function ToolCard({
       ? null
       : (resolveChatFilePath(title.filePath, root, home)?.path ?? null);
   const onBodyClick = openFile && linkPath ? () => openFile(linkPath) : undefined;
-  const Body = view?.Body ?? DefaultToolBody;
 
   return (
     <Collapsible defaultOpen={false} className="group not-prose w-full">
@@ -235,16 +228,22 @@ export function ToolCard({
         onBodyClick={onBodyClick}
       />
       <CollapsibleContent className="mt-1 ml-2 space-y-2 border-l pl-3 py-1 data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=open]:animate-in">
-        <Body call={call} duration={displayDuration} />
+        <DefaultToolBody call={call} duration={displayDuration} view={view} />
       </CollapsibleContent>
     </Collapsible>
   );
 }
 
-/** Expanded content for tools without a registered view: shell or generic. */
-function DefaultToolBody({ call, duration }: ToolBodyProps) {
+interface ToolCardBodyProps extends ToolBodyProps {
+  view: ToolView | undefined;
+}
+
+/** Expanded content: a registered view's body, a shell panel, or generic fields. */
+function DefaultToolBody({ call, duration, view }: ToolCardBodyProps) {
   const shellCall = useMemo(() => shellToolCall(call.name, call.args), [call.name, call.args]);
-  if (shellCall === null) return <GenericToolBody call={call} duration={duration} />;
+  if (shellCall === null || view?.Body !== undefined) {
+    return <GenericToolBody call={call} duration={duration} view={view} />;
+  }
   const { cwd } = call.args;
   return (
     <ShellTerminalPanel
@@ -261,18 +260,20 @@ function DefaultToolBody({ call, duration }: ToolBodyProps) {
 type ToolBodyView = "fields" | "raw";
 
 /**
- * The input and result as labeled fields, with the exact JSON payloads behind
- * a Fields | Raw switch. The switch keeps its place so it keeps keyboard focus.
+ * The input and result as labeled fields, or a registered view's body, with
+ * the exact JSON payloads behind a Raw switch. The switch keeps its place so
+ * it keeps keyboard focus.
  */
-function GenericToolBody({ call, duration }: ToolBodyProps) {
+function GenericToolBody({ call, duration, view: toolView }: ToolCardBodyProps) {
   const { args, output, state } = call;
+  const ViewBody = toolView?.Body;
   const [view, setView] = useState<ToolBodyView>("fields");
   const inputJson = useMemo(() => JSON.stringify(args, null, 2), [args]);
   const hasInput = Object.keys(args).length > 0;
   // A completed call with no output (provider-native tools) has no result to show.
   const hasResult = output !== null || state !== "output-available";
   const result = <ToolResultView output={output} state={state} duration={duration} />;
-  if (!hasInput && output === null) return result;
+  if (ViewBody === undefined && !hasInput && output === null) return result;
   return (
     <Tabs
       value={view}
@@ -281,13 +282,15 @@ function GenericToolBody({ call, duration }: ToolBodyProps) {
       className="gap-1"
     >
       <div className="flex min-h-6 items-center gap-2">
-        {view === "fields" && <ToolSectionLabel>{hasInput ? "Input" : "Result"}</ToolSectionLabel>}
+        {view === "fields" && ViewBody === undefined && (
+          <ToolSectionLabel>{hasInput ? "Input" : "Result"}</ToolSectionLabel>
+        )}
         <TabsList
           aria-label="Tool call view"
           className="ml-auto p-0.5 group-data-horizontal/tabs:h-6"
         >
           <TabsTrigger value="fields" className="px-2 text-sm">
-            Fields
+            {toolView?.bodyLabel ?? "Fields"}
           </TabsTrigger>
           <TabsTrigger value="raw" className="px-2 text-sm">
             Raw
@@ -295,12 +298,18 @@ function GenericToolBody({ call, duration }: ToolBodyProps) {
         </TabsList>
       </div>
       <TabsContent value="fields" className="space-y-2">
-        {hasInput ? <ToolValueView value={args} /> : result}
-        {hasInput && hasResult && (
-          <section className="space-y-1">
-            <ToolSectionLabel>Result</ToolSectionLabel>
-            {result}
-          </section>
+        {ViewBody !== undefined ? (
+          <ViewBody call={call} duration={duration} />
+        ) : (
+          <>
+            {hasInput ? <ToolValueView value={args} /> : result}
+            {hasInput && hasResult && (
+              <section className="space-y-1">
+                <ToolSectionLabel>Result</ToolSectionLabel>
+                {result}
+              </section>
+            )}
+          </>
         )}
       </TabsContent>
       <TabsContent value="raw" className="space-y-2">
@@ -551,6 +560,17 @@ function ToolTriggerRow({
 
 /** The result summary under a trigger row, indented to the title past the icon. */
 function ToolResultLine({ summary }: { summary: ToolResultSummary }) {
+  const content =
+    summary.segments === undefined
+      ? summary.text
+      : summary.segments.map((segment) => (
+          <span
+            key={`${segment.tone ?? "plain"}:${segment.text}`}
+            className={segment.tone && RESULT_TONE_CLASS[segment.tone]}
+          >
+            {segment.text}
+          </span>
+        ));
   return (
     <span
       data-testid="tool-result-line"
@@ -559,10 +579,16 @@ function ToolResultLine({ summary }: { summary: ToolResultSummary }) {
         summary.isError && "text-destructive",
       )}
     >
-      {summary.text}
+      {content}
     </span>
   );
 }
+
+// Same colors as the changed-files diffstat.
+const RESULT_TONE_CLASS = {
+  added: "text-green-600 dark:text-green-400",
+  removed: "text-red-600 dark:text-red-400",
+} as const;
 
 /** The dynamic part of a trigger row: a shell command, a linked file path, or plain text. */
 function ToolTitleBody({
@@ -853,61 +879,6 @@ function StatusIcon({
   return <Icon className="size-3.5 shrink-0" />;
 }
 
-function CodePanel({
-  title,
-  text,
-  copyText,
-  copyLabel,
-  language = "json",
-}: {
-  title: string;
-  text: string;
-  copyText: string;
-  copyLabel: string;
-  language?: CodeLanguage;
-}) {
-  // Soft-wrap long lines by default so the panel never needs horizontal
-  // scrolling to read; the toggle restores the scrolling view for when
-  // column alignment matters (same affordance as chat code blocks).
-  const [wrap, setWrap] = useState(true);
-  return (
-    <CodeBlock code={text} language={language} wrap={wrap}>
-      <CodeBlockHeader>
-        <CodeBlockTitle className="min-w-0">
-          <span className="truncate font-medium uppercase tracking-wide">{title}</span>
-        </CodeBlockTitle>
-        <CodeBlockActions>
-          <WrapTextButton onToggle={() => setWrap((value) => !value)} wrap={wrap} />
-          <CopyTextButton label={copyLabel} text={copyText} />
-        </CodeBlockActions>
-      </CodeBlockHeader>
-    </CodeBlock>
-  );
-}
-
-function WrapTextButton({ wrap, onToggle }: { wrap: boolean; onToggle: () => void }) {
-  const label = wrap ? "Disable word wrap" : "Enable word wrap";
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button
-          aria-label={label}
-          aria-pressed={wrap}
-          className={cn("size-6 text-muted-foreground", wrap && "text-foreground")}
-          onClick={onToggle}
-          size="icon-xs"
-          type="button"
-          variant="ghost"
-          componentId="diagnostics.tool.toggle_wrap"
-        >
-          <WrapTextIcon className="size-3.5" />
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
-    </Tooltip>
-  );
-}
-
 function OutputSection({
   output,
   renderPanel,
@@ -1008,67 +979,6 @@ function EmptyOutputState({ state }: { state: "output-error" | "cancelled" | "no
     <div className="rounded-md border border-dashed bg-muted/30 px-3 py-2 text-muted-foreground text-ui">
       {message}
     </div>
-  );
-}
-
-interface CopyTextButtonProps {
-  text: string;
-  label: string;
-  /** Visible text next to the icon, for when several copy buttons sit together. */
-  caption?: string;
-}
-
-function CopyTextButton({ text, label, caption }: CopyTextButtonProps) {
-  const [isCopied, setIsCopied] = useState(false);
-  const timeoutRef = useRef<number | null>(null);
-
-  const copyToClipboard = useCallback(async () => {
-    if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
-      return;
-    }
-
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      return;
-    }
-
-    setIsCopied(true);
-    if (timeoutRef.current !== null) {
-      window.clearTimeout(timeoutRef.current);
-    }
-    timeoutRef.current = window.setTimeout(() => setIsCopied(false), 2000);
-  }, [text]);
-
-  useEffect(
-    () => () => {
-      if (timeoutRef.current !== null) {
-        window.clearTimeout(timeoutRef.current);
-      }
-    },
-    [],
-  );
-
-  const Icon = isCopied ? CheckIcon : CopyIcon;
-
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button
-          aria-label={isCopied ? "Copied" : label}
-          className={cn("text-muted-foreground", caption ? "h-6 gap-1 px-1.5" : "size-6")}
-          onClick={copyToClipboard}
-          size={caption ? "xs" : "icon-xs"}
-          type="button"
-          variant="ghost"
-          componentId="diagnostics.tool.copy"
-        >
-          <Icon className="size-3.5" />
-          {caption}
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent>{isCopied ? "Copied" : label}</TooltipContent>
-    </Tooltip>
   );
 }
 

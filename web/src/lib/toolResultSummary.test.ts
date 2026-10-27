@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { absoluteTime } from "./relativeTime";
-import { type ToolCall, summarizeToolResult } from "./toolResultSummary";
+import { type ToolCall, summarizeFileEdit, summarizeToolResult } from "./toolResultSummary";
 
 function summarize(name: string, output: string | null, args: Record<string, unknown> = {}) {
   const call: ToolCall = { name, args, output, state: "output-available" };
@@ -139,5 +139,64 @@ describe("summarizeToolResult", () => {
         summarize("github__create_pull_request", '{"result": "Error: 422 Validation Failed"}'),
       ).toEqual({ text: "Error: 422 Validation Failed", isError: true });
     });
+  });
+});
+
+describe("summarizeFileEdit", () => {
+  const edit = (output: string | null, overrides: Partial<ToolCall> = {}): ToolCall => ({
+    name: "Edit",
+    args: { file_path: "a.py", old_string: "x = 1\ny = 2\nz = 3", new_string: "x = 10" },
+    output,
+    state: "output-available",
+    ...overrides,
+  });
+
+  it("reports added and removed line counts, each with its diff color", () => {
+    expect(summarizeFileEdit(edit("The file a.py has been updated successfully."))).toEqual({
+      text: "Updated with 1 addition and 3 removals",
+      isError: false,
+      segments: [
+        { text: "Updated with " },
+        { text: "1 addition", tone: "added" },
+        { text: " and " },
+        { text: "3 removals", tone: "removed" },
+      ],
+    });
+  });
+
+  it("leaves out a zero count and names the file count of a multi-file patch", () => {
+    const call: ToolCall = {
+      name: "apply_patch",
+      args: {
+        changes: [
+          { path: "a.py", kind: { type: "add" }, diff: "one\ntwo\n" },
+          { path: "b.py", kind: { type: "update" }, diff: "@@ -1 +1,2 @@\n keep\n+three\n" },
+        ],
+      },
+      output: "add a.py\nupdate b.py",
+      state: "output-available",
+    };
+    expect(summarizeFileEdit(call)?.text).toBe("Updated 2 files with 3 additions");
+  });
+
+  it("keeps the error line for a failed edit", () => {
+    expect(
+      summarizeFileEdit(edit("<tool_use_error>String to replace not found.</tool_use_error>")),
+    ).toEqual({ text: "String to replace not found.", isError: true });
+    expect(
+      summarizeFileEdit({
+        name: "apply_patch",
+        args: { changes: [{ path: "a.py", kind: { type: "add" }, diff: "x\n" }] },
+        output: "Error: File change ended with status declined.\nadd a.py",
+        state: "output-available",
+      }),
+    ).toEqual({ text: "Error: File change ended with status declined.", isError: true });
+  });
+
+  it("shows no counts while running, after a cancelled or failed turn, or without a change", () => {
+    expect(summarizeFileEdit(edit(null, { state: "input-available" }))).toBeNull();
+    expect(summarizeFileEdit(edit(null, { state: "cancelled" }))).toBeNull();
+    expect(summarizeFileEdit(edit("done", { state: "output-error" }))).toBeNull();
+    expect(summarizeFileEdit(edit("done", { args: { file_path: "a.py" } }))).toBeNull();
   });
 });

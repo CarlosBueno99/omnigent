@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import Locator, Page, Route, expect
 
+from omnigent.harnesses.codex_file_change import file_change_output
 from tests.browser_ui.chat._geometry_helpers import open_live, settled_geometry
 from tests.browser_ui.chat.session_contract import (
     ChatSessionContract,
@@ -496,3 +497,133 @@ def test_tool_rows_read_as_actions_with_their_outcome(
     raw.click()
     expect(raw).to_have_attribute("aria-selected", "true")
     expect(transcript).to_contain_text('"includeComments": false')
+
+
+_PATCH = {
+    "status": "completed",
+    "changes": [
+        {
+            "path": "/repo/src/greet.py",
+            "kind": {"type": "update"},
+            "diff": (
+                "@@ -1,3 +1,3 @@\n def greet(name):\n"
+                "-    print('Hello ' + name)\n+    print(f'Hello {name}')\n     return name\n"
+            ),
+        },
+        {
+            "path": "/repo/src/farewell.py",
+            "kind": {"type": "add"},
+            "diff": "def farewell(name):\n    print(f'Bye {name}')\n",
+        },
+        {"path": "/repo/src/legacy.py", "kind": {"type": "delete"}, "diff": "LEGACY = True\n"},
+    ],
+}
+_DECLINED_PATCH = {
+    "status": "declined",
+    "changes": [
+        {
+            "path": "/repo/src/config.py",
+            "kind": {"type": "update"},
+            "diff": "@@ -1 +1 @@\n-DEBUG = False\n+DEBUG = True\n",
+        }
+    ],
+}
+_EDIT_ERROR = "<tool_use_error>String to replace not found in file.</tool_use_error>"
+
+
+def _seed_edit_calls(chat: ChatSessionContract) -> None:
+    """One settled turn: a Codex patch over three files, a missed Claude edit, a declined patch."""
+    response_id = "edit-rows-response"
+    chronological = [
+        message_item("edit-rows-user", "user", "Rename the greeting.", response_id=response_id),
+        *tool_call_items(
+            "call-patch",
+            "apply_patch",
+            {"changes": _PATCH["changes"]},
+            file_change_output(_PATCH),
+            response_id=response_id,
+        ),
+        *tool_call_items(
+            "call-edit",
+            "Edit",
+            {"file_path": "/repo/README.md", "old_string": "Hi", "new_string": "Hello"},
+            _EDIT_ERROR,
+            response_id=response_id,
+        ),
+        *tool_call_items(
+            "call-declined",
+            "apply_patch",
+            {"changes": _DECLINED_PATCH["changes"]},
+            file_change_output(_DECLINED_PATCH),
+            response_id=response_id,
+        ),
+        message_item(
+            "edit-rows-assistant", "assistant", "Greeting renamed.", response_id=response_id
+        ),
+    ]
+    chat.set_items(list(reversed(chronological)))
+
+
+def _open_edit_rows(page: Page, chat: ChatSessionContract) -> None:
+    _seed_edit_calls(chat)
+    page.goto(chat.url)
+    expect(page.get_by_text("Greeting renamed.")).to_be_visible(timeout=20_000)
+    # Short pauses keep each step readable in a recording of this journey.
+    page.wait_for_timeout(1_000)
+    page.get_by_role("button", name=re.compile(r"^Worked")).click()
+    page.wait_for_timeout(1_000)
+    page.get_by_text(re.compile(r"^Edited \d files$")).click()
+
+
+@pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "mobile"])
+@pytest.mark.browser_context_args(record_video_size={"width": 1280, "height": 720})
+def test_patch_row_counts_lines_across_its_files(
+    page: Page,
+    chat_session_contract: ChatSessionContract,
+    width: int,
+) -> None:
+    """A Codex patch row sums its files' line counts and expands to per-file diffs."""
+    page.set_viewport_size({"width": width, "height": 720})
+    _open_edit_rows(page, chat_session_contract)
+
+    patch = page.get_by_role("button", name=re.compile(r"^Edit 3 files"))
+    result = patch.get_by_test_id("tool-result-line")
+    expect(result).to_have_text("Updated 3 files with 3 additions and 2 removals")
+    page.wait_for_timeout(1_500)  # Hold the collapsed row on screen for the recording.
+
+    patch.click()
+    expect(page.get_by_role("tab", name="Diff")).to_have_attribute("aria-selected", "true")
+    diff = page.locator('[data-language="diff"]').first
+    for line in ("--- /repo/src/farewell.py", "+    print(f'Bye {name}')", "-LEGACY = True"):
+        expect(diff).to_contain_text(line)
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    page.wait_for_timeout(2_000)
+
+
+@pytest.mark.browser_context_args(record_video_size={"width": 1280, "height": 720})
+def test_failed_edit_rows_show_their_error(
+    page: Page,
+    chat_session_contract: ChatSessionContract,
+) -> None:
+    """Missed and declined edits show their error instead of line counts."""
+    _open_edit_rows(page, chat_session_contract)
+
+    missed = page.get_by_role("button", name=re.compile(r"^Edit .*README\.md"))
+    expect(missed.get_by_test_id("tool-result-line")).to_have_text(
+        "String to replace not found in file."
+    )
+    declined = page.get_by_role("button", name=re.compile(r"^Edit .*config\.py"))
+    declined_result = declined.get_by_test_id("tool-result-line")
+    expect(declined_result).to_have_text("Error: File change ended with status declined.")
+    applied_result = page.get_by_role("button", name=re.compile(r"^Edit 3 files")).get_by_test_id(
+        "tool-result-line"
+    )
+    color = "el => getComputedStyle(el).color"
+    assert declined_result.evaluate(color) != applied_result.evaluate(color)
+    page.wait_for_timeout(1_500)
+
+    declined.click()
+    body = declined.locator("xpath=..")
+    expect(body.get_by_text("File change ended with status declined.").last).to_be_visible()
+    expect(body.locator('[data-language="diff"]')).to_contain_text("+DEBUG = True")
+    page.wait_for_timeout(2_000)

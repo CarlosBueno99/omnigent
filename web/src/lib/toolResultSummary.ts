@@ -17,6 +17,7 @@ import {
   toolErrorMessage,
 } from "@/lib/toolValue";
 import { absoluteTime } from "@/lib/relativeTime";
+import { getFileEditDiff } from "@/lib/toolEditDiff";
 
 /** A tool call as the transcript renders it. */
 export interface ToolCall {
@@ -30,6 +31,14 @@ export interface ToolCall {
 export interface ToolResultSummary {
   text: string;
   isError: boolean;
+  /** The same text split into styled parts; plain `text` when absent. */
+  segments?: readonly ToolResultSegment[];
+}
+
+export interface ToolResultSegment {
+  text: string;
+  /** Diff coloring for a line count; plain when absent. */
+  tone?: "added" | "removed";
 }
 
 const SUMMARY_MAX_CHARS = 300;
@@ -67,6 +76,31 @@ export function summarizeToolResult(call: ToolCall): ToolResultSummary | null {
   if (category === "edit") return null;
   if (FILE_SEARCH_TOOLS.has(call.name)) return summarizeFileSearch(parsed);
   return summarizeGeneric(parsed);
+}
+
+/**
+ * A finished edit's added and removed line counts, e.g. "Updated with 2
+ * additions and 3 removals". Failures keep the usual error line; running,
+ * cancelled and unchanged edits show none.
+ */
+export function summarizeFileEdit(call: ToolCall): ToolResultSummary | null {
+  const generic = summarizeToolResult(call);
+  if (generic?.isError === true || call.state !== "output-available" || call.output === null) {
+    return generic;
+  }
+  const diff = getFileEditDiff(call.name, call.args);
+  if (diff === null) return generic;
+  const counts: ToolResultSegment[] = [];
+  if (diff.additions > 0) counts.push({ text: plural(diff.additions, "addition"), tone: "added" });
+  if (diff.removals > 0) counts.push({ text: plural(diff.removals, "removal"), tone: "removed" });
+  const target =
+    diff.fileCount > 1 ? `Updated ${plural(diff.fileCount, "file")} with ` : "Updated with ";
+  const segments: ToolResultSegment[] = [{ text: target }];
+  counts.forEach((count, index) => {
+    if (index > 0) segments.push({ text: " and " });
+    segments.push(count);
+  });
+  return { text: segments.map((segment) => segment.text).join(""), isError: false, segments };
 }
 
 function summarizeShellResult(result: ShellToolOutput): ToolResultSummary | null {

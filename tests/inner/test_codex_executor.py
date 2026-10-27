@@ -2825,6 +2825,28 @@ def test_codex_builtin_command_completion_surfaces_nonzero_exit() -> None:
     assert completion.error == "Command exited with status 3."
 
 
+def test_codex_builtin_file_change_completion_marks_declined_patch_failed() -> None:
+    """A declined patch reads as a failure, not as the changes it listed."""
+
+    completion = _codex_builtin_tool_completion(
+        {
+            "id": "file-declined",
+            "type": "fileChange",
+            "status": "declined",
+            "changes": [
+                {"path": "/repo/app.py", "kind": {"type": "update"}, "diff": "@@\n-a\n+b"}
+            ],
+        }
+    )
+
+    assert completion is not None
+    assert completion.status is ToolCallStatus.ERROR
+    assert (
+        completion.result == "Error: File change ended with status declined.\nupdate /repo/app.py"
+    )
+    assert completion.error == "File change ended with status declined."
+
+
 async def test_run_turn_refuses_to_adopt_stale_final_answer_event() -> None:
     """Adopt fallback must drop a stale final-answer item rather
     than adopt it as the new turn's response.

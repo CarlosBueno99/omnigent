@@ -6,6 +6,7 @@ import { FileViewerContext } from "@/shell/FileViewerContext";
 import type { RenderItem } from "@/lib/renderItems";
 import { writeTerminalThemeMode } from "@/lib/terminalThemePreferences";
 import { ToolCard, ToolGroupSummary, formatToolDuration, getOutputPreview } from "./ToolCard";
+import type * as ToolViewsModule from "./toolViews";
 import type { ToolView } from "./toolViews";
 
 // The registry ships empty; tests register views here to exercise the plug point.
@@ -24,7 +25,7 @@ function renderCard(props: Parameters<typeof ToolCard>[0]) {
 }
 
 // Radix tabs switch on mouse down (or focus), not on a synthetic click.
-function showView(name: "Fields" | "Raw") {
+function showView(name: "Fields" | "Diff" | "Raw") {
   fireEvent.mouseDown(screen.getByRole("tab", { name }));
 }
 
@@ -405,6 +406,61 @@ describe("ToolCard registered views", () => {
     fireEvent.click(container.querySelector<HTMLElement>('[data-slot="collapsible-trigger"]')!);
     expect(screen.getByText("Checklist for fake_plan")).toBeInTheDocument();
     expect(screen.queryByText("Input")).toBeNull();
+    // The raw payload stays one switch away from a view's body.
+    showView("Raw");
+    expect(screen.getByText("Parameters")).toBeInTheDocument();
+  });
+
+  it("shows an edit's line counts in diff colors and its diff behind a Diff | Raw switch", async () => {
+    const actualViews = await vi.importActual<typeof ToolViewsModule>("./toolViews");
+    registeredViews.set("Edit", actualViews.toolViewFor("Edit")!);
+    const { container } = renderCard({
+      name: "Edit",
+      arguments: {
+        file_path: "/repo/config.py",
+        old_string: "TIMEOUT = 30\nRETRIES = 3",
+        new_string: "TIMEOUT = 60",
+      },
+      output: "The file /repo/config.py has been updated successfully.",
+      state: "output-available",
+    });
+    const line = screen.getByTestId("tool-result-line");
+    expect(line.textContent).toBe("Updated with 1 addition and 2 removals");
+    expect(screen.getByText("1 addition")).toHaveClass("text-green-600");
+    expect(screen.getByText("2 removals")).toHaveClass("text-red-600");
+    expect(line).not.toHaveClass("text-destructive");
+
+    fireEvent.click(container.querySelector<HTMLElement>('[data-slot="collapsible-trigger"]')!);
+    expect(screen.getByRole("tab", { name: "Diff" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("Diff", { selector: "span" })).toBeInTheDocument();
+    expect(container.textContent).toContain("-TIMEOUT = 30");
+    expect(container.textContent).toContain("+TIMEOUT = 60");
+    expect(screen.queryByText("Input")).toBeNull();
+    showView("Raw");
+    expect(screen.getByText("Parameters")).toBeInTheDocument();
+    showView("Diff");
+    expect(container.textContent).toContain("-RETRIES = 3");
+  });
+
+  it("shows a failed edit's error on the result line and above its diff", async () => {
+    const actualViews = await vi.importActual<typeof ToolViewsModule>("./toolViews");
+    registeredViews.set("apply_patch", actualViews.toolViewFor("apply_patch")!);
+    const { container } = renderCard({
+      name: "apply_patch",
+      arguments: {
+        changes: [{ path: "/repo/app.py", kind: { type: "update" }, diff: "@@\n-a\n+b\n" }],
+      },
+      output: "Error: File change ended with status declined.\nupdate /repo/app.py",
+      state: "output-available",
+    });
+    const line = screen.getByTestId("tool-result-line");
+    expect(line.textContent).toBe("Error: File change ended with status declined.");
+    expect(line).toHaveClass("text-destructive");
+    fireEvent.click(container.querySelector<HTMLElement>('[data-slot="collapsible-trigger"]')!);
+    expect(
+      screen.getByText(/^Error: File change ended with status declined\./, { selector: "div" }),
+    ).toHaveClass("text-destructive");
+    expect(container.textContent).toContain("+++ /repo/app.py");
   });
 
   it("falls back to the generic parts a view leaves out", () => {

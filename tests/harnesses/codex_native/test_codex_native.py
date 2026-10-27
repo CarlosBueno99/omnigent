@@ -7023,6 +7023,28 @@ def test_forwarder_posts_codex_file_change_tool_call() -> None:
     assert posted[1]["data"]["item_data"]["output"] == "add /repo/greeting.py"
 
 
+def test_replay_declined_file_change_reports_the_failure() -> None:
+    """A declined patch's output leads with an error so it never reads as applied."""
+    posted: list[dict[str, Any]] = []
+    asyncio.run(
+        _replay_completed_item(
+            {
+                "type": "fileChange",
+                "id": "call_patch",
+                "changes": [
+                    {"path": "/repo/app.py", "kind": {"type": "update"}, "diff": "@@\n-a\n+b\n"}
+                ],
+                "status": "declined",
+            },
+            _capture_handler(posted),
+        )
+    )
+
+    assert posted[1]["data"]["item_data"]["output"] == (
+        "Error: File change ended with status declined.\nupdate /repo/app.py"
+    )
+
+
 def test_forwarder_sends_file_change_to_observer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
