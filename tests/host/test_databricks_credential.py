@@ -86,19 +86,79 @@ def test_bearer_is_never_persisted_to_disk(
     assert "dbx-tok" not in (tmp_path / dc._SIDECAR_NAME).read_text()
 
 
+@pytest.mark.parametrize("failure", [None, "write", "replace"])
+@pytest.mark.parametrize("existing", [False, True], ids=["initial", "reconfigure"])
 def test_sidecar_records_broker_coords_privately(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    failure: str | None,
+    existing: bool,
 ) -> None:
-    _connected(monkeypatch)
-    assert dc.configure_host_databricks("https://omni.example", "host-1") is True
+    seen = _connected(monkeypatch)
     sidecar = tmp_path / dc._SIDECAR_NAME
-    assert json.loads(sidecar.read_text()) == {
+    original = {
         "server": "https://omni.example",
         "host_id": "host-1",
         "host_token": "host-tok",
         "workspace_host": "https://ws.example",
     }
-    assert stat.S_IMODE(os.stat(sidecar).st_mode) == 0o600
+    if existing:
+        assert dc.configure_host_databricks("https://omni.example", "host-1") is True
+        assert json.loads(sidecar.read_text()) == original
+        assert stat.S_IMODE(os.stat(sidecar).st_mode) == 0o600
+    capsys.readouterr()
+    reads: list[tuple[int, str, str | None]] = []
+    dump = json.dump
+
+    def read_helper() -> None:
+        seen.clear()
+        status = dc.main(["token", "--workspace", "https://ws.example"])
+        reads.append(
+            (
+                status,
+                capsys.readouterr().out,
+                seen.get("headers", {}).get("X-Omnigent-Host-Token"),
+            )
+        )
+
+    def interrupted_dump(payload, handle) -> None:
+        assert stat.S_IMODE(os.fstat(handle.fileno()).st_mode) == 0o600
+        read_helper()
+        handle.write('{"server":')
+        handle.flush()
+        read_helper()
+        if failure == "write":
+            raise OSError("sidecar write interrupted")
+        handle.seek(0)
+        handle.truncate()
+        dump(payload, handle)
+
+    def fail_replace(*_args) -> None:
+        raise OSError("sidecar replacement interrupted")
+
+    monkeypatch.setattr(dc.json, "dump", interrupted_dump)
+    if failure == "replace":
+        monkeypatch.setattr(dc.os, "replace", fail_replace)
+    monkeypatch.setenv(HOST_TOKEN_ENV_VAR, "replacement-host-tok")
+    assert dc.configure_host_databricks("https://omni.example", "host-1") is (failure is None)
+    capsys.readouterr()
+    read_helper()
+
+    before = (0, "dbx-tok\n", "host-tok") if existing else (0, "", None)
+    expected_token = ("host-tok" if existing else None) if failure else "replacement-host-tok"
+    assert reads == [
+        before,
+        before,
+        (0, "dbx-tok\n" if expected_token else "", expected_token),
+    ]
+    if expected_token:
+        assert json.loads(sidecar.read_text()) == {**original, "host_token": expected_token}
+        assert stat.S_IMODE(os.stat(sidecar).st_mode) == 0o600
+    else:
+        assert not sidecar.exists()
+    expected_files = [".databrickscfg"] + ([dc._SIDECAR_NAME] if expected_token else [])
+    assert sorted(path.name for path in tmp_path.iterdir()) == expected_files
 
 
 def test_preserves_existing_profiles(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
