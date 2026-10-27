@@ -277,6 +277,110 @@ def test_linux_pkg_install_cmd_none_present(lib: Path, tmp_path: Path) -> None:
     assert r.stdout == "", f"No package manager should produce empty output, got {r.stdout!r}."
 
 
+@pytest.mark.parametrize(
+    ("version", "probe_status", "supported"),
+    [
+        ("tmux 3.0", 0, False),
+        ("tmux 3.2a", 0, False),
+        ("tmux 3.3", 0, True),
+        ("tmux 3.3a", 0, True),
+        ("tmux 3.10", 0, True),
+        ("tmux 4.0", 0, True),
+        ("unknown", 0, False),
+        ("tmux 3.5", 1, False),
+    ],
+)
+def test_check_tmux_validates_existing_version(
+    lib: Path, version: str, probe_status: int, supported: bool
+) -> None:
+    """An installed binary is ready only when its version meets the runtime floor."""
+    r = run(
+        lib,
+        f"""
+        tmux() {{ printf '%s\\n' {shlex.quote(version)}; return {probe_status}; }}
+        uname() {{ echo Linux; }}
+        linux_pkg_install_cmd() {{ echo 'sudo apt-get install -y tmux'; }}
+        sh() {{ echo unexpected-install; return 1; }}
+        NON_INTERACTIVE=true
+        check_tmux
+        echo "ownership=$OMNIGENT_LEDGER_DEP_TMUX"
+        """,
+    )
+    assert r.returncode == 0, r.stderr
+    assert "ownership=preexisting" in r.stdout
+    assert "unexpected-install" not in r.stdout
+    if supported:
+        assert not r.stderr
+    else:
+        assert "native terminals need tmux 3.3 or newer" in r.stderr
+        assert "sudo apt-get install -y tmux" in r.stderr
+        assert "tmux -V" in r.stderr
+        assert "is supported" not in r.stdout
+
+
+@pytest.mark.parametrize(
+    ("platform", "preexisting", "installed_version", "install_status"),
+    [
+        ("Darwin", True, "3.3a", 0),
+        ("Darwin", False, "3.3a", 0),
+        ("Linux", True, "3.3a", 0),
+        ("Linux", False, "3.3a", 0),
+        ("Linux", True, "3.0", 0),
+        ("Linux", False, "3.0", 0),
+        ("Linux", True, "3.0", 1),
+    ],
+)
+def test_check_tmux_rechecks_install_or_upgrade(
+    lib: Path,
+    tmp_path: Path,
+    platform: str,
+    preexisting: bool,
+    installed_version: str,
+    install_status: int,
+) -> None:
+    """Package-manager success does not guarantee a supported tmux on PATH."""
+    bindir = _bindir(tmp_path, "brew")
+    existing = 'tmux() { echo "tmux $tmux_test_version"; };' if preexisting else ""
+    r = run(
+        lib,
+        f"""
+        tmux_test_version=3.0
+        {existing}
+        uname() {{ echo {platform}; }}
+        linux_pkg_install_cmd() {{ echo 'sudo apt-get install -y tmux'; }}
+        prompt_yes_no() {{ echo "offer:$1"; return 0; }}
+        run_with_spinner() {{ shift; "$@"; }}
+        sh() {{
+            echo "install:$*"
+            tmux_test_version={installed_version}
+            tmux() {{ echo "tmux $tmux_test_version"; }}
+            return {install_status}
+        }}
+        check_tmux
+        echo "ownership=$OMNIGENT_LEDGER_DEP_TMUX"
+        """,
+        env={"PATH": bindir},
+    )
+    assert r.returncode == 0, r.stderr
+    command = (
+        f"brew {'upgrade' if preexisting else 'install'} tmux"
+        if platform == "Darwin"
+        else "sudo apt-get install -y tmux"
+    )
+    assert f"install:-c {command}" in r.stdout
+    assert "native terminals need tmux 3.3 or newer" in r.stdout
+    assert f"ownership={'preexisting' if preexisting else 'omnigent'}" in r.stdout
+    if installed_version == "3.3a":
+        assert "tmux 3.3a is supported" in r.stdout
+        assert not r.stderr
+    else:
+        assert "tmux 3.3 or newer is still unavailable" in r.stderr
+        assert "tmux -V" in r.stderr
+        assert "is supported" not in r.stdout
+    if install_status:
+        assert "tmux install/upgrade failed" in r.stderr
+
+
 def test_check_bubblewrap_noop_on_macos(lib: Path, tmp_path: Path) -> None:
     """On macOS the bubblewrap check is a silent no-op — seatbelt needs no binary."""
     bindir = _bindir(tmp_path)
