@@ -4466,3 +4466,90 @@ describe("buildBubbles — lastActivityAtS", () => {
     expect(asst.lastActivityAtS).toBeUndefined();
   });
 });
+describe("terminal command key stability", () => {
+  it("renders terminal commands correctly when array indices shift", () => {
+    // Regression test for race condition: terminal command cards were being re-mounted
+    // when the next turn's blocks shifted array indices, because keyFor() fell back to
+    // index-based keys when terminal_command items lacked itemIds.
+    // Fix: use content-based hashing to create stable keys independent of array position.
+
+    // Create input and output blocks with stable itemIds
+    const terminalInput: AnyBlock = {
+      type: "terminal_command",
+      ctx: ctx({ itemId: "cmd-input", responseId: "shell-1" }),
+      kind: "input",
+      input: "echo test",
+      stdout: null,
+      stderr: null,
+    };
+
+    const terminalOutput: AnyBlock = {
+      type: "terminal_command",
+      ctx: ctx({ itemId: "cmd-output", responseId: "shell-1" }),
+      kind: "output",
+      input: null,
+      stdout: "test\n",
+      stderr: null,
+    };
+
+    // Before reconciliation: just the shell commands
+    const blocksBefore: AnyBlock[] = [terminalInput, terminalOutput];
+    const bubblesBefore = buildBubbles(blocksBefore, null);
+
+    // After reconciliation: assistant text inserted first (simulating next turn arrival)
+    // This shifts the terminal command blocks' indices
+    const blocksAfter: AnyBlock[] = [
+      {
+        type: "text_done",
+        ctx: ctx({ itemId: "text-1", responseId: "next-turn" }),
+        fullText: "Next response",
+        hasCodeBlocks: false,
+      },
+      terminalInput,
+      terminalOutput,
+    ];
+    const bubblesAfter = buildBubbles(blocksAfter, null);
+
+    // Verify the terminal commands are preserved in both cases
+    const findUserBubble = (bubbles: Bubble[]) =>
+      bubbles.find((b) => b.kind === "user" && b.itemId === "cmd-input");
+
+    const userBubbleBefore = findUserBubble(bubblesBefore);
+    const userBubbleAfter = findUserBubble(bubblesAfter);
+
+    // Both should have the shell command user bubble
+    expect(userBubbleBefore).toBeDefined();
+    expect(userBubbleAfter).toBeDefined();
+
+    // Content should be the shell echo (! prefix)
+    expect(userBubbleBefore?.content?.[0]?.text).toBe("!echo test");
+    expect(userBubbleAfter?.content?.[0]?.text).toBe("!echo test");
+
+    // Find assistant bubbles with the terminal output
+    const findAssistantWithOutput = (bubbles: Bubble[]) =>
+      bubbles.find(
+        (b) => b.kind === "assistant" && b.items?.some((i) => i.kind === "terminal_command"),
+      );
+
+    const assistantBefore = findAssistantWithOutput(bubblesBefore) as Extract<
+      Bubble,
+      { kind: "assistant" }
+    > | undefined;
+    const assistantAfter = findAssistantWithOutput(bubblesAfter) as Extract<
+      Bubble,
+      { kind: "assistant" }
+    > | undefined;
+
+    // Both should have the terminal output in an assistant bubble
+    expect(assistantBefore).toBeDefined();
+    expect(assistantAfter).toBeDefined();
+
+    const terminalOutputItem = (bubble: Bubble | undefined) =>
+      bubble && bubble.kind === "assistant"
+        ? bubble.items?.find((i) => i.kind === "terminal_command" && i.terminalKind === "output")
+        : undefined;
+
+    expect((terminalOutputItem(assistantBefore) as any)?.stdout).toBe("test\n");
+    expect((terminalOutputItem(assistantAfter) as any)?.stdout).toBe("test\n");
+  });
+});

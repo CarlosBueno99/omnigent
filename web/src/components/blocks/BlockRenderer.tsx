@@ -1000,10 +1000,33 @@ function renderItem(
  * fall back to call_id for tools (unique within a response) or to
  * position for pre-finalization fragments that don't carry an item id
  * yet (text/reasoning chunks emitted before their `output_item.done`).
+ *
+ * Terminal commands may lack itemIds initially (optimistic items) but need
+ * stable keys independent of array position. Create a stable key from
+ * content hash to prevent re-mounting when array indices shift during
+ * reconciliation after the next turn arrives.
  */
 function keyFor(item: RenderItem, index: number): string {
   if (item.itemId) return `${item.kind}:${item.itemId}`;
   if (item.kind === "tool") return `tool:${item.execution.callId}`;
   if (item.kind === "elicitation") return `elicitation:${item.elicitationId}`;
+  if (item.kind === "terminal_command") {
+    // Hash terminal command content for stable key independent of array position.
+    // Input commands: hash the input text. Output commands: hash stdout+stderr.
+    const content = item.terminalKind === "input" ? item.input : `${item.stdout}:${item.stderr}`;
+    const contentHash = content ? simpleHash(content) : "empty";
+    return `terminal_command:${item.terminalKind}:${contentHash}`;
+  }
   return `${item.kind}:${index}`;
+}
+
+/** Simple hash function for creating stable terminal command keys. */
+function simpleHash(str: string): string {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = (hash << 5) - hash + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  return Math.abs(hash).toString(36);
 }
