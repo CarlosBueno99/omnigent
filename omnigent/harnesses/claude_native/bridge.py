@@ -6364,7 +6364,7 @@ def _composer_frame_rule_indices(lines: list[str]) -> list[int]:
     rules = [idx for idx in rules if len(lines[idx]) - len(lines[idx].lstrip()) == frame_indent]
     last_prompt = next((line for line in lines[rules[-1] + 1 :] if line.strip()), "")
     if (
-        last_prompt.lstrip().startswith(_CLAUDE_PROMPT_GLYPH)
+        last_prompt.strip()[:1] in _COMPOSER_MODE_GLYPHS
         and len(last_prompt) - len(last_prompt.lstrip()) == frame_indent
     ):
         # A lower prompt makes the last rule an opening edge. The older frame
