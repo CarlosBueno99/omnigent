@@ -5698,7 +5698,7 @@ def _validated_transcript_state(
         the file; ``state`` with an adopted fingerprint (no reset)
         when the cursor is at byte 0 / line 0 and the file just
         appeared; otherwise a cursor recovered at the last posted native
-        record, or end-of-file when that record is unavailable. Recently
+        record, or the observed complete prefix when that record is unavailable. Recently
         forwarded source IDs remain available for deduplication.
     """
     if state.byte_offset is None:
@@ -5772,24 +5772,42 @@ def _recover_transcript_cursor_at_native_record(
             initial_stat = os.fstat(transcript.fileno())
             line_number = 0
             sample = b""
+            scanned_digest = hashlib.sha256()
             while True:
                 record_offset = transcript.tell()
-                raw = transcript.readline()
+                remaining = initial_stat.st_size - record_offset
+                raw = transcript.readline(remaining) if remaining > 0 else b""
+                scanned_digest.update(raw)
                 if not raw or not raw.endswith(b"\n"):
+                    scanned_end = transcript.tell()
+                    # Validate the observed prefix; appended bytes belong to the next poll.
+                    transcript.seek(0)
+                    verified_digest = hashlib.sha256()
+                    remaining = scanned_end
+                    while remaining:
+                        chunk = transcript.read(min(remaining, 65536))
+                        if not chunk:
+                            raise _TranscriptChangedDuringRecovery
+                        verified_digest.update(chunk)
+                        remaining -= len(chunk)
                     path_stat = state.transcript_path.stat()
                     if (
-                        path_stat.st_dev,
-                        path_stat.st_ino,
-                        path_stat.st_size,
-                        path_stat.st_mtime_ns,
-                    ) != (
-                        initial_stat.st_dev,
-                        initial_stat.st_ino,
-                        initial_stat.st_size,
-                        initial_stat.st_mtime_ns,
+                        (path_stat.st_dev, path_stat.st_ino)
+                        != (
+                            initial_stat.st_dev,
+                            initial_stat.st_ino,
+                        )
+                        or path_stat.st_size < scanned_end
+                        or (verified_digest.digest() != scanned_digest.digest())
                     ):
                         raise _TranscriptChangedDuringRecovery
-                    return None
+                    return TranscriptForwardState(
+                        transcript_path=state.transcript_path,
+                        line_cursor=0,
+                        byte_offset=record_offset,
+                        cursor_fingerprint=_jsonl_fingerprint_from_sample(record_offset, sample),
+                        seen_source_ids=state.seen_source_ids,
+                    )
                 line_number += 1
                 previous_sample = sample
                 sample = (sample + raw)[-_CURSOR_FINGERPRINT_BYTES:]

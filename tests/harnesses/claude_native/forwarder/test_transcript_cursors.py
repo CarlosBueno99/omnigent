@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import threading
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -961,13 +962,15 @@ async def test_rewritten_transcript_keeps_new_items_after_retained_native_record
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["replace", "rewrite", "delete"])
+@pytest.mark.parametrize("change", ["replace", "rewrite", "delete", "append", "complete_partial"])
+@pytest.mark.parametrize("anchor_present", [False, True])
 async def test_recovery_retries_when_transcript_changes_during_anchor_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     change: str,
+    anchor_present: bool,
 ) -> None:
-    """An offset from an old file must never be adopted against its replacement."""
+    """Rewrites defer recovery; appends leave new complete records readable."""
     bridge_dir = tmp_path / "bridge"
     transcript_path = tmp_path / "session.jsonl"
     anchor = (
@@ -986,7 +989,9 @@ async def test_recovery_retries_when_transcript_changes_during_anchor_read(
         )
         + "\n"
     )
-    transcript_path.write_text(anchor + new_input)
+    unmatched = anchor.replace('"anchor"', '"unmatched"')
+    initial_input = new_input[: len(new_input) // 2] if change == "complete_partial" else new_input
+    transcript_path.write_text((anchor if anchor_present else unmatched) + initial_input)
     state = forwarder.TranscriptForwardState(
         transcript_path=transcript_path,
         line_cursor=1,
@@ -998,12 +1003,12 @@ async def test_recovery_retries_when_transcript_changes_during_anchor_read(
     replacement = (
         json.dumps({"type": "system", "metadata": "Changed prefix"}) + "\n" + anchor + new_input
     )
-    parse = forwarder._transcript_items_from_entry
+    source_key = forwarder._transcript_source_key
     changed = False
 
-    def parse_then_change(*args: Any, **kwargs: Any) -> Any:
+    def source_key_then_change(*args: Any, **kwargs: Any) -> Any:
         nonlocal changed
-        parsed = parse(*args, **kwargs)
+        key = source_key(*args, **kwargs)
         if not changed:
             changed = True
             if change == "replace":
@@ -1012,20 +1017,35 @@ async def test_recovery_retries_when_transcript_changes_during_anchor_read(
                 os.replace(candidate, transcript_path)
             elif change == "rewrite":
                 transcript_path.write_text(replacement)
+            elif change in ("append", "complete_partial"):
+                with transcript_path.open("a") as transcript:
+                    transcript.write(
+                        new_input[len(initial_input) :]
+                        if change == "complete_partial"
+                        else new_input.replace('"new-input"', '"appended-input"')
+                    )
             else:
                 transcript_path.unlink()
-        return parsed
+        return key
 
-    monkeypatch.setattr(forwarder, "_transcript_items_from_entry", parse_then_change)
-    with pytest.raises(forwarder._TranscriptChangedDuringRecovery):
-        await forwarder._ensure_state_for_transcript(
+    monkeypatch.setattr(forwarder, "_transcript_source_key", source_key_then_change)
+    first_recovered = state
+    with (
+        nullcontext()
+        if change in ("append", "complete_partial")
+        else pytest.raises(forwarder._TranscriptChangedDuringRecovery)
+    ):
+        first_recovered = await forwarder._ensure_state_for_transcript(
             bridge_dir=bridge_dir,
             state=state,
             transcript_path=transcript_path,
             start_at_end=False,
             session_id="conv_rewrite",
         )
-    assert forwarder._read_forward_state(bridge_dir) == state
+    if change not in ("append", "complete_partial"):
+        assert forwarder._read_forward_state(bridge_dir) == state
+    else:
+        state = first_recovered
     if change == "delete":
         transcript_path.write_text(replacement)
     recovered = await forwarder._ensure_state_for_transcript(
@@ -1036,7 +1056,10 @@ async def test_recovery_retries_when_transcript_changes_during_anchor_read(
         session_id="conv_rewrite",
     )
     result = forwarder._read_transcript_items_for_state(recovered, "claude-native-ui")
-    assert [item.source_id for item in result.items] == ["new-input:0:message"]
+    expected = ["new-input:0:message"] if change != "append" or anchor_present else []
+    if change == "append":
+        expected.append("appended-input:0:message")
+    assert [item.source_id for item in result.items] == expected
 
 
 @pytest.mark.parametrize(
@@ -1056,14 +1079,16 @@ def test_rewritten_transcript_does_not_recover_from_unstable_or_missing_record(
 ) -> None:
     """A byte/line location in a replacement file is not a native identity."""
     transcript_path = tmp_path / "session.jsonl"
+    user_record: dict[str, Any] = {
+        "type": "user",
+        "uuid": "historical-user",
+        "message": {"role": "user", "content": "Historical input"},
+    }
+    if source_key == "byte-0":
+        user_record.pop("uuid")
+        assert forwarder._transcript_source_key(user_record, 1, 0) == source_key
     transcript_path.write_text(
-        json.dumps(
-            {
-                "type": "user",
-                "uuid": "historical-user",
-                "message": {"role": "user", "content": "Historical input"},
-            }
-        )
+        json.dumps(user_record)
         + "\n"
         + json.dumps(
             {
