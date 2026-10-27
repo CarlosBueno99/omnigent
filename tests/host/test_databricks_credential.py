@@ -6,8 +6,13 @@ import configparser
 import json
 import os
 import stat
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
+import anyio
 import httpx
 import pytest
 
@@ -39,14 +44,14 @@ def _isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 def _patch_get(monkeypatch: pytest.MonkeyPatch, resp_or_exc) -> dict:
     seen: dict = {}
 
-    def fake_get(url: str, headers: dict, timeout: float):
+    async def fake_get(self: httpx.AsyncClient, url: str, headers: dict, timeout: float):
         seen["url"] = url
         seen["headers"] = headers
         if isinstance(resp_or_exc, Exception):
             raise resp_or_exc
         return resp_or_exc
 
-    monkeypatch.setattr(dc.httpx, "get", fake_get)
+    monkeypatch.setattr(dc.httpx.AsyncClient, "get", fake_get)
     return seen
 
 
@@ -363,14 +368,14 @@ def _scripted_get(monkeypatch: pytest.MonkeyPatch, steps: list) -> list[int]:
     """Serve *steps* in order (exceptions raised, responses returned); return call count."""
     calls: list[int] = []
 
-    def fake_get(url: str, headers: dict, timeout: float):
+    async def fake_get(self: httpx.AsyncClient, url: str, headers: dict, timeout: float):
         calls.append(1)
         step = steps.pop(0)
         if isinstance(step, Exception):
             raise step
         return step
 
-    monkeypatch.setattr(dc.httpx, "get", fake_get)
+    monkeypatch.setattr(dc.httpx.AsyncClient, "get", fake_get)
     return calls
 
 
@@ -416,16 +421,15 @@ def test_main_retries_stay_within_one_timeout_budget(
     assert dc.configure_host_databricks("https://omni.example", "h") is True
     capsys.readouterr()
     clock = [0.0]
-    monkeypatch.setattr(dc.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(dc.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    monkeypatch.setattr(dc, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     timeouts: list[float] = []
 
-    def slow_get(url: str, headers: dict, timeout: float):
+    async def slow_get(self: httpx.AsyncClient, url: str, headers: dict, timeout: float):
         timeouts.append(timeout)
         clock[0] += timeout
         raise httpx.ReadTimeout("slow")
 
-    monkeypatch.setattr(dc.httpx, "get", slow_get)
+    monkeypatch.setattr(dc.httpx.AsyncClient, "get", slow_get)
     assert dc.main(["token"]) == 0
     assert capsys.readouterr().out == ""
     assert timeouts == [dc._TIMEOUT_S]
@@ -444,15 +448,107 @@ def test_main_treats_a_non_transport_http_error_as_final(
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("status_code", [401, 403])
 def test_main_does_not_retry_a_rejected_launch_token(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], status_code: int
 ) -> None:
     """A 401/403 is permanent, so it is answered once rather than retried."""
     _connected(monkeypatch)
     assert dc.configure_host_databricks("https://omni.example", "h") is True
     capsys.readouterr()
     monkeypatch.setattr(dc, "_RETRY_BACKOFF_S", (0.0, 0.0))
-    calls = _scripted_get(monkeypatch, [_Resp(401, None)])
+    calls = _scripted_get(monkeypatch, [_Resp(status_code, None)])
     assert dc.main(["token"]) == 0
     assert capsys.readouterr().out == ""
     assert len(calls) == 1
+
+
+def test_broker_does_not_retry_after_backoff_uses_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0.0]
+    monkeypatch.setattr(dc, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(dc, "_TIMEOUT_S", 1.0)
+    monkeypatch.setattr(dc, "_RETRY_BACKOFF_S", (0.5,))
+
+    async def oversleep(_delay: float) -> None:
+        clock[0] += 2.0
+
+    monkeypatch.setattr(dc, "anyio", SimpleNamespace(fail_after=anyio.fail_after, sleep=oversleep))
+    calls = _scripted_get(monkeypatch, [_Resp(503, None), _BEARER_OK])
+    assert dc._fetch("https://omni.example", "host", "test-token") is None
+    assert len(calls) == 1
+
+
+async def test_broker_cancels_retry_and_closes_worker_from_an_active_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dc, "_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(dc, "_RETRY_BACKOFF_S", (0.01, 0.01))
+    timeouts: list[float] = []
+    clients: list[httpx.AsyncClient] = []
+    workers: list[threading.Thread] = []
+    cancelled = threading.Event()
+
+    async def get(self: httpx.AsyncClient, url: str, headers: dict, timeout: float):
+        timeouts.append(timeout)
+        if len(timeouts) == 1:
+            return _Resp(503, None)
+        clients.append(self)
+        workers.append(threading.current_thread())
+        try:
+            await anyio.sleep_forever()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(dc.httpx.AsyncClient, "get", get)
+    started = time.monotonic()
+    assert dc._fetch("https://omni.example", "host", "test-token") is None
+    assert time.monotonic() - started < 1.5
+    assert len(timeouts) == 2
+    assert timeouts[1] < timeouts[0] <= 0.5
+    assert cancelled.is_set()
+    assert clients[0].is_closed
+    assert not workers[0].is_alive()
+
+
+def test_broker_deadline_closes_a_slow_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Periodic response bytes must not extend the total credential deadline."""
+    disconnected = threading.Event()
+    received: list[str] = []
+
+    class BrokerHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            received.append(self.path)
+            body = b" " * 400 + b'{"connected":false}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                for offset in range(0, len(body), 10):
+                    self.wfile.write(body[offset : offset + 10])
+                    self.wfile.flush()
+                    time.sleep(0.05)
+            except (BrokenPipeError, ConnectionResetError):
+                disconnected.set()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            pass
+
+    monkeypatch.setattr(dc, "_TIMEOUT_S", 0.5)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), BrokerHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        started = time.monotonic()
+        result = dc._fetch(f"http://127.0.0.1:{server.server_port}", "host", "test-token")
+        elapsed = time.monotonic() - started
+        assert result is None
+        assert elapsed < 1.5
+        assert disconnected.wait(1.0), "deadline must close the in-flight response"
+        assert received == ["/v1/hosts/host/credentials/databricks"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2.0)
+        assert not server_thread.is_alive()

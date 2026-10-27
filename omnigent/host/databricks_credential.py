@@ -43,7 +43,9 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import anyio
 import httpx
+from anyio.from_thread import start_blocking_portal
 
 from omnigent.host.identity import HOST_TOKEN_ENV_VAR, MANAGED_HOST_TOKEN_HEADER
 
@@ -83,29 +85,47 @@ def _fetch(server: str, host_id: str, host_token: str) -> dict | None:
     single attempt the harness's helper timeout was sized for.
     """
     deadline = time.monotonic() + _TIMEOUT_S
-    for attempt in range(len(_RETRY_BACKOFF_S) + 1):
-        if attempt:
-            pause = _RETRY_BACKOFF_S[attempt - 1]
-            if time.monotonic() + pause >= deadline:
-                return None
-            time.sleep(pause)
+    # The portal keeps this synchronous API usable from callers with an active loop.
+    with start_blocking_portal() as portal:
+        return portal.call(_fetch_before_deadline, server, host_id, host_token, deadline)
+
+
+async def _fetch_before_deadline(
+    server: str, host_id: str, host_token: str, deadline: float
+) -> dict | None:
+    """Cancel request I/O at the shared deadline and close it before returning."""
+    async with httpx.AsyncClient() as client:
         try:
-            resp = httpx.get(
-                _credential_url(server, host_id),
-                headers={MANAGED_HOST_TOKEN_HEADER: host_token},
-                timeout=max(deadline - time.monotonic(), 0.1),
-            )
-        except httpx.TransportError:
-            continue
-        except httpx.HTTPError:
-            return None
-        if resp.status_code == 429 or resp.status_code >= 500:
-            continue
-        if resp.status_code != 200:
-            return None
-        try:
-            return resp.json()
-        except ValueError:
+            # HTTPX timeouts bound inactivity; a total scope also bounds a slow body.
+            with anyio.fail_after(max(deadline - time.monotonic(), 0)):
+                for attempt in range(len(_RETRY_BACKOFF_S) + 1):
+                    if attempt:
+                        pause = _RETRY_BACKOFF_S[attempt - 1]
+                        if time.monotonic() + pause >= deadline:
+                            return None
+                        await anyio.sleep(pause)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return None
+                    try:
+                        resp = await client.get(
+                            _credential_url(server, host_id),
+                            headers={MANAGED_HOST_TOKEN_HEADER: host_token},
+                            timeout=remaining,
+                        )
+                    except httpx.TransportError:
+                        continue
+                    except httpx.HTTPError:
+                        return None
+                    if resp.status_code == 429 or resp.status_code >= 500:
+                        continue
+                    if resp.status_code != 200:
+                        return None
+                    try:
+                        return resp.json()
+                    except ValueError:
+                        return None
+        except TimeoutError:
             return None
     return None
 
