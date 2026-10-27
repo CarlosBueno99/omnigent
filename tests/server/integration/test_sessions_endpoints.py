@@ -9897,25 +9897,16 @@ async def test_interrupt_on_claude_native_session_skips_idle_publish_on_runner_f
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """
-    If the runner couldn't deliver the Escape (e.g. tmux pane gone),
-    Omnigent must NOT lie to the UI by publishing idle. The spinner spins
-    is the right signal — it tells the user the cancel didn't land.
-
-    After the interrupt-unification refactor the Omnigent side no longer
-    publishes ``session.status: idle`` itself at all. Idle on a
-    claude-native interrupt now comes from the runner's PTY activity
-    watcher once the pane quiesces after the Escape (a failed Escape
-    naturally surfaces as "no idle" — the pane keeps changing). This
-    test acts as a regression guard against re-adding an AP-side idle
-    publish — if someone reintroduces the pre-refactor "publish idle on
-    2xx" logic, the 503 path here would start leaking idle.
-    """
+    """A rejected native interrupt reports failure without publishing idle."""
     from omnigent.runtime import session_stream
+
+    forwards: list[str] = []
 
     def _handler(request: httpx.Request) -> httpx.Response:
         """Return 503 — the bridge-not-ready shape from the runner."""
-        del request
+        if request.method != "POST" or not request.url.path.endswith("/events"):
+            return httpx.Response(204)
+        forwards.append(request.url.path)
         return httpx.Response(503, json={"error": "claude_native_interrupt_failed"})
 
     published: list[dict[str, Any]] = []
@@ -9928,7 +9919,8 @@ async def test_interrupt_on_claude_native_session_skips_idle_publish_on_runner_f
 
     monkeypatch.setattr(session_stream, "publish", _capture_publish)
 
-    async with _runtime_runner(_handler):
+    async with _runtime_runner(_handler) as runner:
+        _route_to_runner(monkeypatch, runner)
         agent = await create_test_agent(client)
         session = await _create_session(
             client,
@@ -9943,7 +9935,8 @@ async def test_interrupt_on_claude_native_session_skips_idle_publish_on_runner_f
             f"/v1/sessions/{session['id']}/events",
             json={"type": "interrupt", "data": {}},
         )
-        assert resp.status_code == 202, resp.text
+        assert resp.status_code == 503, resp.text
+        assert forwards == [f"/v1/sessions/{session['id']}/events"]
 
     # interrupted still fires (the UI marks the bubble cancelled);
     # idle does not (the Escape didn't land).
@@ -10416,6 +10409,7 @@ async def test_retry_session_keeps_error_actionable_when_runner_is_unavailable(
         "bare_connection_error",
         # Runner reachable but the cancel didn't land (claude-native 503 leg).
         "runner_503",
+        "runner_redirect",
         # No runner client resolves at all: nothing was forwarded anywhere.
         "no_runner_client",
     ],
@@ -10446,6 +10440,8 @@ async def test_interrupt_forward_failure_lifts_stop_fence(
             if failure_mode == "bare_connection_error":
                 # What WSTunnelTransport raises when the tunnel closes mid-request.
                 raise ConnectionError("tunnel closed mid-request")
+            if failure_mode == "runner_redirect":
+                return httpx.Response(307, headers={"location": "/different-runner"})
             return httpx.Response(503, json={"error": "claude_native_interrupt_failed"})
         return httpx.Response(204)
 
@@ -10471,14 +10467,17 @@ async def test_interrupt_forward_failure_lifts_stop_fence(
         agent = await create_test_agent(client)
         session = await _create_session(client, agent["id"])
         session_id = session["id"]
+        if failure_mode == "no_runner_client":
+            from omnigent.runtime import get_conversation_store
+
+            get_conversation_store().replace_runner_id(session_id, "offline-runner")
 
         resp = await client.post(
             f"/v1/sessions/{session_id}/events",
             json={"type": "interrupt", "data": {}},
         )
-        # Interrupt is best-effort and still ACKs (the UI already marked the
-        # bubble interrupted); the fence removal below is the fix under test.
-        assert resp.status_code == 202, resp.text
+        assert resp.status_code == 503, resp.text
+        assert resp.json()["error"]["code"] == "runner_unavailable"
         assert session_id not in _interrupt_fenced_sessions, (
             "a failed interrupt forward must remove the fence it installed — "
             "leaving it set drops the rest of the still-running turn"
@@ -10816,6 +10815,10 @@ async def test_interrupt_forward_failure_keeps_queued_native_messages_pending(
         agent = await create_test_agent(client)
         session = await _create_session(client, agent["id"])
         session_id = session["id"]
+        if failure_mode == "no_runner_client":
+            from omnigent.runtime import get_conversation_store
+
+            get_conversation_store().replace_runner_id(session_id, "offline-runner")
         queued = pending_inputs.record(session_id, [{"type": "input_text", "text": "still live"}])
 
         resp = await client.post(
@@ -10823,7 +10826,7 @@ async def test_interrupt_forward_failure_keeps_queued_native_messages_pending(
             json={"type": "interrupt", "data": {}},
         )
 
-        assert resp.status_code == 202, resp.text
+        assert resp.status_code == 503, resp.text
         assert [e["pending_id"] for e in pending_inputs.snapshot_for(session_id)] == [queued]
         assert pending_inputs.has_pending(session_id)
     finally:
@@ -10946,12 +10949,14 @@ def _queue_web_message(session_id: str, text: str) -> str:
     return pending_inputs.record(session_id, [{"type": "input_text", "text": text}])
 
 
-async def _press_stop(client: httpx.AsyncClient, session_id: str) -> None:
+async def _press_stop(
+    client: httpx.AsyncClient, session_id: str, *, delivered: bool = True
+) -> None:
     """POST an interrupt, as the web client's Stop button does."""
     response = await client.post(
         f"/v1/sessions/{session_id}/events", json={"type": "interrupt", "data": {}}
     )
-    assert response.status_code == 202, response.text
+    assert response.status_code == (202 if delivered else 503), response.text
 
 
 async def _mirror_user_message(
@@ -11026,7 +11031,7 @@ async def test_interrupted_native_message_is_not_reported_undelivered_by_a_later
         client, monkeypatch, interrupt_status=202 if delivered else 503
     ) as (session_id, published):
         cancelled = _queue_web_message(session_id, "cancel me")
-        await _press_stop(client, session_id)
+        await _press_stop(client, session_id, delivered=delivered)
         # The person's next message, sent after Stop, which the agent records.
         kept = _queue_web_message(session_id, "go on")
         await _mirror_user_message(client, session_id, "go on", "codex:go-on:0")

@@ -1767,7 +1767,7 @@ def register_events_routes(
                         json=interrupt_payload,
                         timeout=5.0,
                     )
-                    interrupt_delivered = interrupt_resp.status_code < 400
+                    interrupt_delivered = 200 <= interrupt_resp.status_code < 300
                 except (httpx.HTTPError, ConnectionError):
                     # WSTunnelTransport raises bare ConnectionError on tunnel close.
                     _logger.exception(
@@ -1783,6 +1783,12 @@ def register_events_routes(
                 # The turn keeps running and nothing else lifts the fence —
                 # remove it so the turn's remaining output isn't dropped.
                 _interrupt_fenced_sessions.discard(session_id)
+                if runner_client is not None or conv.runner_id is not None:
+                    raise OmnigentError(
+                        "Couldn't confirm the interrupt with the runner. "
+                        "Try again when the host is connected.",
+                        code=ErrorCode.RUNNER_UNAVAILABLE,
+                    )
             elif not codex_child:
                 pending_inputs.mark_interrupted(session_id, queued_pending_ids)
             if stop_codex_side_chat:

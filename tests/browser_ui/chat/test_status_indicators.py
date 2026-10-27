@@ -264,3 +264,37 @@ def test_background_task_popover_stays_interactive_and_within_viewport(
     _background_status(chat, 1, [_MONITOR_TASK])
     expect(_pill(page, 1)).to_have_attribute("aria-expanded", "false", timeout=10_000)
     expect(composer).to_have_value(draft)
+
+
+def test_interrupt_failure_is_visible_and_the_live_stream_keeps_working(
+    page: Page,
+    chat_session_contract: ChatSessionContract,
+    output_path: str,
+) -> None:
+    from pathlib import Path
+
+    chat = chat_session_contract
+    chat.seed_transcript(1)
+    message = (
+        "Couldn't confirm the interrupt with the runner. Try again when the host is connected."
+    )
+    chat.contract.json(
+        f"/v1/sessions/{chat.session_id}/events",
+        {"error": {"code": "runner_unavailable", "message": message}},
+        method="POST",
+        status=503,
+    )
+    page.goto(chat.url)
+    chat.wait_for_stream()
+    chat.emit_busy("interrupt-turn")
+    working = page.get_by_test_id("working-indicator")
+    expect(working).to_be_visible(timeout=10_000)
+
+    with page.expect_response(lambda response: response.url.endswith("/events")) as response:
+        page.get_by_title("Interrupt", exact=True).click()
+    assert response.value.status == 503
+    expect(page.get_by_text("Interrupt wasn't confirmed", exact=True)).to_be_visible()
+    expect(page.get_by_text(message, exact=True)).to_be_visible()
+    chat.emit_busy("interrupt-turn")
+    expect(working).to_be_visible()
+    page.screenshot(path=str(Path(output_path) / "interrupt-unconfirmed.png"), full_page=True)
