@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import sqlalchemy as sa
 from alembic import command
 
@@ -17,6 +18,8 @@ from omnigent.db.utils import _build_alembic_config
 # Revision ids bounding the migration under test.
 _PRIOR_HEAD = "c8e4f2a6b901"
 _THIS_REVISION = "ng12ab34cd56"
+_MAIN_HEAD = "b2e4f6a8c013"
+_MERGE_REVISION = "e7c9a2d4f601"
 _TABLE = "omnigent_conversation_metadata"
 
 
@@ -108,5 +111,46 @@ def test_live_status_at_downgrades_and_replays(tmp_path: Path) -> None:
             assert conn.execute(sa.text(f"SELECT id, live_status FROM {_TABLE}")).all() == [
                 (row_id, 1)
             ]
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("starting_revision", ["base", _THIS_REVISION, _MAIN_HEAD])
+def test_disconnect_stamps_join_current_schema(tmp_path: Path, starting_revision: str) -> None:
+    uri = f"sqlite:///{tmp_path / 'merged-ordering-stamps.db'}"
+    engine = sa.create_engine(uri)
+    row_id = bytes.fromhex("0123456789abcdef0123456789abcdef")
+    try:
+        _migrate(uri, engine, starting_revision)
+        if starting_revision != "base":
+            with engine.begin() as conn:
+                conn.execute(
+                    sa.text(f"INSERT INTO {_TABLE} (id, live_status) VALUES (:id, 1)"),
+                    {"id": row_id},
+                )
+
+        _migrate(uri, engine, "head")
+        assert {"pull_requests", "live_status_at", "runner_last_connected"} <= _columns(
+            engine
+        ).keys()
+        with engine.connect() as conn:
+            assert (
+                conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one()
+                == _MERGE_REVISION
+            )
+            if starting_revision != "base":
+                assert conn.execute(sa.text(f"SELECT id, live_status FROM {_TABLE}")).all() == [
+                    (row_id, 1)
+                ]
+
+        _migrate(uri, engine, _THIS_REVISION, downgrade=True)
+        with engine.connect() as conn:
+            assert set(
+                conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalars()
+            ) == {
+                _MAIN_HEAD,
+                _THIS_REVISION,
+            }
+        _migrate(uri, engine, "head")
     finally:
         engine.dispose()
