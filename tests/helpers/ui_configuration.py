@@ -152,20 +152,21 @@ def _validate_ui_base_url(base_url: str) -> None:
 
 
 def validate_native_claude_mock_routing(mock_llm_server_url: str) -> None:
-    """Reject a known machine policy redirect before launching the real Claude CLI.
+    """Skip if machine policy overrides would interfere with the mock LLM provider.
 
     Callers must opt in to the ``claude_managed_settings`` fixture so pytest's
     ambient isolation does not hide settings the child process will still read.
     """
+    import pytest
+
     from omnigent.onboarding.ambient import claude_managed_gateway
 
     managed_url, _ = claude_managed_gateway()
     if managed_url and managed_url.rstrip("/") != mock_llm_server_url.rstrip("/"):
-        raise RuntimeError(
+        pytest.skip(
             "Claude Code's managed ANTHROPIC_BASE_URL overrides the mock provider. "
-            "CLAUDE_CONFIG_DIR does not isolate machine-managed settings. "
-            "Run this mock journey in a clean container or CI runner without that override; "
-            "do not change machine policy. No Claude session was launched."
+            "Run this native Claude mock test in a clean container or CI runner without that override. "
+            "CLAUDE_CONFIG_DIR does not isolate machine-managed settings; do not change machine policy."
         )
 
 
