@@ -28,7 +28,7 @@ and codes rather than put content in an allowed field.
 | `native_rpc_attempt_id` | Pairs one Codex RPC attempt with its accepted, failed, or cancelled result, including attempts recovered by retrying. |
 | `requested_native_turn_id` | The target of that specific steer; absent for a new turn start. |
 | `initial_native_turn_id` | Bridge state before a complete injection, which can differ from the target of a recovered RPC attempt. |
-| `lifecycle_response_id` | The Omnigent turn lifecycle that named this stable input before settlement. |
+| `lifecycle_response_id` | The Omnigent turn lifecycle that named this input before settlement. |
 
 Join within the same workspace and Omnigent session. Missing IDs mean that a
 producer did not supply them; do not infer ownership from timestamps alone.
@@ -37,6 +37,7 @@ producer did not supply them; do not infer ownership from timestamps alone.
 
 | Event | What it records |
 | --- | --- |
+| `native_input_received` | An authorized native-message request reached the server, before runner recovery or initialization. Contains `input_received_at_ms` and a validated `input_stable_id` when supplied; emits even without that ID. It does not establish acceptance or delivery. |
 | `native_input_enqueued` | The server queued the input. |
 | `native_input_retry_deduplicated` | A client retry reused an existing pending entry. No second delivery was requested. |
 | `native_input_forward_started` | The server began forwarding the input to the runner. |
@@ -103,7 +104,10 @@ Skipped inputs also carry a bounded `cause_class`:
 identity-linked stage the server observed: enqueue/forward stages, native turn
 start/terminal stages, or `rejected_before_handoff`. A transcript can arrive
 before the forwarding HTTP response, so a settled input can still say
-`forward_requested`. Older runners omit lifecycle identity; those entries stay
+`forward_requested`. Lifecycle events also carry the server's `pending_id` and
+`delivery_attempt_id`, so an input without a client `stable_id` can retain its
+turn outcome. Both server IDs must match the queued attempt; a mismatched
+client or server ID leaves the entry unchanged. Older runners omit lifecycle identity; those entries stay
 `unknown` instead of being classified from timestamps.
 
 SSE logging retains `item.response_id` and the `item_id` and

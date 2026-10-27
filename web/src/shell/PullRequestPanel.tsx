@@ -2,7 +2,7 @@
 // the `github` prefix because they are stable wire ids.
 //
 // PullRequestPanel — the right-rail "Pull Requests" tab: the session branch's PR
-// (number, title, state, CI summary, labels, link out) and the branch-vs-base diff.
+// (number, title, state, CI summary, reviewers, labels, link out) and the branch-vs-base diff.
 // Provider-visible text comes from lib/gitProviders.ts.
 //
 // Layout is GitHub's "Files changed": every file's diff stacked in one scroll
@@ -21,6 +21,7 @@
 // PR each render their own empty state, and an associated PR falls through to
 // the header + stacked diff.
 
+import { PullRequestCommentComposer } from "./PullRequestCommentComposer";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -29,8 +30,10 @@ import {
   ChevronsDownUpIcon,
   ChevronsUpDownIcon,
   AlertCircleIcon,
+  BanIcon,
   CircleCheckIcon,
   CircleDotIcon,
+  CircleMinusIcon,
   CircleXIcon,
   Columns2Icon,
   DownloadIcon,
@@ -44,7 +47,6 @@ import {
   GitPullRequestIcon,
   KeyRoundIcon,
   Loader2Icon,
-  MessageCircleIcon,
   type LucideIcon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
@@ -97,10 +99,15 @@ import {
   type PullRequestChecks,
   type PullRequestComment,
   type PullRequestInfo,
-  type PullRequestReviewer,
 } from "@/hooks/usePullRequests";
+import {
+  PULL_REQUEST_MARKDOWN_COMPONENTS,
+  PullRequestDescription,
+  PullRequestTitle,
+} from "./PullRequestDetails";
 import { PullRequestLabels } from "./PullRequestLabels";
 import { PullRequestMerge } from "./PullRequestMerge";
+import { PullRequestReviewers } from "./PullRequestReviewers";
 
 // Shiki bundled themes matching the app's editor look; the concrete side is
 // chosen by `themeType` from the app's resolved light/dark mode.
@@ -614,37 +621,6 @@ function CheckPill({
 // ── Summary and Comments tabs ────────────────────────────────────────────
 // Reviewer assignments, CI checks, the PR description, and conversation comments.
 
-const REVIEWER_STATE_META: Record<
-  PullRequestReviewer["state"],
-  { label: string; className: string; Icon: LucideIcon }
-> = {
-  PENDING: {
-    label: "Pending",
-    className: "text-amber-700 dark:text-amber-400",
-    Icon: CircleDotIcon,
-  },
-  APPROVED: {
-    label: "Approved",
-    className: "text-green-700 dark:text-green-400",
-    Icon: CircleCheckIcon,
-  },
-  COMMENTED: {
-    label: "Commented",
-    className: "text-blue-700 dark:text-blue-400",
-    Icon: MessageCircleIcon,
-  },
-  CHANGES_REQUESTED: {
-    label: "Changes requested",
-    className: "text-red-700 dark:text-red-400",
-    Icon: CircleXIcon,
-  },
-  DISMISSED: {
-    label: "Dismissed",
-    className: "text-muted-foreground",
-    Icon: AlertCircleIcon,
-  },
-};
-
 /**
  * Space colors evenly and group shared suffixes without provider-specific rules.
  * The same author set keeps its colors; adding or removing authors can shift them.
@@ -682,52 +658,6 @@ function PullRequestAuthorAvatar({
     >
       {author?.[0]?.toUpperCase() ?? "?"}
     </span>
-  );
-}
-
-/** Keep reviewer colors for review state; author colors belong in comments. */
-function PullRequestReviewerRow({ reviewer }: { reviewer: PullRequestReviewer }) {
-  const state = REVIEWER_STATE_META[reviewer.state];
-  const StateIcon = state.Icon;
-  const subject = reviewer.kind === "team" ? `Team ${reviewer.login}` : reviewer.login;
-
-  return (
-    <li
-      aria-label={`${subject}: ${state.label}`}
-      className="inline-flex max-w-full min-w-0 items-center gap-1.5 rounded-md border border-border bg-muted/20 px-2 py-1 text-xs"
-    >
-      <span className="min-w-0 truncate font-medium text-foreground">{reviewer.login}</span>
-      {reviewer.kind === "team" && <span className="shrink-0 text-muted-foreground">(team)</span>}
-      <span className={cn("inline-flex shrink-0 items-center gap-1", state.className)}>
-        <StateIcon aria-hidden className="size-3" />
-        <span>{state.label}</span>
-      </span>
-    </li>
-  );
-}
-
-/** Compact reviewer rows that keep the assignment and current review state together. */
-function PullRequestReviewers({ reviewers }: { reviewers: PullRequestReviewer[] }) {
-  const reviewerKeys = listKeys(reviewers, (reviewer) => [reviewer.login, reviewer.kind]);
-
-  return (
-    <section className="space-y-1.5" aria-labelledby="pull-request-reviewers-heading">
-      <h3
-        id="pull-request-reviewers-heading"
-        className="text-xs font-medium tracking-wide text-muted-foreground uppercase"
-      >
-        Reviewers
-      </h3>
-      {reviewers.length === 0 ? (
-        <p className="text-ui text-muted-foreground">No reviewers assigned.</p>
-      ) : (
-        <ul className="flex flex-wrap gap-1.5">
-          {reviewers.map((reviewer, index) => (
-            <PullRequestReviewerRow key={reviewerKeys[index]} reviewer={reviewer} />
-          ))}
-        </ul>
-      )}
-    </section>
   );
 }
 
@@ -770,7 +700,9 @@ function PullRequestCommentCard({
         )}
       </div>
       <div className="text-ui break-words">
-        <MessageResponse>{comment.body}</MessageResponse>
+        <MessageResponse allowGitHubAttachmentImages components={PULL_REQUEST_MARKDOWN_COMPONENTS}>
+          {comment.body}
+        </MessageResponse>
       </div>
     </li>
   );
@@ -786,18 +718,18 @@ function PullRequestSummaryTab({
   checks,
   checksSupported,
   checksUnavailableHint,
-  body,
+  description,
 }: {
-  reviewers: PullRequestReviewer[] | undefined;
+  reviewers: React.ReactNode;
   labels: React.ReactNode;
   merge: React.ReactNode;
   checks: PullRequestChecks;
   checksSupported: boolean;
   checksUnavailableHint?: string;
-  body: string | null | undefined;
+  description: React.ReactNode;
 }) {
   const showChecks = checks.total > 0 || checks.partial || !checksSupported;
-  const showReviewers = reviewers !== undefined;
+  const showReviewers = !!reviewers;
   const showPeople = showReviewers || !!labels;
   const showStatus = showChecks || !!merge;
   return (
@@ -805,11 +737,7 @@ function PullRequestSummaryTab({
     <div>
       {showPeople && (
         <div className="flex">
-          {showReviewers && (
-            <div className="min-w-0 flex-1 p-3">
-              <PullRequestReviewers reviewers={reviewers} />
-            </div>
-          )}
+          {showReviewers && <div className="min-w-0 flex-1 p-3">{reviewers}</div>}
           {showReviewers && labels && <Separator orientation="vertical" />}
           {labels && <div className="min-w-0 flex-1 p-3">{labels}</div>}
         </div>
@@ -855,6 +783,20 @@ function PullRequestSummaryTab({
                   icon={<CircleXIcon className="size-2.5 text-red-600 dark:text-red-400" />}
                   className="border-red-500/25 bg-red-500/10 text-red-700 dark:text-red-400"
                 />
+                <CheckPill
+                  label="cancelled"
+                  count={checks.cancelled ?? 0}
+                  runs={checks.runs.filter((r) => r.bucket === "cancelled")}
+                  icon={<BanIcon className="size-2.5 text-muted-foreground" />}
+                  className="border-border bg-muted text-muted-foreground"
+                />
+                <CheckPill
+                  label="skipped"
+                  count={checks.skipped ?? 0}
+                  runs={checks.runs.filter((r) => r.bucket === "skipped")}
+                  icon={<CircleMinusIcon className="size-2.5 text-muted-foreground" />}
+                  className="border-border bg-muted text-muted-foreground"
+                />
               </div>
             </section>
           )}
@@ -864,18 +806,7 @@ function PullRequestSummaryTab({
       {(showPeople || showStatus) && <Separator />}
       {/* Extra bottom padding so the end of a long description can scroll clear
           of the very bottom edge, where it's awkward to read. */}
-      <section className="space-y-1.5 p-3 pb-16">
-        <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-          Description
-        </h3>
-        {body ? (
-          <div className="text-ui break-words">
-            <MessageResponse>{body}</MessageResponse>
-          </div>
-        ) : (
-          <p className="text-ui text-muted-foreground italic">No description provided.</p>
-        )}
-      </section>
+      <div className="p-3 pb-16">{description}</div>
     </div>
   );
 }
@@ -886,17 +817,17 @@ function PullRequestCommentsTab({
   comments,
   commentsPartial,
   providerLabel,
+  hasComposer,
 }: {
   comments: PullRequestComment[];
+  hasComposer: boolean;
   commentsPartial?: boolean;
   providerLabel: string;
 }) {
   const commentKeys = listKeys(comments, (c) => [c.url, c.created_at, c.author_id ?? c.author]);
   const authorHues = useMemo(() => pullRequestAuthorHues(comments), [comments]);
   return (
-    // Extra bottom padding so the last comment can scroll clear of the very
-    // bottom edge, where it's awkward to read.
-    <div className="space-y-2 p-3 pb-16">
+    <div className={cn("space-y-2 p-3", !hasComposer && "pb-16")}>
       {commentsPartial && (
         <p role="status" className="text-ui text-muted-foreground">
           Some comments are unavailable.
@@ -1185,6 +1116,7 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
         >
           <Input
             aria-label="Pull request URL"
+            autoFocus
             type="url"
             required
             value={url}
@@ -1335,7 +1267,9 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
         </div>
       ) : null}
       {showTrackingControls && (linking || update.isError) && (
-        <div className="shrink-0 border-b border-border p-2">{linkControls}</div>
+        <div className="shrink-0 border-b border-border p-2 [&>:first-child]:mt-0">
+          {linkControls}
+        </div>
       )}
       {info.data?.warnings?.length || info.data?.discovery_warnings?.length ? (
         <p
@@ -1355,7 +1289,7 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
           emptyStateAction={
             associations?.tracking_available && linkInEmptyState ? (
               <div className="mt-2 w-full max-w-sm">
-                <Button onClick={() => setLinking(!linking)}>Link a PR</Button>
+                {!linking && <Button onClick={() => setLinking(true)}>Link a PR</Button>}
                 {linkControls}
               </div>
             ) : (
@@ -1546,8 +1480,15 @@ function PullRequestPanelDetails({
     );
   }, [files]);
 
+  // Jumping to a collapsed file also expands it, so the click lands on its diff.
   const jumpTo = useCallback((path: string) => {
     setActivePath(path);
+    setCollapsedPaths((prev) => {
+      if (!prev.has(path)) return prev;
+      const next = new Set(prev);
+      next.delete(path);
+      return next;
+    });
     sectionEls.current.get(path)?.scrollIntoView({ block: "start" });
   }, []);
 
@@ -1710,6 +1651,7 @@ function PullRequestPanelDetails({
   const pr = data.pr!;
   const checks = pr.checks;
   const comments = pr.comments ?? [];
+  const canPostComment = !!(canEdit && data.capabilities.comment_posting && data.selected_pr_url);
 
   return (
     <TooltipProvider delayDuration={0}>
@@ -1740,19 +1682,16 @@ function PullRequestPanelDetails({
               <div className="ml-auto shrink-0">{refreshButton}</div>
             </div>
             <div className="mt-1 flex flex-nowrap items-center gap-2">
-              <a
-                href={pr.url}
-                target="_blank"
-                rel="noreferrer"
-                className="group flex min-w-0 items-center gap-1 text-ui font-medium hover:underline"
-              >
-                <span className="truncate">{pr.title}</span>
-                <span className="shrink-0 text-muted-foreground">
-                  {copy.prNumberPrefix}
-                  {pr.number}
-                </span>
-                <ExternalLinkIcon className="size-3 shrink-0 text-muted-foreground" />
-              </a>
+              <PullRequestTitle
+                // A different PR starts fresh, so an open title edit can't outlive its PR.
+                key={data.selected_pr_url ?? pr.url}
+                conversationId={conversationId}
+                prUrl={data.selected_pr_url ?? null}
+                url={pr.url}
+                title={pr.title}
+                numberLabel={`${copy.prNumberPrefix}${pr.number}`}
+                editable={canEdit && !!data.capabilities.details_editing}
+              />
               <PullRequestStatus state={pr.state} />
             </div>
           </div>
@@ -1778,10 +1717,24 @@ function PullRequestPanelDetails({
           </TabsList>
         </div>
 
-        {/* Summary: reviewers, CI checks, and the PR description. */}
-        <TabsContent value="summary" className="min-h-0 flex-1 overflow-y-auto">
+        {/* Summary: reviewers, CI checks, and the PR description. A size container,
+            so the description editor can fit itself to the visible height (cqh). */}
+        <TabsContent
+          value="summary"
+          className="min-h-0 flex-1 overflow-y-auto [container-type:size]"
+        >
           <PullRequestSummaryTab
-            reviewers={pr.reviewers}
+            reviewers={
+              pr.reviewers !== undefined && (
+                <PullRequestReviewers
+                  conversationId={conversationId}
+                  prUrl={data.selected_pr_url ?? null}
+                  reviewers={pr.reviewers}
+                  author={pr.author}
+                  editable={canEdit && !!data.capabilities.reviewer_editing}
+                />
+              )
+            }
             labels={
               pr.labels !== undefined &&
               data.selected_pr_url && (
@@ -1811,16 +1764,40 @@ function PullRequestPanelDetails({
             checks={checks}
             checksSupported={pr.checks_supported !== false}
             checksUnavailableHint={copy.checksUnavailableHint}
-            body={pr.body}
+            description={
+              <PullRequestDescription
+                conversationId={conversationId}
+                prUrl={data.selected_pr_url ?? null}
+                body={pr.body}
+                editable={canEdit && !!data.capabilities.details_editing}
+                attachments={!!data.capabilities.attachment_uploads}
+              />
+            }
           />
         </TabsContent>
 
-        <TabsContent value="comments" className="min-h-0 flex-1 overflow-y-auto">
-          <PullRequestCommentsTab
-            comments={comments}
-            commentsPartial={pr.comments_partial}
-            providerLabel={copy.label}
-          />
+        <TabsContent value="comments" className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div
+            role="region"
+            aria-label="PR comments"
+            tabIndex={0}
+            className="min-h-0 flex-1 overflow-y-auto"
+          >
+            <PullRequestCommentsTab
+              comments={comments}
+              hasComposer={canPostComment}
+              commentsPartial={pr.comments_partial}
+              providerLabel={copy.label}
+            />
+          </div>
+          {canPostComment && data.selected_pr_url && (
+            <PullRequestCommentComposer
+              key={`${conversationId}:${data.selected_pr_url}`}
+              conversationId={conversationId}
+              prUrl={data.selected_pr_url}
+              account={data.auth.selected_account}
+            />
+          )}
         </TabsContent>
 
         {/* Changes: a controls row, then the sidebar (jump-to-file) + one scroll

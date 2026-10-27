@@ -17,7 +17,6 @@ import pytest
 from fastapi import FastAPI
 
 from omnigent.server.app import ServerInfoResponse
-from omnigent.server.feature_flags import Feature, FeatureFlags
 from omnigent.stores.agent_store import AgentStore
 
 pytestmark = pytest.mark.asyncio
@@ -98,6 +97,7 @@ async def test_info_returns_expected_fields(client: httpx.AsyncClient) -> None:
         "workspace_content_search": False,
         "grid_sessions_display_ui": False,
         "automations_v2": False,
+        "splittable_terminal_view_ui": False,
     }
     # Compatibility field for frontend builds predating the nested map.
     assert data["harness_install_enabled"] is False
@@ -107,6 +107,8 @@ async def test_info_returns_expected_fields(client: httpx.AsyncClient) -> None:
     assert data["installable_harnesses"] == []
     # Gates the web's archive worktree prompt; older servers omit it.
     assert data["archive_worktree_cleanup"] is True
+    # Gates the palette's grouped session search; older servers omit it.
+    assert data["session_search_scope"] is True
     assert data["agent_detail"] is True
     assert data["agent_config_edit"] is True
     # single_user reflects OMNIGENT_LOCAL_SINGLE_USER, which the suite's
@@ -171,8 +173,7 @@ async def test_info_advertises_installable_harnesses_when_enabled(
     """
     from omnigent.onboarding.harness_install import ui_installable_harnesses
 
-    enabled = FeatureFlags(frozenset({Feature.HARNESS_INSTALL}))
-    monkeypatch.setattr(app.state, "feature_flags", enabled)
+    monkeypatch.setattr(app.state, "harness_install", True)
     resp = await client.get("/v1/info")
     assert resp.status_code == 200
     data = resp.json()

@@ -61,6 +61,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -72,8 +73,12 @@ from omnigent import config as _config
 from omnigent.runner import pr_resource
 from omnigent.runner.git_providers import (
     MERGE_OPTIONS_OBJECT,
+    PR_ATTACHMENT_OBJECT,
+    PR_DETAILS_OBJECT,
     PR_LABELS_OBJECT,
     PR_MERGE_OBJECT,
+    PR_REVIEWERS_OBJECT,
+    ReviewerRef,
     local_git,
 )
 from omnigent.runner.session_prs import PullRequestRef
@@ -173,8 +178,11 @@ def _in_sandbox() -> bool:
     return (os.environ.get("IS_SANDBOX") or "").strip() == "1"
 
 
-def _gh(argv: list[str], *, cwd: str, token: str | None = None) -> tuple[int | None, str, str]:
-    timeout = _gh_timeout_seconds()
+def _gh(
+    argv: list[str], *, cwd: str, token: str | None = None, timeout: float | None = None
+) -> tuple[int | None, str, str]:
+    # ``timeout`` raises the per-call limit for a slow call, such as a video upload.
+    timeout = timeout or _gh_timeout_seconds()
     if (deadline := _gh_deadline.get()) is not None:
         timeout = min(timeout, deadline - time.monotonic())
         if timeout <= 0:
@@ -376,7 +384,7 @@ _MAX_CHECK_RUNS = 300
 
 
 def _classify_check(check: dict[str, Any]) -> str:
-    """Bucket a single ``statusCheckRollup`` entry: passing / failing / pending."""
+    """Bucket a single ``statusCheckRollup`` entry by its outcome."""
     # CheckRun carries status/conclusion; StatusContext carries state.
     state = check.get("state")
     if state is not None:
@@ -389,16 +397,18 @@ def _classify_check(check: dict[str, Any]) -> str:
     if str(check.get("status", "")).upper() != "COMPLETED":
         return "pending"
     conclusion = str(check.get("conclusion", "")).upper()
-    return "passing" if conclusion in ("SUCCESS", "NEUTRAL", "SKIPPED") else "failing"
+    if conclusion in ("CANCELLED", "SKIPPED"):
+        return conclusion.lower()
+    return "passing" if conclusion in ("SUCCESS", "NEUTRAL") else "failing"
 
 
 def _summarize_checks(rollup: Any) -> dict[str, Any]:
     """Summarize a ``statusCheckRollup`` into bucket counts + per-check details.
 
-    :returns: ``{passing, failing, pending, total, runs}`` where ``runs`` is a
-        list of ``{name, bucket, url}`` (the job names the UI shows on hover).
+    :returns: Outcome counts, a total, and ``runs`` containing
+        ``{name, bucket, url}`` (the job names the UI shows on hover).
     """
-    counts = {"passing": 0, "failing": 0, "pending": 0}
+    counts = {"passing": 0, "failing": 0, "pending": 0, "cancelled": 0, "skipped": 0}
     runs: list[dict[str, Any]] = []
     if isinstance(rollup, list):
         for check in rollup:
@@ -418,16 +428,14 @@ def _summarize_checks(rollup: Any) -> dict[str, Any]:
                     }
                 )
     return {
-        "passing": counts["passing"],
-        "failing": counts["failing"],
-        "pending": counts["pending"],
-        "total": counts["passing"] + counts["failing"] + counts["pending"],
+        **counts,
+        "total": sum(counts.values()),
         "runs": runs,
     }
 
 
 # Cap the comments list so a very chatty PR can't bloat the payload; keep the
-# earliest comments after merging issue comments and review bodies.
+# latest comments after merging issue comments and review bodies.
 _MAX_COMMENTS = 100
 
 
@@ -506,14 +514,14 @@ def _shape_comments(
             }
         )
     shaped.sort(key=lambda comment: comment["created_at"] or "")
-    return shaped[:_MAX_COMMENTS] if cap else shaped
+    return shaped[-_MAX_COMMENTS:] if cap else shaped
 
 
 def _comments_payload(data: dict[str, Any]) -> dict[str, Any]:
     comments = data.get("comments")
     reviews = data.get(_PR_COMMENTS_FIELD)
     shaped = _shape_comments(comments, reviews, pr_url=data.get("url"), cap=False)
-    result: dict[str, Any] = {"comments": shaped[:_MAX_COMMENTS]}
+    result: dict[str, Any] = {"comments": shaped[-_MAX_COMMENTS:]}
     if (
         not isinstance(comments, list)
         or not isinstance(reviews, list)
@@ -529,8 +537,8 @@ def _comments_payload(data: dict[str, Any]) -> dict[str, Any]:
 _LABEL_COLOR = re.compile(r"[0-9a-fA-F]{6}")
 # The label picker lists at most this many of the repository's labels.
 _MAX_REPO_LABELS = 1000
-# Every ``gh`` call of one label or merge request shares this budget, under the
-# 20-second waits of the server and the host tunnel.
+# Every ``gh`` call of one label, reviewer, or merge request shares this budget,
+# under the 20-second waits of the server and the host tunnel.
 _PR_EDIT_REQUEST_SECONDS = 15.0
 _LABEL_EDIT_TIMED_OUT = "GitHub took too long to update the labels. Refresh to see which applied."
 _MERGE_TIMED_OUT = (
@@ -706,7 +714,59 @@ def _gh_pr_view(
         data = json.loads(out)
     except ValueError:
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    comments = data.get("comments")
+    if isinstance(comments, list) and len(comments) >= _MAX_COMMENTS:
+        _refresh_latest_comments(data, cwd=cwd, token=token)
+    return data
+
+
+def _refresh_latest_comments(data: dict[str, Any], *, cwd: str, token: str | None) -> None:
+    """Read the latest page when gh's bounded conversation list may omit new posts."""
+    url = data.get("url")
+    if not isinstance(url, str):
+        return
+    try:
+        reference = PullRequestRef.from_url(url)
+        host = _host_args(cwd, reference)
+    except ValueError:
+        return
+    owner, name = reference.repository.split("/", 1)
+    query = """query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) {
+        pullRequest(number: $number) {
+          comments(last: 100) {
+            nodes { author { login } body createdAt url isMinimized }
+          }
+        }
+      }
+    }"""
+    rc, out, _ = _gh(
+        [
+            "api",
+            *host,
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-f",
+            f"owner={owner}",
+            "-f",
+            f"name={name}",
+            "-F",
+            f"number={reference.number}",
+        ],
+        cwd=cwd,
+        token=token,
+    )
+    if rc != 0:
+        return
+    try:
+        latest = json.loads(out)["data"]["repository"]["pullRequest"]["comments"]["nodes"]
+    except (ValueError, KeyError, TypeError):
+        return
+    if isinstance(latest, list):
+        data["comments"] = latest
 
 
 def _checks_fields(data: dict[str, Any]) -> dict[str, Any]:
@@ -1462,11 +1522,18 @@ def _labels_api(
     message = body.get("message") if isinstance(body, dict) else None
     if missing_ok and message == "Label does not exist":
         return None
+    raise _pr_edit_error(err, message, "label")
+
+
+def _pr_edit_error(err: str, message: object, subject: str) -> ValueError:
+    """The user-facing error for a refused ``gh api`` edit of the PR's ``subject``s."""
     if re.search(r"\(HTTP 40[134]\)", err):
-        raise ValueError("The GitHub account on the host cannot edit this pull request's labels.")
+        return ValueError(
+            f"The GitHub account on the host cannot edit this pull request's {subject}s."
+        )
     if isinstance(message, str) and "(HTTP 422)" in err:
-        raise ValueError(f"GitHub rejected the label change: {message}")
-    raise ValueError("GitHub could not update the labels. Refresh to retry.")
+        return ValueError(f"GitHub rejected the {subject} change: {message}")
+    return ValueError(f"GitHub could not update the {subject}s. Refresh to retry.")
 
 
 def _edit_labels(
@@ -1640,3 +1707,419 @@ def _disable_auto_merge(root: str, reference: PullRequestRef) -> dict[str, Any]:
         timed_out=_DISABLE_AUTO_MERGE_TIMED_OUT,
     )
     return {"object": PR_MERGE_OBJECT, "pr_url": reference.url}
+
+
+# The reviewer picker lists at most this many of the repository's assignable users.
+_MAX_REVIEW_CANDIDATES = 1000
+# One page of the repository's teams; a repository rarely grants more.
+_MAX_REVIEW_TEAMS = 100
+_REVIEWER_EDIT_TIMED_OUT = (
+    "GitHub took too long to update the reviewers. Refresh to see which applied."
+)
+_ASSIGNABLE_USERS_QUERY = """
+query($owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    assignableUsers(first: 100, after: $after) {
+      nodes { login name }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+"""
+
+
+def _assignable_users(
+    root: str, host: list[str], token: str | None, reference: PullRequestRef
+) -> tuple[list[dict[str, Any]], bool]:
+    """Page through the repository's assignable users, who can be asked to review.
+
+    :returns: ``(users, has_more)``, capped at :data:`_MAX_REVIEW_CANDIDATES`.
+    :raises ValueError: When ``gh`` cannot list them.
+    """
+    owner, name = reference.repository.split("/", 1)
+    users: list[dict[str, Any]] = []
+    after: str | None = None
+    while True:
+        args = ["api", "graphql", *host, "-f", f"query={_ASSIGNABLE_USERS_QUERY}"]
+        args += ["-f", f"owner={owner}", "-f", f"name={name}"]
+        if after:
+            args += ["-f", f"after={after}"]
+        rc, out, _ = _gh(args, cwd=root, token=token)
+        try:
+            page = json.loads(out)["data"]["repository"]["assignableUsers"] if rc == 0 else None
+        except (ValueError, KeyError, TypeError):
+            page = None
+        if not isinstance(page, dict) or not isinstance(page.get("nodes"), list):
+            raise ValueError(
+                "GitHub could not list this repository's reviewers. Refresh to retry."
+            )
+        for node in page["nodes"]:
+            login = node.get("login") if isinstance(node, dict) else None
+            if isinstance(login, str) and login:
+                display = node.get("name")
+                users.append(
+                    {
+                        "login": login,
+                        "kind": "user",
+                        "name": display if isinstance(display, str) and display else None,
+                    }
+                )
+        info = page.get("pageInfo") if isinstance(page.get("pageInfo"), dict) else {}
+        cursor = info.get("endCursor")
+        if not info.get("hasNextPage") or not isinstance(cursor, str):
+            return users, False
+        if len(users) >= _MAX_REVIEW_CANDIDATES:
+            return users[:_MAX_REVIEW_CANDIDATES], True
+        after = cursor
+
+
+def _repo_teams(
+    root: str, host: list[str], token: str | None, reference: PullRequestRef
+) -> tuple[list[dict[str, Any]], bool]:
+    """List the teams with access to the repository; none when ``gh`` cannot.
+
+    A user-owned repository has no teams, and listing them may need more access
+    than requesting a review does, so a failure only leaves the teams out.
+    """
+    rc, out, _ = _gh(
+        ["api", *host, f"repos/{reference.repository}/teams?per_page={_MAX_REVIEW_TEAMS}"],
+        cwd=root,
+        token=token,
+    )
+    try:
+        raw = json.loads(out) if rc == 0 else []
+    except ValueError:
+        raw = []
+    teams: list[dict[str, Any]] = []
+    for team in raw if isinstance(raw, list) else []:
+        slug = team.get("slug") if isinstance(team, dict) else None
+        if isinstance(slug, str) and slug:
+            display = team.get("name")
+            teams.append(
+                {
+                    "login": slug,
+                    "kind": "team",
+                    "name": display if isinstance(display, str) and display else None,
+                }
+            )
+    return teams, isinstance(raw, list) and len(raw) >= _MAX_REVIEW_TEAMS
+
+
+def _review_candidates(root: str, reference: PullRequestRef) -> dict[str, Any]:
+    """List the users and teams the reviewer picker offers, each sorted by login.
+
+    :raises ValueError: When ``gh`` cannot list the users within
+        :data:`_PR_EDIT_REQUEST_SECONDS`.
+    """
+    with _gh_deadline_scope(time.monotonic() + _PR_EDIT_REQUEST_SECONDS):
+        host = _host_args(root, reference)
+        token = _pr_token(root, reference)
+        users, more_users = _assignable_users(root, host, token, reference)
+        teams, more_teams = _repo_teams(root, host, token, reference)
+
+    def by_login(candidate: dict[str, Any]) -> str:
+        return str(candidate["login"]).casefold()
+
+    return {
+        "object": "list",
+        "data": sorted(users, key=by_login) + sorted(teams, key=by_login),
+        "has_more": more_users or more_teams,
+    }
+
+
+def _reviewer_fields(reviewers: Sequence[ReviewerRef]) -> list[str]:
+    """``gh api`` fields naming ``reviewers`` in a requested reviewers request body.
+
+    A withdrawal must carry ``reviewers`` even for teams alone, so ``reviewers[]``
+    without a value sends an empty array then.
+    """
+    fields = [
+        arg
+        for reviewer in reviewers
+        for arg in (
+            "-f",
+            f"{'team_reviewers' if reviewer.kind == 'team' else 'reviewers'}[]={reviewer.login}",
+        )
+    ]
+    if all(reviewer.kind == "team" for reviewer in reviewers):
+        fields = ["-f", "reviewers[]", *fields]
+    return fields
+
+
+def _reviewers_api(root: str, host: list[str], token: str | None, args: list[str]) -> None:
+    """Run one ``gh api`` requested reviewers request.
+
+    :raises ValueError: With a user-facing message when GitHub refuses the request.
+    """
+    rc, out, err = _gh(["api", *host, *args], cwd=root, token=token)
+    if rc == 0:
+        return
+    try:
+        body = json.loads(out) if out.strip() else None
+    except ValueError:
+        body = None
+    raise _pr_edit_error(err, body.get("message") if isinstance(body, dict) else None, "reviewer")
+
+
+def _edit_reviewers(
+    root: str,
+    reference: PullRequestRef,
+    *,
+    add: Sequence[ReviewerRef],
+    remove: Sequence[ReviewerRef],
+) -> dict[str, Any]:
+    """Withdraw, then request, reviews through GitHub's requested reviewers API.
+
+    Every ``gh`` call shares :data:`_PR_EDIT_REQUEST_SECONDS`; running out reports
+    that the outcome is unknown.
+    """
+    with _gh_deadline_scope(time.monotonic() + _PR_EDIT_REQUEST_SECONDS):
+        try:
+            return _apply_reviewer_edit(root, reference, add=add, remove=remove)
+        except ValueError:
+            if _gh_timed_out.get():
+                raise ValueError(_REVIEWER_EDIT_TIMED_OUT) from None
+            raise
+
+
+def _apply_reviewer_edit(
+    root: str,
+    reference: PullRequestRef,
+    *,
+    add: Sequence[ReviewerRef],
+    remove: Sequence[ReviewerRef],
+) -> dict[str, Any]:
+    """Make the edit's requests, then read the PR's reviewers with their review states."""
+    host = _host_args(root, reference)
+    token = _pr_token(root, reference)
+    if _gh_timed_out.get():
+        # The selected account's token is unknown, so the edit must not run as another.
+        raise ValueError(_REVIEWER_EDIT_TIMED_OUT)
+    endpoint = f"repos/{reference.repository}/pulls/{reference.number}/requested_reviewers"
+    if remove:
+        _reviewers_api(root, host, token, ["-X", "DELETE", endpoint, *_reviewer_fields(remove)])
+    if add:
+        _reviewers_api(root, host, token, ["-X", "POST", endpoint, *_reviewer_fields(add)])
+    data = _gh_pr_view(
+        [str(reference.number), "-R", _repo_argument(reference)],
+        ",".join(sorted(_PR_REVIEW_FIELDS)),
+        cwd=root,
+        token=token,
+    )
+    if data is None or not _PR_REVIEW_FIELDS.issubset(data):
+        raise ValueError(
+            "GitHub updated the reviewers but could not list them. Refresh to see them."
+        )
+    return {"object": PR_REVIEWERS_OBJECT, "reviewers": _shape_reviewers(data)}
+
+
+_DETAILS_EDIT_TIMED_OUT = (
+    "GitHub took too long to update the pull request. Refresh to see whether it applied."
+)
+# One attachment upload's ``gh`` calls share this budget, under the server's wait,
+# so a video has time to reach GitHub.
+_ATTACHMENT_REQUEST_SECONDS = 110.0
+_ATTACHMENT_TIMED_OUT = "GitHub took too long to upload the file. Try again."
+
+
+def _pr_json_write(
+    root: str,
+    *,
+    host: list[str],
+    token: str | None,
+    method: str,
+    endpoint: str,
+    fields: dict[str, Any],
+) -> tuple[int | None, str, str]:
+    """Send Markdown in a JSON file so shell syntax and long bodies remain literal."""
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".json", encoding="utf-8", delete_on_close=False
+    ) as payload:
+        json.dump(fields, payload)
+        payload.close()
+        return _gh(
+            ["api", *host, "-X", method, endpoint, "--input", payload.name],
+            cwd=root,
+            token=token,
+        )
+
+
+def _create_comment(root: str, reference: PullRequestRef, *, body: str) -> dict[str, Any]:
+    """Post once and return GitHub's canonical comment, without a follow-up read."""
+    uncertain = "Could not confirm comment posting. Check GitHub before retrying."
+    with _gh_deadline_scope(time.monotonic() + _PR_EDIT_REQUEST_SECONDS):
+        host = _host_args(root, reference)
+        token = _pr_token(root, reference)
+        if _gh_timed_out.get():
+            raise ValueError("GitHub authentication timed out. Your comment was not sent.")
+        rc, out, err = _pr_json_write(
+            root,
+            host=host,
+            token=token,
+            method="POST",
+            endpoint=f"repos/{reference.repository}/issues/{reference.number}/comments",
+            fields={"body": body},
+        )
+        if _gh_timed_out.get():
+            raise ValueError(uncertain)
+    try:
+        result = json.loads(out)
+    except ValueError:
+        result = None
+    if rc != 0 or not isinstance(result, dict):
+        if re.search(r"\(HTTP 40[134]\)", err):
+            raise ValueError("The GitHub account on the host cannot post to this conversation.")
+        if "(HTTP 422)" in err:
+            raise ValueError("GitHub rejected the comment. Check its length and try again later.")
+        raise ValueError(uncertain)
+    if not result.get("id") or not isinstance(result.get("html_url"), str):
+        raise ValueError(uncertain)
+    author = result.get("user")
+    return {
+        "object": "session.github.pr_comment",
+        "comment": {
+            "author": author.get("login") if isinstance(author, dict) else None,
+            "body": result.get("body") or "",
+            "created_at": result.get("created_at"),
+            "url": result["html_url"],
+        },
+    }
+
+
+def _edit_details(
+    root: str, reference: PullRequestRef, *, title: str | None, body: str | None
+) -> dict[str, Any]:
+    """Update the PR's title and/or body with one pull requests API ``PATCH``.
+
+    The body travels in a JSON file, since a long description could pass the
+    command-line length limit as a field.
+    """
+    with _gh_deadline_scope(time.monotonic() + _PR_EDIT_REQUEST_SECONDS):
+        host = _host_args(root, reference)
+        token = _pr_token(root, reference)
+        if _gh_timed_out.get():
+            # The selected account's token is unknown, so the edit must not run as another.
+            raise ValueError(_DETAILS_EDIT_TIMED_OUT)
+        fields = {
+            key: value for key, value in (("title", title), ("body", body)) if value is not None
+        }
+        rc, out, err = _pr_json_write(
+            root,
+            host=host,
+            token=token,
+            method="PATCH",
+            endpoint=f"repos/{reference.repository}/pulls/{reference.number}",
+            fields=fields,
+        )
+        if _gh_timed_out.get():
+            raise ValueError(_DETAILS_EDIT_TIMED_OUT)
+    try:
+        result = json.loads(out) if out.strip() else None
+    except ValueError:
+        result = None
+    if rc != 0 or not isinstance(result, dict):
+        message = result.get("message") if isinstance(result, dict) else None
+        if re.search(r"\(HTTP 40[134]\)", err):
+            raise ValueError("The GitHub account on the host cannot edit this pull request.")
+        if isinstance(message, str) and "(HTTP 422)" in err:
+            raise ValueError(f"GitHub rejected the change: {message}")
+        raise ValueError("GitHub could not update the pull request. Refresh to retry.")
+    body_after = result.get("body")
+    return {
+        "object": PR_DETAILS_OBJECT,
+        "title": str(result.get("title") or ""),
+        "body": body_after if isinstance(body_after, str) else "",
+    }
+
+
+def _attachments_endpoint(host: str) -> str:
+    """The user attachments upload URL that ``gh --attach`` posts to on ``host``."""
+    if host == "github.com":
+        return "https://uploads.github.com/user-attachments/assets"
+    return f"https://{host}/api/uploads/user-attachments/assets"
+
+
+def _is_attachment_url(url: str, host: str) -> bool:
+    """Whether ``url`` is a user-attachments asset on ``host``, as an upload returns."""
+    return (
+        re.fullmatch(rf"https://{re.escape(host)}/user-attachments/assets/[0-9a-f-]+", url)
+        is not None
+    )
+
+
+def _upload_attachment(
+    root: str, reference: PullRequestRef, *, name: str, content_type: str, content: bytes
+) -> dict[str, Any]:
+    """Upload a file to GitHub's user attachments as the PR's selected account.
+
+    GitHub keeps the file whether or not a description ends up linking to it.
+    """
+    with _gh_deadline_scope(time.monotonic() + _ATTACHMENT_REQUEST_SECONDS):
+        host = _host_args(root, reference)
+        token = _pr_token(root, reference)
+        if _gh_timed_out.get():
+            # The selected account's token is unknown, so the upload must not run as another.
+            raise ValueError(_ATTACHMENT_TIMED_OUT)
+        rc, out, _ = _gh(
+            ["api", *host, f"repos/{reference.repository}", "--jq", ".id"],
+            cwd=root,
+            token=token,
+        )
+        repository_id = out.strip()
+        if rc != 0 or not repository_id.isdigit():
+            if _gh_timed_out.get():
+                raise ValueError(_ATTACHMENT_TIMED_OUT)
+            raise ValueError("GitHub could not find this pull request's repository.")
+        query = (
+            f"content_type={quote(content_type, safe='')}"
+            f"&name={quote(name, safe='')}&repository_id={repository_id}"
+        )
+        with tempfile.NamedTemporaryFile(suffix=f"-{name}", delete_on_close=False) as upload:
+            upload.write(content)
+            upload.close()
+            rc, out, err = _gh(
+                [
+                    "api",
+                    "-X",
+                    "POST",
+                    f"{_attachments_endpoint(reference.host)}?{query}",
+                    "-H",
+                    "Content-Type: application/octet-stream",
+                    "--input",
+                    upload.name,
+                ],
+                cwd=root,
+                token=token,
+                timeout=_ATTACHMENT_REQUEST_SECONDS,
+            )
+        if _gh_timed_out.get():
+            raise ValueError(_ATTACHMENT_TIMED_OUT)
+    try:
+        result = json.loads(out) if out.strip() else None
+    except ValueError:
+        result = None
+    url = result.get("url") if isinstance(result, dict) else None
+    if rc == 0 and isinstance(url, str) and _is_attachment_url(url, reference.host):
+        return {
+            "object": PR_ATTACHMENT_OBJECT,
+            "url": url,
+            "name": name,
+            "content_type": content_type,
+        }
+    if re.search(r"\(HTTP 40[134]\)", err):
+        raise ValueError(
+            "The GitHub account on the host needs push access to attach files "
+            "to this pull request."
+        )
+    errors = result.get("errors") if isinstance(result, dict) else None
+    detail = next(
+        (
+            error["message"]
+            for error in (errors if isinstance(errors, list) else [])
+            if isinstance(error, dict) and isinstance(error.get("message"), str)
+        ),
+        None,
+    )
+    if detail and "(HTTP 422)" in err:
+        raise ValueError(f"GitHub rejected the file: {detail}")
+    raise ValueError("GitHub could not upload the file. Try again.")
