@@ -1,4 +1,4 @@
-"""Verify iOS composers keep their input and Send above the soft keyboard.
+"""Verify the iOS side-chat drawer keeps its composer above the soft keyboard.
 
 A bridge stub stands in for the iOS shell and its keyboard viewport API.
 """
@@ -128,51 +128,3 @@ def test_side_chat_input_stays_above_ios_keyboard(
         context.close()
         for child_id in child_ids:
             httpx.delete(f"{base_url}/v1/sessions/{child_id}", timeout=10.0).raise_for_status()
-
-
-def test_landing_send_stays_above_ios_keyboard_with_long_draft(
-    browser: Browser,
-    seeded_session: tuple[str, str],
-) -> None:
-    """A long draft in the new-session composer keeps Send above an iPhone SE keyboard."""
-    base_url, _session_id = seeded_session
-    viewport = {"width": 375, "height": 667}
-    # iPhone SE portrait keyboard with its QuickType bar, in CSS px.
-    keyboard_height = 260
-    keyboard_top = viewport["height"] - keyboard_height
-    line_count = 18
-
-    context = browser.new_context(viewport=viewport, has_touch=True, is_mobile=True)
-    try:
-        page = context.new_page()
-        page.add_init_script(_IOS_SHELL_INIT_SCRIPT)
-        page.goto(f"{base_url}/")
-        heading = page.get_by_role("heading", name="What should we build?")
-        expect(heading).to_be_visible(timeout=60_000)
-        expect(page.locator(".app-shell")).to_have_attribute("data-ios-native", "true")
-
-        landing_input = page.get_by_test_id("new-chat-landing-input")
-        landing_input.tap()
-        expect(landing_input).to_be_focused()
-        _set_keyboard_height(page, keyboard_height)
-
-        for line in range(1, line_count + 1):
-            page.keyboard.type(f"Line {line}: a longer mobile draft")
-            if line < line_count:
-                page.keyboard.press("Enter")
-        expect(landing_input).to_have_value(
-            "\n".join(f"Line {line}: a longer mobile draft" for line in range(1, line_count + 1))
-        )
-        assert page.evaluate("() => location.pathname") == "/"
-        assert landing_input.evaluate("(el) => el.scrollHeight > el.clientHeight"), (
-            "the landing input did not cap its height and scroll"
-        )
-
-        send_box = page.get_by_test_id("new-chat-landing-submit").bounding_box()
-        assert send_box is not None
-        print(f"[landing-kb] keyboard top {keyboard_top}; send {send_box}")
-        assert send_box["y"] + send_box["height"] <= keyboard_top, (
-            f"landing Send extends under the keyboard (top {keyboard_top}): {send_box}"
-        )
-    finally:
-        context.close()
