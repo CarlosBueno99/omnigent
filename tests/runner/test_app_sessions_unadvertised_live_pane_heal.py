@@ -38,10 +38,11 @@ def _inject_requiring_advertisement(
         *,
         command: str,
         timeout_s: float,
+        ready_timeout_s: float | None = None,
         auto_confirm: bool = False,
         confirm_hint: str | None = None,
     ) -> None:
-        del timeout_s, auto_confirm, confirm_hint
+        del timeout_s, ready_timeout_s, auto_confirm, confirm_hint
         info = claude_native_bridge._wait_for_tmux_info(inject_bridge_dir, timeout_s=0.2)
         captured.append((command, info))
 
@@ -200,10 +201,11 @@ async def test_live_advertised_pane_advertisement_is_left_untouched(
         *,
         command: str,
         timeout_s: float,
+        ready_timeout_s: float | None = None,
         auto_confirm: bool = False,
         confirm_hint: str | None = None,
     ) -> None:
-        del inject_bridge_dir, command, timeout_s, auto_confirm, confirm_hint
+        del inject_bridge_dir, command, timeout_s, ready_timeout_s, auto_confirm, confirm_hint
 
     monkeypatch.setattr(claude_native_bridge, "inject_slash_command", _inject_records)
 
