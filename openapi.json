@@ -6110,6 +6110,7 @@
             "session.resource.created": "#/components/schemas/SessionResourceCreatedEvent",
             "session.resource.deleted": "#/components/schemas/SessionResourceDeletedEvent",
             "session.sandbox_status": "#/components/schemas/SessionSandboxStatusEvent",
+            "session.side_chat_result": "#/components/schemas/SideChatResultEvent",
             "session.status": "#/components/schemas/SessionStatusEvent",
             "session.superseded": "#/components/schemas/SessionSupersededEvent",
             "session.terminal.activity": "#/components/schemas/SessionTerminalActivityEvent",
@@ -6176,6 +6177,9 @@
           },
           {
             "$ref": "#/components/schemas/SessionCreatedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SideChatResultEvent"
           },
           {
             "$ref": "#/components/schemas/SessionSupersededEvent"
@@ -9414,6 +9418,56 @@
           }
         },
         "title": "SetSharingRequest",
+        "type": "object"
+      },
+      "SideChatResultEvent": {
+        "description": "Settle a pending web draft after native first-turn acceptance or failure.",
+        "properties": {
+          "child_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Child Session Id"
+          },
+          "conversation_id": {
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "draft_id": {
+            "title": "Draft Id",
+            "type": "string"
+          },
+          "sequence_number": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sequence Number"
+          },
+          "type": {
+            "const": "session.side_chat_result",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "conversation_id",
+          "draft_id",
+          "child_session_id"
+        ],
+        "title": "SideChatResultEvent",
         "type": "object"
       },
       "SkillContentResponse": {
