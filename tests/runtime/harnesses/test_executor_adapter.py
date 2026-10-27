@@ -1478,6 +1478,32 @@ def test_translate_input_to_messages_skips_tool_call_too_large_to_replay() -> No
     ]
 
 
+def test_translate_input_to_messages_drops_id_less_tool_result_with_its_call() -> None:
+    """A result without a call id is replayed or dropped together with the call before it."""
+    from omnigent.runtime.harnesses import _executor_adapter as adapter
+
+    oversized_content = "x" * (adapter._REPLAYED_TOOL_HISTORY_MAX_BYTES + 1)
+    input_value: list[dict[str, Any]] = [
+        {"type": "message", "role": "user", "content": "rewrite the file"},
+        {"type": "function_call", "name": "read", "arguments": "{}"},
+        {"type": "function_call_output", "output": "old text"},
+        {
+            "type": "function_call",
+            "name": "write",
+            "arguments": json.dumps({"content": oversized_content}),
+        },
+        {"type": "function_call_output", "output": "written"},
+    ]
+
+    messages = adapter._translate_input_to_messages(input_value, include_tool_history=True)
+
+    assert [(m["role"], m["content"]) for m in messages] == [
+        ("user", "rewrite the file"),
+        ("tool_call", {"tool": "read", "args": {}}),
+        ("tool_result", "old text"),
+    ]
+
+
 # ── MCP tool-call observed/dispatch correlation ──────────
 #
 # These unit tests pin the queue mechanic that fixes the tool-call

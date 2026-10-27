@@ -1565,7 +1565,7 @@ _REPLAYED_TOOL_HISTORY_MAX_BYTES = 128 * 1024
 
 def _keep_recent_tool_history(messages: list[Message]) -> list[Message]:
     """Keep the newest tool calls and their outputs, contiguously, within the replay budget."""
-    keys = [_tool_history_key(message, index) for index, message in enumerate(messages)]
+    keys = _tool_history_keys(messages)
     sizes: dict[str, int] = {}
     for key, message in zip(keys, messages, strict=True):
         if key is not None:
@@ -1585,13 +1585,28 @@ def _keep_recent_tool_history(messages: list[Message]) -> list[Message]:
     ]
 
 
-def _tool_history_key(message: Message, index: int) -> str | None:
-    """Group a replayed tool message by call id; ``None`` for a conversation message."""
-    if message.get("role") not in ("tool_call", "tool_result"):
-        return None
-    metadata = message.get("metadata")
-    call_id = metadata.get("call_id") if isinstance(metadata, dict) else None
-    return call_id if isinstance(call_id, str) and call_id else f"#{index}"
+def _tool_history_keys(messages: list[Message]) -> list[str | None]:
+    """Group replayed tool messages by call id; ``None`` marks a conversation message."""
+    keys: list[str | None] = []
+    for index, message in enumerate(messages):
+        role = message.get("role")
+        metadata = message.get("metadata")
+        call_id = metadata.get("call_id") if isinstance(metadata, dict) else None
+        if role not in ("tool_call", "tool_result"):
+            keys.append(None)
+        elif isinstance(call_id, str) and call_id:
+            keys.append(call_id)
+        elif (
+            role == "tool_result"
+            and index
+            and keys[-1] == f"#{index - 1}"
+            and messages[index - 1].get("role") == "tool_call"
+        ):
+            # Without ids, a result belongs to the call just before it.
+            keys.append(keys[-1])
+        else:
+            keys.append(f"#{index}")
+    return keys
 
 
 def _tool_call_message(item: dict[str, Any]) -> Message | None:
