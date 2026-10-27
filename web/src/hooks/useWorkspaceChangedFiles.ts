@@ -676,10 +676,10 @@ const COMMAND_LINE_MARKER = /(?:^|\s)--?[A-Za-z]|[|;<>$`]|&&/;
  * query/fragment. Every slash-delimited segment must be non-empty and not a
  * `.`/`..` traversal segment (rejects `a/`, `a//b`, `../x`). Spaces are
  * allowed in any segment — `Design Docs/Q3 Plan.md` is a real path and
- * segments are URL-encoded when listed. A span with whitespace before its
- * first slash and a flag or shell operator is a command (`ls -la src/app`,
- * `cat a/b | head`); a plain one like `git diff src/app` is left to the
- * existence check, since it reads the same as a folder name with spaces.
+ * segments are URL-encoded when listed. A first segment with whitespace and a
+ * flag or shell operator is a command (`ls -la src/app`, `cd web && pnpm test
+ * src/x`); a plain one like `git diff src/app` is left to the existence check,
+ * since it reads the same as a folder name with spaces.
  */
 export function looksLikeWorkspaceFilePath(text: string): boolean {
   if (!text) return false;
@@ -688,7 +688,8 @@ export function looksLikeWorkspaceFilePath(text: string): boolean {
   if (text.includes("?") || text.includes("#")) return false; // query/fragment → not a plain path
   const slash = text.indexOf("/");
   if (slash <= 0) return false; // need a parent segment before the first slash
-  if (/\s/.test(text.slice(0, slash)) && COMMAND_LINE_MARKER.test(text)) return false;
+  const firstSegment = text.slice(0, slash);
+  if (/\s/.test(firstSegment) && COMMAND_LINE_MARKER.test(firstSegment)) return false;
   const segments = text.split("/");
   // Need at least parent + basename, every segment non-empty (rejects "a/",
   // "a//b"), and no "."/".." traversal segments.
