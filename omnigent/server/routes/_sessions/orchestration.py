@@ -305,6 +305,7 @@ from omnigent.server.routes._sessions.helpers import (
     _native_terminal_name_for_harness,
     _NativeTerminalEnsureOutcome,
     _owner_from_grants,
+    _owns_host_runner,
     _parse_external_conversation_item,
     _pending_elicitation_snapshot_for_session,
     _permission_level_from_grants,
@@ -998,13 +999,15 @@ async def _archive_stop(
     await _facade._best_effort_stop(session_id, conversation_store, runner_router)
     if conv.host_id and conv.runner_id:
         try:
-            await _stop_host_runner_intentionally(
-                session_id,
-                conv.host_id,
-                conv.runner_id,
-                host_registry,
-                conversation_store,
-            )
+            # A sub-agent riding an ancestor's runner leaves it up for the owner.
+            if await _owns_host_runner(conv, conversation_store):
+                await _stop_host_runner_intentionally(
+                    session_id,
+                    conv.host_id,
+                    conv.runner_id,
+                    host_registry,
+                    conversation_store,
+                )
         except Exception:  # noqa: BLE001
             _logger.debug(
                 "Archive host-runner teardown failed for %s",
@@ -1178,6 +1181,7 @@ def _build_session_list_item(
     pending_count: int,
     child_session_ids: list[str],
     comments_fingerprint: CommentsFingerprint | None,
+    harness: str | None = None,
 ) -> SessionListItem:
     """
     Assemble one :class:`SessionListItem` from a conversation row and
@@ -1219,6 +1223,7 @@ def _build_session_list_item(
         wired — emitted as ``comments_count=0`` /
         ``comments_updated_at=None`` so the two states look identical
         on the wire.
+    :param harness: Resolved session harness from the batch's cached agent specs.
     :returns: The assembled :class:`SessionListItem`.
     """
     # ``conv.agent_id`` is guaranteed non-None by the caller (sessions
@@ -1234,6 +1239,7 @@ def _build_session_list_item(
         id=conv.id,
         agent_id=conv.agent_id,
         agent_name=agent_names_by_id.get(conv.agent_id),
+        harness=harness,
         status=_list_status_with_starting(
             _session_status_with_child_rollup(conv.id, child_session_ids, conv.live_status),
             conv.id,
@@ -1457,6 +1463,9 @@ def _build_session_response(
             cumulative_input_tokens=int(own_usage.get("input_tokens", 0) or 0) + cached,
             cumulative_output_tokens=int(own_usage.get("output_tokens", 0) or 0),
             cumulative_cache_read_input_tokens=cached,
+            cumulative_cost_usd=own_usage.get("total_cost_usd")
+            if own_usage.get("native_cost_complete") is True
+            else None,
         )
     # Collapse per-user pin keys to the canonical bare key for this viewer, so
     # the snapshot never carries another user's pin key (see _labels_for_viewer).
@@ -1813,6 +1822,9 @@ def _persist_native_cumulative_usage(
       (exact billing; used directly). Stored in ``total_cost_usd``, which
       drives the badge and the per-user daily rollup, so the badge matches
       ``/cost`` in the Claude TUI.
+    - ``cost_complete`` — whether the reporter priced all accumulated usage.
+      Native Pi uses this to distinguish a resumable cost baseline from a
+      display subtotal that excludes unpriced turns.
     - ``policy_cost_usd`` — total session cost for ENFORCEMENT (the
       cost-budget gate). claude-native forwards ``max(S, real-time
       transcript estimate)`` here so the gate reflects in-flight sub-agent
@@ -1877,6 +1889,12 @@ def _persist_native_cumulative_usage(
     # downward report a no-op, so the worst a forged post can do is leave the
     # figure unchanged. (See also the runner-token guard on cost_control.*
     # label writes — usage was the missing half.)
+    if "cost_complete" in data:
+        if type(data["cost_complete"]) is not bool:
+            raise OmnigentError("cost_complete must be a bool", code=ErrorCode.INVALID_INPUT)
+        current["native_cost_complete"] = data["cost_complete"] and cost is not None
+    else:
+        current.pop("native_cost_complete", None)
     old_cost = float(current.get("total_cost_usd", 0.0) or 0.0)
     old_policy_cost = float(current.get("policy_cost_usd", 0.0) or 0.0)
     # Old cumulative token totals, captured before the overwrites below so
@@ -3409,8 +3427,16 @@ def _record_native_input_lifecycle(session_id: str, event: Mapping[str, Any]) ->
     """Retain an identity-linked runner lifecycle edge on its queued web input."""
     event_type = event.get("type")
     stage = _NATIVE_INPUT_LIFECYCLE_STAGES.get(event_type) if isinstance(event_type, str) else None
-    stable_id = input_attributes(event).get("input_stable_id")
-    if stage is None or not isinstance(stable_id, str):
+    identity = input_attributes(event)
+    if any(
+        key in event and key not in identity
+        for key in ("input_stable_id", "pending_id", "delivery_attempt_id")
+    ):
+        return
+    stable_id = identity.get("input_stable_id")
+    pending_id = identity.get("pending_id")
+    delivery_attempt_id = identity.get("delivery_attempt_id")
+    if stage is None:
         return
     raw_response = event.get("response")
     response_id = raw_response.get("id") if isinstance(raw_response, dict) else None
@@ -3423,7 +3449,11 @@ def _record_native_input_lifecycle(session_id: str, event: Mapping[str, Any]) ->
         cause_class = "interrupted_or_lifecycle"
     pending_inputs.mark_lifecycle(
         session_id,
-        stable_id,
+        stable_id if isinstance(stable_id, str) else None,
+        pending_id=pending_id if isinstance(pending_id, str) else None,
+        delivery_attempt_id=(
+            delivery_attempt_id if isinstance(delivery_attempt_id, str) else None
+        ),
         stage=stage,
         cause_class=cause_class,
         reason_code=_native_input_reason_code(event),
@@ -3643,6 +3673,8 @@ async def _enrich_terminal_status_with_subagent_output(
     over the store for failures; fallback text must belong to the current
     response or follow the latest user message when no response id is present.
     A turn stopped before any output must not borrow an earlier turn's reply.
+    Explicit confirmed output, including an empty string, is authoritative
+    for native and ACP callers.
 
     :param data: The ``external_session_status`` ``data`` to enrich, e.g.
         ``{"status": "idle"}``.
@@ -3659,23 +3691,24 @@ async def _enrich_terminal_status_with_subagent_output(
     if status == "failed":
         context = normalize_failure_context(data.get("failure_context"))
         context.setdefault("failure_source", "external_status")
-        wire_detail = data.get("output")
+        wire_detail = data.get("failure_detail")
         if not isinstance(wire_detail, str) or not wire_detail.strip():
-            wire_detail = data.get("failure_detail")
+            wire_detail = data.get("output")
         for key, value in provider_error_context_from_text(wire_detail).items():
             context.setdefault(key, value)
         data = {**data, "failure_context": context}
     current_turn_only = status == "failed" or data.get("turn_outcome") == "cancelled"
-    existing = data.get("output")
-    if current_turn_only and isinstance(existing, str) and existing.strip():
-        if status == "failed":
-            context.setdefault("detail_source", "external_status_output")
-        return data
-    # The store's latest assistant text can be prose that preceded the error.
     failure_detail = data.get("failure_detail") if status == "failed" else None
     if isinstance(failure_detail, str) and failure_detail.strip():
         context.setdefault("detail_source", "external_status_failure_detail")
         return {**data, "output": failure_detail.strip()}
+    existing = data.get("output")
+    if status == "idle" and data.get("turn_completed") is True and isinstance(existing, str):
+        return data
+    if current_turn_only and isinstance(existing, str) and existing.strip():
+        if status == "failed":
+            context.setdefault("detail_source", "external_status_output")
+        return data
     raw_response_id = data.get("response_id") if current_turn_only else None
     response_id = raw_response_id if isinstance(raw_response_id, str) and raw_response_id else None
     output = await asyncio.to_thread(
@@ -3979,6 +4012,7 @@ async def _mark_runner_sessions_offline_impl(
     conversation_store: ConversationStore,
     *,
     fail_idle_top_level: bool = False,
+    disconnect_evidence: Mapping[str, str] | None = None,
 ) -> None:
     """
     Fail the sessions a departed runner actually interrupted, with the cause.
@@ -4021,7 +4055,11 @@ async def _mark_runner_sessions_offline_impl(
         if delay:
             await asyncio.sleep(delay)
         pending = await _mark_runner_sessions_offline_once(
-            pending, error, conversation_store, fail_idle_top_level=fail_idle_top_level
+            pending,
+            error,
+            conversation_store,
+            fail_idle_top_level=fail_idle_top_level,
+            disconnect_evidence=disconnect_evidence,
         )
         if not pending:
             return
@@ -4039,6 +4077,7 @@ async def _mark_runner_sessions_offline_once(
     conversation_store: ConversationStore,
     *,
     fail_idle_top_level: bool,
+    disconnect_evidence: Mapping[str, str] | None = None,
 ) -> list[Conversation]:
     """Reconcile each session once and return the ones blocked by metadata errors."""
     retry: list[Conversation] = []
@@ -4136,7 +4175,13 @@ async def _mark_runner_sessions_offline_once(
             continue
         if binding is None or binding[0] != conv.runner_id:
             continue
-        _publish_status(conv.id, "failed", error, failure_origin="runner_offline_sweep")
+        _publish_status(
+            conv.id,
+            "failed",
+            error,
+            failure_origin="runner_offline_sweep",
+            disconnect_evidence=disconnect_evidence,
+        )
         await record_subagent_activity(
             conv.id, "returned", conversation_store, turn_id=turn_id, status="failed"
         )
@@ -4672,6 +4717,7 @@ async def _maybe_relaunch_managed_sandbox(
                 conversation_store=conversation_store,
                 host_store=host_store,
                 app_state=app_state,
+                provider=host.sandbox_provider,
             )
         else:
             _kick_managed_relaunch(
@@ -5303,7 +5349,7 @@ def _kick_managed_relaunch(
     tracker.begin(session_id)
     # Seed the relaunch's progress indicator immediately — the user is
     # typically watching the session page when "wake the sandbox" runs.
-    _publish_sandbox_status(session_id, "provisioning")
+    _publish_sandbox_status(session_id, "provisioning", provider=host.sandbox_provider)
     agent_store = getattr(app_state, "agent_store", None)
     if agent_store is None:
         _logger.warning(
@@ -5340,6 +5386,7 @@ def _kick_managed_wake(
     conversation_store: ConversationStore,
     host_store: HostStore,
     app_state: Any,
+    provider: str | None = None,
 ) -> None:
     """
     Spawn the background wake for a dormant resumable host.
@@ -5357,6 +5404,7 @@ def _kick_managed_wake(
         conversation_store=conversation_store,
         host_store=host_store,
         app_state=app_state,
+        provider=provider,
     )
 
 
@@ -5369,6 +5417,7 @@ def _kick_managed_wake_impl(
     conversation_store: ConversationStore,
     host_store: HostStore,
     app_state: Any,
+    provider: str | None = None,
 ) -> None:
     """
     Register and spawn the background WAKE for a dormant resumable host.
@@ -5387,6 +5436,8 @@ def _kick_managed_wake_impl(
     :param conversation_store: Store holding the session row.
     :param host_store: Persistent host registrations.
     :param app_state: ``request.app.state`` — supplies the registries.
+    :param provider: The dormant host's sandbox provider, e.g. ``"arclet"``,
+        which the seeded launch status names.
     """
     _logger.info(
         "Managed host %s (session %s) is dormant but resumable; waking in background",
@@ -5398,7 +5449,7 @@ def _kick_managed_wake_impl(
     # Seed the progress indicator immediately — the user is watching the
     # session page when the wake fires (the composer let them send into a
     # host_asleep session).
-    _publish_sandbox_status(session_id, "provisioning")
+    _publish_sandbox_status(session_id, "provisioning", provider=provider)
     wake_agent_store = getattr(app_state, "agent_store", None)
     if wake_agent_store is None:
         _logger.warning(
@@ -5487,7 +5538,7 @@ async def _run_managed_wake(
         _publish_sandbox_status(session_id, "failed", reason)
         return
 
-    def _on_stage(stage: str) -> None:
+    def _on_stage(stage: str, details: str | None = None) -> None:
         """Relay the wake's launch-pipeline stage to the session's progress surface.
 
         Without it the wake shows the single ``"provisioning"`` band that
@@ -5495,8 +5546,11 @@ async def _run_managed_wake(
         is already re-execing. resume_managed_host may invoke this from the
         worker thread its ``start_host`` runs on; ``_publish_sandbox_status`` is
         thread-safe.
+
+        :param stage: The stage just entered, e.g. ``"starting"``.
+        :param details: What the user needs to do, for ``"action_required"``.
         """
-        _publish_sandbox_status(session_id, stage)
+        _publish_sandbox_status(session_id, stage, details=details)
 
     try:
         # Wake the same sandbox in place; resume_managed_host is single-flight
@@ -5658,6 +5712,7 @@ async def _ensure_runner_session_initialized(
     *,
     suppress_recovery_turn: bool = False,
     require_success: bool = False,
+    trigger: str = "session_ensure",
 ) -> bool:
     """
     Drive — and wait for — the runner's session-init handshake.
@@ -5718,6 +5773,7 @@ async def _ensure_runner_session_initialized(
                 runner_client,
                 timeout=_RUNNER_SESSION_INIT_TIMEOUT_S,
                 suppress_recovery_turn=suppress_recovery_turn,
+                trigger=trigger,
             )
         else:
             from omnigent.version import VERSION
@@ -7676,6 +7732,17 @@ async def _dispatch_session_event_to_runner(*args: Any, **kwargs: Any) -> Any:
         return await _facade._dispatch_session_event_to_runner(*args, **kwargs)
 
 
+def _codex_side_chat_thread_id(conv: Conversation) -> str | None:
+    """Return the parent app-server thread that runs a Codex child's turns, if forwardable."""
+    from omnigent.server.routes._sessions.common import (
+        _CODEX_NATIVE_SUBAGENT_THREAD_ID_LABEL_KEY,
+    )
+
+    if not _is_codex_native_subagent(conv) or not conv.parent_conversation_id:
+        return None
+    return (conv.labels or {}).get(_CODEX_NATIVE_SUBAGENT_THREAD_ID_LABEL_KEY) or None
+
+
 async def _forward_codex_side_chat_turn(
     conv: Conversation,
     body: SessionEventInput,
@@ -7849,7 +7916,7 @@ async def _dispatch_session_event_to_runner_impl(
         await asyncio.to_thread(runner_router.require_mcp_registry_support, conv)
     if body.type == "message":
         disconnect_outcome.note_user_turn(conv.id)
-    if body.type == "message" and conv.kind == "sub_agent" and _is_codex_native_subagent(conv):
+    if body.type == "message" and _codex_side_chat_thread_id(conv) is not None:
         # Codex /side follow-up: drive the child on its own Codex thread via the
         # parent's runner/bridge; do not persist AP-side (the forwarder mirrors
         # the child thread echo, staying the single writer).

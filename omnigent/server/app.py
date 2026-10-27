@@ -88,8 +88,13 @@ from omnigent.server.background_session_titles import (
     BackgroundSessionTitleCoordinator,
     RunnerBackgroundTitleGenerator,
 )
-from omnigent.server.event_loop_watchdog import monitor_event_loop
-from omnigent.server.feature_flags import Feature, FeatureFlags, resolve_feature_flags
+from omnigent.server.disconnect_evidence import DisconnectEvidence, drop_attributes
+from omnigent.server.feature_flags import (
+    Feature,
+    FeatureFlags,
+    harness_install_enabled,
+    resolve_feature_flags,
+)
 from omnigent.server.managed_hosts import ManagedSandboxDeployment
 from omnigent.server.managed_sandbox_reaper import ManagedSandboxReaper
 from omnigent.server.mcp_gateway import McpGatewayBackend
@@ -103,6 +108,7 @@ from omnigent.server.performance_metrics import (
     set_request_session_id_for_access_log,
     set_request_user_agent_for_access_log,
 )
+from omnigent.server.preference_requests import DEFAULT_PREFERENCE_POLICY, PreferencePolicy
 from omnigent.server.routes.builtin_agents import create_builtin_agents_router
 from omnigent.server.routes.comments import create_comments_router
 from omnigent.server.routes.default_policies import create_default_policies_router
@@ -136,6 +142,11 @@ from omnigent.server.runner_session_init import (
     runner_response_error_body,
 )
 from omnigent.server.scheduled import ScheduledTaskScheduler
+from omnigent.server.scheduled.config import ScheduledTaskSchedulerConfig
+from omnigent.server.scheduled.dispatch_scheduler import (
+    PersistentTaskScheduler,
+    ScheduledTaskDispatchHooks,
+)
 from omnigent.server.ws_origin import WebSocketOriginMiddleware
 from omnigent.stores import (
     AgentStore,
@@ -155,12 +166,15 @@ from omnigent.stores.policy_store import PolicyStore
 from omnigent.stores.preference_store import PreferenceStore
 from omnigent.stores.project_store import ProjectStore
 from omnigent.stores.scheduled_task_store import ScheduledTaskStore
+from omnigent.stores.scheduled_task_store.dispatch import ScheduledTaskDispatchStore
+from omnigent.util.event_loop_watchdog import monitor_event_loop
 
 if TYPE_CHECKING:
     from omnigent.entities import Conversation
     from omnigent.inner.native_attachments import FilesystemAttachmentPolicy
 
 _logger = logging.getLogger(__name__)
+
 _RECONNECT_BINDING_BATCH_SIZE = 128
 
 
@@ -216,6 +230,8 @@ class ServerInfoResponse(BaseModel):
     dictation_available: bool
     # The archive PATCH accepts ``delete_worktree``; older servers reject it.
     archive_worktree_cleanup: bool = True
+    # GET /v1/sessions accepts ``search_scope``; older servers ignore it.
+    session_search_scope: bool = True
     # A managed create or fork accepts ``host_id`` naming its new sandbox host;
     # older servers reject it.
     request_managed_sandbox_host_id: bool = True
@@ -938,7 +954,7 @@ def _ensure_default_agents(
     """
     Register all built-in agents that should always be available.
 
-    Called on every server lifespan startup. Each helper is
+    Called during server startup. Each helper is
     content-aware via :func:`_ensure_builtin_agent`: it creates the
     agent if missing and refreshes it in place when the packaged
     bundle changed, so a redeploy picks up a new spec instead of
@@ -1370,13 +1386,18 @@ def create_app(
     filesystem_attachment_allowed_extensions: (
         str | list[str] | Callable[[], str | list[str] | None] | None
     ) = None,
+    harness_install: bool | Callable[[], bool] | None = None,
     server_config: dict[str, Any] | None = None,
     feature_flags: FeatureFlags | None = None,
     extension_state: ExtensionPluginState | None = None,
     base_path: str | None = None,
     host_sharded: bool = False,
     *,
+    default_agents_seeded: bool = False,
     preference_store: PreferenceStore | None = None,
+    preference_policy: PreferencePolicy = DEFAULT_PREFERENCE_POLICY,
+    scheduled_task_dispatch: ScheduledTaskDispatchHooks | None = None,
+    scheduled_task_scheduler_config: ScheduledTaskSchedulerConfig | None = None,
 ) -> FastAPI:
     """
     Build and return the FastAPI application with all routes mounted.
@@ -1393,6 +1414,8 @@ def create_app(
         file content).
     :param agent_cache: Cache for loaded agent specs and working
         directories.
+    :param default_agents_seeded: The CLI already refreshed built-ins before
+        registering explicit agent bundles; skip a second refresh at startup.
     :param runner_tunnel_tokens: Optional allow-list of binding
         tokens accepted by the runner WebSocket tunnel route, e.g.
         ``frozenset({"uA6Zz..."})``. ``None`` accepts any
@@ -1411,6 +1434,11 @@ def create_app(
         active task and fires the injected ``on_fire`` callback on
         schedule. ``None`` disables the scheduler entirely.
     :param preference_store: Optional shared-preference API; no launcher adoption.
+    :param scheduled_task_dispatch: Claimed-run execution and recovery callbacks;
+        required only when automations_v2 is enabled.
+    :param scheduled_task_scheduler_config: Overrides the server config's
+        scheduled_task_scheduler section. With automations_v2 off, only
+        startup_retry_seconds applies. Changes require restarting the app.
     :param project_store: Store for first-class projects (owner-private
         containers that group sessions). ``None`` disables the
         ``/v1/projects`` CRUD endpoints.
@@ -1551,6 +1579,50 @@ def create_app(
     branding_snapshot = load_branding_snapshot(resolved_server_config)
     title_instructions = session_title_instructions(resolved_server_config)
     resolved_feature_flags = feature_flags or resolve_feature_flags()
+    if harness_install is None:
+        app_harness_install: bool | Callable[[], bool] = resolved_feature_flags.enabled(
+            Feature.HARNESS_INSTALL
+        )
+    else:
+        app_harness_install = harness_install
+    automations_v2_enabled = resolved_feature_flags.enabled(Feature.AUTOMATIONS_V2)
+    if automations_v2_enabled:
+        if scheduled_task_store is None:
+            raise ValueError(
+                "automations_v2 requires a scheduled task store. Pass scheduled_task_store "
+                "to create_app(), or leave automations_v2 disabled until scheduling is configured."
+            )
+        if scheduled_task_dispatch is None:
+            raise ValueError(
+                "automations_v2 requires callbacks to start runs and recover interrupted "
+                "startups. Pass scheduled_task_dispatch to create_app(), or disable "
+                "automations_v2 to use the existing scheduler."
+            )
+        if not isinstance(scheduled_task_store, ScheduledTaskDispatchStore):
+            raise TypeError(
+                "The configured scheduled task store does not implement the operations needed "
+                "to claim runs and manage startup leases. Use a store that implements "
+                "ScheduledTaskDispatchStore, or disable automations_v2 to use the "
+                "existing scheduler."
+            )
+        scheduled_task_store.check_dispatch_support()
+    scheduler_settings = resolved_server_config.get("scheduled_task_scheduler")
+    if not automations_v2_enabled:
+        scheduler_settings = (
+            {"startup_retry_seconds": scheduler_settings["startup_retry_seconds"]}
+            if isinstance(scheduler_settings, dict)
+            and "startup_retry_seconds" in scheduler_settings
+            else {}
+        )
+    dispatch_config = (
+        scheduled_task_scheduler_config
+        if scheduled_task_scheduler_config is not None
+        else ScheduledTaskSchedulerConfig.model_validate(
+            {} if scheduler_settings is None else scheduler_settings
+        )
+    )
+    if isinstance(scheduled_task_store, ScheduledTaskDispatchStore):
+        scheduled_task_store.configure_dispatch(automations_v2_enabled)
     resolved_extension_state = _resolve_extension_state(extension_state)
     extension_bundles, extension_asset_errors = _resolve_extension_assets(resolved_extension_state)
 
@@ -1736,7 +1808,8 @@ def create_app(
         # SessionFilesystemRegistry moved to the runner. Both
         # warmup blocks deleted here.
 
-        _ensure_default_agents(agent_store, artifact_store, agent_cache)
+        if not default_agents_seeded:
+            _ensure_default_agents(agent_store, artifact_store, agent_cache)
 
         # Populate the policy registry (builtins + user-configured
         # modules) so GET /v1/policy-registry serves the catalog.
@@ -1778,12 +1851,9 @@ def create_app(
         # which would run context-free (default workspace) over a
         # workspace-blind registry and never stamp a multi-tenant row.
 
-        # Recurring-task scheduler: arm a timer per active
-        # scheduled task and fire the injected ``on_fire`` callback on
-        # schedule. The callback (see scheduled.fire) re-reads the row,
-        # creates + owner-grants a session, launches its runner, and records
-        # the run — all fire-and-forget so the timer re-arms immediately.
-        scheduled_task_scheduler: ScheduledTaskScheduler | None = None
+        # The release flag selects one scheduler for the lifetime of this server.
+        scheduler_start_retry: asyncio.Task[None] | None = None
+        scheduled_task_scheduler: ScheduledTaskScheduler | PersistentTaskScheduler | None = None
         if scheduled_task_store is not None:
             from omnigent.server.scheduled.fire import FireDeps, build_on_fire, build_run_now
 
@@ -1814,29 +1884,80 @@ def create_app(
             # allowing a paused task to fire. Exposed on app.state for the
             # POST /v1/scheduled-tasks/{id}/run route.
             app_inst.state.scheduled_task_run_now = build_run_now(fire_deps)
-            scheduled_task_scheduler = ScheduledTaskScheduler(
-                store=scheduled_task_store,
-                on_fire=on_fire,
-            )
-            app_inst.state.scheduled_task_scheduler = scheduled_task_scheduler
-            # Scheduled tasks are a non-critical subsystem: a failure loading the
-            # schedule (e.g. a DB error listing active tasks) must not take
-            # down server boot. Log and continue with the scheduler unstarted.
+            if not automations_v2_enabled:
+                scheduled_task_scheduler = ScheduledTaskScheduler(
+                    store=scheduled_task_store,
+                    on_fire=on_fire,
+                )
+            else:
+                assert scheduled_task_dispatch is not None
+                assert isinstance(scheduled_task_store, ScheduledTaskDispatchStore)
+                scheduled_task_scheduler = PersistentTaskScheduler(
+                    store=scheduled_task_store,
+                    on_fire=scheduled_task_dispatch.on_fire,
+                    on_expired=scheduled_task_dispatch.on_expired,
+                    owns_host=scheduled_task_dispatch.owns_host,
+                    poll_seconds=dispatch_config.poll_seconds,
+                    renewal_seconds=dispatch_config.renewal_seconds,
+                    lease_seconds=dispatch_config.lease_seconds,
+                    batch_size=dispatch_config.batch_size,
+                    max_startups=dispatch_config.max_startups,
+                    recovery_seconds=dispatch_config.recovery_seconds,
+                )
+            app_inst.state.scheduled_task_scheduler = None
+
+            async def start_scheduled_tasks() -> None:
+                assert scheduled_task_scheduler is not None
+                try:
+                    if not automations_v2_enabled and isinstance(
+                        scheduled_task_store, ScheduledTaskDispatchStore
+                    ):
+                        reset = asyncio.create_task(
+                            asyncio.to_thread(scheduled_task_store.reset_dispatch_cursors),
+                            name="scheduled-task-cursor-reset",
+                        )
+                        try:
+                            await asyncio.shield(reset)
+                        except asyncio.CancelledError:
+                            # A cancelled waiter cannot stop database writes already in progress.
+                            try:
+                                await reset
+                            except Exception:
+                                _logger.exception("Scheduling cursor reset failed during shutdown")
+                            raise
+                    if isinstance(scheduled_task_scheduler, ScheduledTaskScheduler):
+                        app_inst.state.scheduled_task_scheduler = scheduled_task_scheduler
+                    await scheduled_task_scheduler.start()
+                except Exception:
+                    if isinstance(scheduled_task_scheduler, ScheduledTaskScheduler):
+                        scheduled_task_scheduler.stop()
+                        app_inst.state.scheduled_task_scheduler = None
+                    raise
+                app_inst.state.scheduled_task_scheduler = scheduled_task_scheduler
+
+            async def retry_scheduler_start() -> None:
+                while True:
+                    await asyncio.sleep(dispatch_config.startup_retry_seconds)
+                    try:
+                        await start_scheduled_tasks()
+                    except Exception:
+                        _logger.exception("Scheduled tasks are not ready; startup will retry")
+                    else:
+                        return
+
             try:
-                await scheduled_task_scheduler.start()
-            except Exception as exc:
+                await start_scheduled_tasks()
+            except Exception:
                 _logger.exception(
-                    "scheduled task scheduler failed to start; continuing "
-                    "without recurring tasks (%s)",
-                    exc,
+                    "Scheduled tasks could not start; retrying every %s seconds",
+                    dispatch_config.startup_retry_seconds,
+                )
+                scheduler_start_retry = asyncio.create_task(
+                    retry_scheduler_start(), name="scheduled-task-startup-retry"
                 )
 
-            # Run completion is event-driven (persist_scheduled_run_completion
-            # fires from _publish_status the instant a fired conversation's turn
-            # ends — no poll). The only orphan backstop is a lazy-on-read
-            # force-fail of stale ``running`` runs on the scheduled-task read
-            # endpoints (see routes/scheduled_tasks.py); there is no startup
-            # sweep and no periodic reconcile.
+            # Turn completion is event-driven, with a lazy-on-read stale-running
+            # backstop. Persistent scheduling separately recovers expired startups.
 
         managed_sandbox_reaper: ManagedSandboxReaper | None = None
         if sandbox_config is not None and sandbox_config.reaper.enabled:
@@ -1857,13 +1978,17 @@ def create_app(
             with monitor_event_loop():
                 yield
         finally:
+            if scheduler_start_retry is not None:
+                scheduler_start_retry.cancel()
+                with suppress(asyncio.CancelledError):
+                    await scheduler_start_retry
+            # DB dispatch owns startup tasks/heartbeats; legacy scheduling owns timers.
+            if isinstance(scheduled_task_scheduler, PersistentTaskScheduler):
+                await scheduled_task_scheduler.stop()
+            elif scheduled_task_scheduler is not None:
+                scheduled_task_scheduler.stop()
             if managed_sandbox_reaper is not None:
                 await managed_sandbox_reaper.shutdown()
-            # Run completion is event-driven (the _publish_status hook) plus a
-            # lazy-on-read stale backstop — there is no run-reconciler task to
-            # cancel. Only the per-job scheduler holds timers that need stopping.
-            if scheduled_task_scheduler is not None:
-                scheduled_task_scheduler.stop()
             metrics_publish_task.cancel()
             with suppress(asyncio.CancelledError):
                 await metrics_publish_task
@@ -1969,6 +2094,8 @@ def create_app(
     app.state.sandbox_config = sandbox_config
     app.state.branding_snapshot = branding_snapshot
     app.state.feature_flags = resolved_feature_flags
+    app.state.harness_install = app_harness_install
+    app.state.scheduled_task_dispatch_enabled = automations_v2_enabled
     # Deployment base path (e.g. "/proxy/6767"), so route handlers that build
     # a full-page redirect (not covered by BasePathMiddleware's inbound-only
     # strip) can prefix it themselves. "" for a root deployment.
@@ -3194,10 +3321,10 @@ def create_app(
         except ImportError:
             smart_routing_enabled = False
             smart_routing_sources = {"external": False, "oss": False}
-        # The immutable feature snapshot is shared by capability
-        # advertisement and route enforcement, so frontend and backend cannot
-        # disagree during a process lifetime.
-        harness_install_enabled = app.state.feature_flags.enabled(Feature.HARNESS_INSTALL)
+        # Resolve the gate per request with the same resolver used by route enforcement.
+        current_harness_install_enabled = harness_install_enabled(app.state.harness_install)
+        frontend_features = app.state.feature_flags.frontend_dict()
+        frontend_features[Feature.HARNESS_INSTALL.value] = current_harness_install_enabled
         # installable_harnesses: the exact harness ids the install route accepts
         # (bare ids + native spellings resolving to an npm-installable family),
         # so the SPA offers setup only where it will succeed and never has to
@@ -3206,7 +3333,7 @@ def create_app(
         from omnigent.onboarding.harness_install import ui_installable_harnesses
 
         installable_harnesses = (
-            sorted(ui_installable_harnesses()) if harness_install_enabled else []
+            sorted(ui_installable_harnesses()) if current_harness_install_enabled else []
         )
         # dictation_available gates the composer mic button's server
         # speech-to-text fallback (designs/server-dictation.md). Checks
@@ -3235,11 +3362,12 @@ def create_app(
                 "server_version": _server_version(),
                 "smart_routing_enabled": smart_routing_enabled,
                 "smart_routing_sources": smart_routing_sources,
-                "features": app.state.feature_flags.frontend_dict(),
-                "harness_install_enabled": harness_install_enabled,
+                "features": frontend_features,
+                "harness_install_enabled": current_harness_install_enabled,
                 "installable_harnesses": installable_harnesses,
                 "dictation_available": dictation_available,
                 "archive_worktree_cleanup": True,
+                "session_search_scope": True,
                 "request_managed_sandbox_host_id": True,
                 "agent_install": agent_store.supports_user_agents,
                 "agent_detail": True,
@@ -3573,7 +3701,7 @@ def create_app(
 
     if preference_store is not None:
         app.include_router(
-            create_preferences_router(preference_store, auth_provider),
+            create_preferences_router(preference_store, auth_provider, policy=preference_policy),
             prefix="/v1",
             tags=["preferences"],
         )
@@ -3594,7 +3722,11 @@ def create_app(
             pending.cancel()
 
     async def _mark_disconnected_runner_failed(
-        runner_id: str, reference_stamp: int | None, *, idle_shutdown: bool = False
+        runner_id: str,
+        reference_stamp: int | None,
+        *,
+        idle_shutdown: bool = False,
+        evidence: DisconnectEvidence | None = None,
     ) -> None:
         """Reconcile a dropped runner's sessions once the liveness lease expires.
 
@@ -3701,7 +3833,9 @@ def create_app(
             code="runner_disconnected",
             message="Runner disconnected unexpectedly.",
         )
+        hold_started = time.monotonic()
         hold = None if idle_shutdown else await _hold_for_offline_host(runner_id, affected)
+        hold_s = None if hold is None else time.monotonic() - hold_started
         if hold in ("runner_reconnected", "server_shutdown"):
             return
         if hold is not None:
@@ -3725,6 +3859,14 @@ def create_app(
                         f"within {HOST_OFFLINE_HOLD_S / 3600:g} hours."
                     ),
                 )
+            elif hold == "host_back_without_runner":
+                error = ErrorDetail(
+                    code="runner_disconnected",
+                    message=(
+                        "The host for this session came back without the runner that was "
+                        "running this turn, so the turn was lost. Send the message again to retry."
+                    ),
+                )
         if idle_shutdown:
             # The sweep's stop path settles these to idle instead of failing them.
             _note_runner_idle_shutdown(runner_id, affected)
@@ -3744,7 +3886,12 @@ def create_app(
                 runner_id,
                 len(affected),
             )
-        await _mark_runner_sessions_offline(affected, error, conversation_store)
+        await _mark_runner_sessions_offline(
+            affected,
+            error,
+            conversation_store,
+            disconnect_evidence=drop_attributes(evidence, hold_s=hold_s, hold_outcome=hold),
+        )
 
     async def _routing_host_id(convs: "list[Conversation]") -> str | None:
         """Return the host *convs*' shared runner runs on, or ``None`` when unknown."""
@@ -3953,6 +4100,7 @@ def create_app(
                 runner_id,
                 reference_stamp,
                 idle_shutdown=idle_shutdown,
+                evidence=DisconnectEvidence.from_session(connection),
             ),
             name=f"runner-disconnect-grace-{runner_id}",
         )
@@ -4252,14 +4400,28 @@ def create_app(
                         and not conv.archived
                         and (conv.id in eager_root_ids or needs_eager_recovery(conv))
                     )
+                    if conv.agent_id is None:
+                        reason = "no_agent"
+                    elif conv.archived:
+                        reason = "archived"
+                    else:
+                        reason = "recovery_required" if initialize_runtime else "idle"
+                    runner_session_initializer.log_decision(
+                        conv,
+                        generation=connection.generation,
+                        trigger="runner_connect",
+                        decision="initialize_now" if initialize_runtime else "defer",
+                        reason=reason,
+                        eager_recovery=conv.id in eager_root_ids,
+                        live_status=_session_status_cache.get(conv.id, conv.live_status),
+                        pending_elicitation_count=max(
+                            conv.pending_elicitation_count or 0,
+                            pending_elicitations.count_for(conv.id),
+                        ),
+                        has_last_task_error=_last_task_error_from_labels(conv.labels) is not None,
+                    )
                     # Idle trees reinitialize on demand; active trees recover now.
                     if not initialize_runtime:
-                        if conv.agent_id is None:
-                            reason = "no_agent"
-                        elif conv.archived:
-                            reason = "archived"
-                        else:
-                            reason = "idle"
                         _logger.info(
                             "Deferred runner session init until first use: session=%s reason=%s",
                             conv.id,
@@ -4267,6 +4429,8 @@ def create_app(
                             extra=debug_event(
                                 "runner_session_init_deferred",
                                 reason=reason,
+                                runner_generation=connection.generation,
+                                init_trigger="runner_connect",
                             ),
                         )
                     if initialize_runtime:
@@ -4276,6 +4440,7 @@ def create_app(
                             timeout=10.0,
                             generation=connection.generation,
                             store_slots=store_slots,
+                            trigger="runner_connect",
                         )
                         # A removed agent was already logged as expected.
                         if is_session_agent_removed(response):
@@ -4420,6 +4585,7 @@ def create_app(
                 on_host_connect=_on_hosts_changed,
                 on_host_disconnect=_on_hosts_changed,
                 on_host_update=_on_hosts_changed,
+                harness_install=app.state.harness_install,
             ),
             prefix="/v1",
             tags=["hosts"],
@@ -4434,6 +4600,7 @@ def create_app(
                 agent_store=agent_store,
                 agent_cache=agent_cache,
                 feature_flags=resolved_feature_flags,
+                harness_install=app.state.harness_install,
             ),
             prefix="/v1",
             tags=["hosts"],
