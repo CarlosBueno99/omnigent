@@ -5720,7 +5720,7 @@ describe("Composer session autofocus", () => {
     vi.restoreAllMocks();
   });
 
-  it("focuses the composer once it enables after opening the session disabled", () => {
+  it("focuses the composer only the first time it enables after opening the session disabled", () => {
     const { rerender } = render(<Composer {...composerProps({ disabled: true })} />);
     expect(textarea()).toBeDisabled();
     expect(textarea()).not.toHaveFocus();
@@ -5728,6 +5728,12 @@ describe("Composer session autofocus", () => {
     rerender(<Composer {...composerProps()} />);
 
     expect(textarea()).toHaveFocus();
+
+    act(() => textarea().blur());
+    rerender(<Composer {...composerProps({ disabled: true })} />);
+    rerender(<Composer {...composerProps()} />);
+
+    expect(textarea()).not.toHaveFocus();
   });
 
   it("does not open the software keyboard once it enables on mobile", () => {
