@@ -196,7 +196,8 @@ jobs:
   repro:
     name: Attempt ${{ matrix.attempt }}
     needs: [prep, build-sidecar]
-    runs-on: ubuntu-latest
+    # Playwright 1.60 cannot install Chromium on ubuntu-26.04, ubuntu-latest's new image.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       # Keep going after a failure to observe the full distribution.
@@ -276,12 +277,12 @@ jobs:
           pnpm --filter web run build
 
       - name: Install Claude Code CLI
-        uses: omnigent-ai/omnigent/.github/actions/setup-harness-cli@72e41e11b0489294045d9164d5c26d6c9a239d56
+        uses: omnigent-ai/omnigent/.github/actions/setup-harness-cli@ae21cbfdc82bc8e97a7443aa07df2772ec127453
         with:
           harness: claude
 
       - name: Install Codex CLI
-        uses: omnigent-ai/omnigent/.github/actions/setup-harness-cli@72e41e11b0489294045d9164d5c26d6c9a239d56
+        uses: omnigent-ai/omnigent/.github/actions/setup-harness-cli@ae21cbfdc82bc8e97a7443aa07df2772ec127453
         with:
           harness: codex
 

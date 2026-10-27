@@ -72,6 +72,9 @@ vi.mock("@/hooks/usePullRequests", async (importOriginal) => {
   return {
     // The panel reads every info payload through the real normalizer.
     normalizePullRequestInfo: original.normalizePullRequestInfo,
+    usePullRequestCommentComposer: original.usePullRequestCommentComposer,
+    pullRequestCommentTooLong: original.pullRequestCommentTooLong,
+    MAX_PULL_REQUEST_COMMENT_CHARACTERS: original.MAX_PULL_REQUEST_COMMENT_CHARACTERS,
     applyPullRequestLabelChange: original.applyPullRequestLabelChange,
     pullRequestLabelsMutationKey: original.pullRequestLabelsMutationKey,
     usePullRequestRepoLabels: vi.fn(() => state.repoLabels),
@@ -84,6 +87,13 @@ vi.mock("@/hooks/usePullRequests", async (importOriginal) => {
     pullRequestReviewersMutationKey: original.pullRequestReviewersMutationKey,
     usePullRequestReviewCandidates: vi.fn(() => state.reviewCandidates),
     useUpdatePullRequestReviewers: () => state.updateReviewers,
+    useUpdatePullRequestDetails: () => ({
+      mutate: vi.fn(),
+      reset: vi.fn(),
+      isPending: false,
+      isError: false,
+    }),
+    uploadPullRequestAttachment: vi.fn(),
     usePullRequestInfo: vi.fn(() => state.info),
     usePullRequestChangedFiles: vi.fn(() => state.changes),
     usePullRequestDiff: () => ({
@@ -309,6 +319,38 @@ describe("PullRequestPanel", () => {
     expect(screen.getByText(/66\s*passed/)).toBeInTheDocument();
     expect(screen.getByText(/2\s*failed/)).toBeInTheDocument();
     expect(screen.queryByText(/pending/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /cancelled|skipped/ })).toBeNull();
+  });
+
+  it("shows cancelled and skipped checks as separate grey pills listing their jobs", async () => {
+    const user = userEvent.setup();
+    state.info!.data!.pr!.checks = {
+      passing: 0,
+      failing: 0,
+      pending: 0,
+      cancelled: 1,
+      skipped: 2,
+      total: 3,
+      runs: [
+        { name: "cancelled job", bucket: "cancelled", url: null },
+        { name: "skipped job", bucket: "skipped", url: null },
+        { name: "another skipped job", bucket: "skipped", url: null },
+      ],
+    };
+    renderPanel();
+
+    for (const label of ["1 cancelled", "2 skipped"]) {
+      expect(screen.getByRole("button", { name: label })).toHaveClass(
+        "bg-muted",
+        "text-muted-foreground",
+        "rounded-full",
+      );
+    }
+    expect(screen.queryByRole("button", { name: /passed|failed|pending/ })).toBeNull();
+
+    await user.hover(screen.getByRole("button", { name: "2 skipped" }));
+    const rows = await screen.findAllByRole("listitem");
+    expect(rows.map((row) => row.textContent)).toEqual(["skipped job", "another skipped job"]);
   });
 
   it("shows each assigned reviewer with its current state and team kind", () => {
@@ -373,6 +415,61 @@ describe("PullRequestPanel", () => {
     expect(
       screen.getByRole("listitem", { name: "Team platform-team: Approved" }),
     ).toBeInTheDocument();
+  });
+
+  describe("title and description editing", () => {
+    const prUrl = "https://github.com/acme/app/pull/6000";
+
+    beforeEach(() => {
+      state.info!.data!.selected_pr_url = prUrl;
+      state.info!.data!.capabilities = {
+        account_switching: true,
+        base_remote_selection: true,
+        line_counts: true,
+        linked_pr_diff: true,
+        details_editing: true,
+        attachment_uploads: true,
+      };
+    });
+
+    it("opens the title and description editors on the selected PR", () => {
+      renderPanel();
+
+      fireEvent.click(screen.getByRole("button", { name: "Edit title" }));
+      expect(screen.getByRole("textbox", { name: "Pull request title" })).toHaveValue(
+        state.info!.data!.pr!.title,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Edit description" }));
+      expect(screen.getByRole("textbox", { name: "Pull request description" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Attach images or videos" })).toBeInTheDocument();
+    });
+
+    it.each([
+      [
+        "a view-only collaborator",
+        () => {
+          state.canEdit = false;
+        },
+      ],
+      [
+        "a host without details editing",
+        () => {
+          delete state.info!.data!.capabilities;
+        },
+      ],
+      [
+        "a host that names no selected PR",
+        () => {
+          delete state.info!.data!.selected_pr_url;
+        },
+      ],
+    ])("offers no title or description editing to %s", (_caller, setup) => {
+      setup();
+      renderPanel();
+
+      expect(screen.queryByRole("button", { name: "Edit title" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Edit description" })).not.toBeInTheDocument();
+    });
   });
 
   describe("reviewer editing", () => {
@@ -782,7 +879,9 @@ describe("PullRequestPanel", () => {
       "Checks can’t be read with this GitHub token. Fine-grained personal access tokens can’t read check runs; use a classic token or a GitHub App.",
     );
     expect(screen.queryByText(/Some checks are unavailable/)).toBeNull();
-    expect(screen.queryByRole("button", { name: /passed|failed|pending/ })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /passed|failed|pending|cancelled|skipped/ }),
+    ).toBeNull();
     expect(screen.getByText("No description provided.")).toBeInTheDocument();
   });
 
@@ -846,14 +945,20 @@ describe("PullRequestPanel", () => {
     for (const diff of diffs) expect(diff.closest(".github-diff-stack")).not.toBeNull();
   });
 
-  it("jumps to a file's section when its sidebar row is clicked", async () => {
+  it("jumps to and expands a file's section when its sidebar row is clicked", async () => {
     renderChanges();
     await screen.findAllByTestId("diff");
+    fireEvent.click(screen.getByRole("button", { name: /app\.ts/, expanded: true }));
+    expect(screen.getAllByTestId("diff").map((d) => d.getAttribute("data-path"))).toEqual([
+      "hello.py",
+    ]);
     // Both the sidebar row and the section header are buttons matching the
     // name; the sidebar row (which scrolls) is first in the DOM.
     const row = screen.getAllByRole("button", { name: /app\.ts/ })[0];
     fireEvent.click(row);
     expect(scrollIntoView).toHaveBeenCalledWith({ block: "start" });
+    expect(screen.getByRole("button", { name: /app\.ts/, expanded: true })).toBeInTheDocument();
+    expect(screen.getAllByTestId("diff")).toHaveLength(2);
   });
 
   it("collapses a file's diff when its section header is clicked", async () => {
@@ -1782,16 +1887,18 @@ describe("PullRequestPanel", () => {
     expect(description.parentElement).toContainElement(link);
     expect(screen.queryByRole("combobox", { name: "Session pull request" })).toBeNull();
     fireEvent.click(link);
-    expect(description.parentElement).toContainElement(
-      screen.getByRole("textbox", { name: "Pull request URL" }),
-    );
+    const input = screen.getByRole("textbox", { name: "Pull request URL" });
+    expect(description.parentElement).toContainElement(input);
+    expect(input).toHaveFocus();
+    expect(screen.queryByRole("button", { name: "Link a PR" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("textbox", { name: "Pull request URL" })).toBeNull();
-    fireEvent.click(link);
+    fireEvent.click(screen.getByRole("button", { name: "Link a PR" }));
     fireEvent.keyDown(screen.getByRole("textbox", { name: "Pull request URL" }), {
       key: "Escape",
     });
     expect(screen.queryByRole("textbox", { name: "Pull request URL" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Link a PR" })).toBeInTheDocument();
   });
 
   it("shows the diff immediately when unifiedLineCount is at the threshold", async () => {
@@ -2162,3 +2269,44 @@ describe("session PR selection", () => {
     expect(usePullRequestChangedFiles).toHaveBeenLastCalledWith("conv_1", true, url, "base:head");
   });
 });
+
+it.each([
+  [true, true, true],
+  [false, true, false],
+  [true, false, false],
+  [true, undefined, false],
+])(
+  "gates comment posting on edit access %s and host capability %s",
+  (canEdit, capability, visible) => {
+    state.canEdit = canEdit;
+    state.info!.data!.selected_pr_url = state.info!.data!.pr!.url;
+    state.info!.data!.capabilities = {
+      account_switching: false,
+      base_remote_selection: false,
+      line_counts: false,
+      linked_pr_diff: false,
+      comment_posting: capability,
+    };
+    renderComments();
+    expect(screen.queryByRole("textbox", { name: "New PR comment" }) !== null).toBe(visible);
+  },
+);
+
+it.each(["capabilities", "selected_pr_url"] as const)(
+  "hides comment posting without %s",
+  (missing) => {
+    state.info!.data!.selected_pr_url = state.info!.data!.pr!.url;
+    state.info!.data!.capabilities = {
+      account_switching: false,
+      base_remote_selection: false,
+      line_counts: false,
+      linked_pr_diff: false,
+      comment_posting: true,
+    };
+    if (missing === "capabilities") delete state.info!.data!.capabilities;
+    else delete state.info!.data!.selected_pr_url;
+    renderComments();
+    expect(screen.queryByRole("textbox", { name: "New PR comment" })).toBeNull();
+    expect(screen.getByText("No comments yet.").parentElement).toHaveClass("pb-16");
+  },
+);

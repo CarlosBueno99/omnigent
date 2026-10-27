@@ -21,6 +21,7 @@
 // PR each render their own empty state, and an associated PR falls through to
 // the header + stacked diff.
 
+import { PullRequestCommentComposer } from "./PullRequestCommentComposer";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -29,8 +30,10 @@ import {
   ChevronsDownUpIcon,
   ChevronsUpDownIcon,
   AlertCircleIcon,
+  BanIcon,
   CircleCheckIcon,
   CircleDotIcon,
+  CircleMinusIcon,
   CircleXIcon,
   Columns2Icon,
   DownloadIcon,
@@ -97,6 +100,11 @@ import {
   type PullRequestComment,
   type PullRequestInfo,
 } from "@/hooks/usePullRequests";
+import {
+  PULL_REQUEST_MARKDOWN_COMPONENTS,
+  PullRequestDescription,
+  PullRequestTitle,
+} from "./PullRequestDetails";
 import { PullRequestLabels } from "./PullRequestLabels";
 import { PullRequestMerge } from "./PullRequestMerge";
 import { PullRequestReviewers } from "./PullRequestReviewers";
@@ -692,7 +700,9 @@ function PullRequestCommentCard({
         )}
       </div>
       <div className="text-ui break-words">
-        <MessageResponse>{comment.body}</MessageResponse>
+        <MessageResponse allowGitHubAttachmentImages components={PULL_REQUEST_MARKDOWN_COMPONENTS}>
+          {comment.body}
+        </MessageResponse>
       </div>
     </li>
   );
@@ -708,7 +718,7 @@ function PullRequestSummaryTab({
   checks,
   checksSupported,
   checksUnavailableHint,
-  body,
+  description,
 }: {
   reviewers: React.ReactNode;
   labels: React.ReactNode;
@@ -716,7 +726,7 @@ function PullRequestSummaryTab({
   checks: PullRequestChecks;
   checksSupported: boolean;
   checksUnavailableHint?: string;
-  body: string | null | undefined;
+  description: React.ReactNode;
 }) {
   const showChecks = checks.total > 0 || checks.partial || !checksSupported;
   const showReviewers = !!reviewers;
@@ -773,6 +783,20 @@ function PullRequestSummaryTab({
                   icon={<CircleXIcon className="size-2.5 text-red-600 dark:text-red-400" />}
                   className="border-red-500/25 bg-red-500/10 text-red-700 dark:text-red-400"
                 />
+                <CheckPill
+                  label="cancelled"
+                  count={checks.cancelled ?? 0}
+                  runs={checks.runs.filter((r) => r.bucket === "cancelled")}
+                  icon={<BanIcon className="size-2.5 text-muted-foreground" />}
+                  className="border-border bg-muted text-muted-foreground"
+                />
+                <CheckPill
+                  label="skipped"
+                  count={checks.skipped ?? 0}
+                  runs={checks.runs.filter((r) => r.bucket === "skipped")}
+                  icon={<CircleMinusIcon className="size-2.5 text-muted-foreground" />}
+                  className="border-border bg-muted text-muted-foreground"
+                />
               </div>
             </section>
           )}
@@ -782,18 +806,7 @@ function PullRequestSummaryTab({
       {(showPeople || showStatus) && <Separator />}
       {/* Extra bottom padding so the end of a long description can scroll clear
           of the very bottom edge, where it's awkward to read. */}
-      <section className="space-y-1.5 p-3 pb-16">
-        <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-          Description
-        </h3>
-        {body ? (
-          <div className="text-ui break-words">
-            <MessageResponse>{body}</MessageResponse>
-          </div>
-        ) : (
-          <p className="text-ui text-muted-foreground italic">No description provided.</p>
-        )}
-      </section>
+      <div className="p-3 pb-16">{description}</div>
     </div>
   );
 }
@@ -804,17 +817,17 @@ function PullRequestCommentsTab({
   comments,
   commentsPartial,
   providerLabel,
+  hasComposer,
 }: {
   comments: PullRequestComment[];
+  hasComposer: boolean;
   commentsPartial?: boolean;
   providerLabel: string;
 }) {
   const commentKeys = listKeys(comments, (c) => [c.url, c.created_at, c.author_id ?? c.author]);
   const authorHues = useMemo(() => pullRequestAuthorHues(comments), [comments]);
   return (
-    // Extra bottom padding so the last comment can scroll clear of the very
-    // bottom edge, where it's awkward to read.
-    <div className="space-y-2 p-3 pb-16">
+    <div className={cn("space-y-2 p-3", !hasComposer && "pb-16")}>
       {commentsPartial && (
         <p role="status" className="text-ui text-muted-foreground">
           Some comments are unavailable.
@@ -1103,6 +1116,7 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
         >
           <Input
             aria-label="Pull request URL"
+            autoFocus
             type="url"
             required
             value={url}
@@ -1253,7 +1267,9 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
         </div>
       ) : null}
       {showTrackingControls && (linking || update.isError) && (
-        <div className="shrink-0 border-b border-border p-2">{linkControls}</div>
+        <div className="shrink-0 border-b border-border p-2 [&>:first-child]:mt-0">
+          {linkControls}
+        </div>
       )}
       {info.data?.warnings?.length || info.data?.discovery_warnings?.length ? (
         <p
@@ -1273,7 +1289,7 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
           emptyStateAction={
             associations?.tracking_available && linkInEmptyState ? (
               <div className="mt-2 w-full max-w-sm">
-                <Button onClick={() => setLinking(!linking)}>Link a PR</Button>
+                {!linking && <Button onClick={() => setLinking(true)}>Link a PR</Button>}
                 {linkControls}
               </div>
             ) : (
@@ -1464,8 +1480,15 @@ function PullRequestPanelDetails({
     );
   }, [files]);
 
+  // Jumping to a collapsed file also expands it, so the click lands on its diff.
   const jumpTo = useCallback((path: string) => {
     setActivePath(path);
+    setCollapsedPaths((prev) => {
+      if (!prev.has(path)) return prev;
+      const next = new Set(prev);
+      next.delete(path);
+      return next;
+    });
     sectionEls.current.get(path)?.scrollIntoView({ block: "start" });
   }, []);
 
@@ -1628,6 +1651,7 @@ function PullRequestPanelDetails({
   const pr = data.pr!;
   const checks = pr.checks;
   const comments = pr.comments ?? [];
+  const canPostComment = !!(canEdit && data.capabilities.comment_posting && data.selected_pr_url);
 
   return (
     <TooltipProvider delayDuration={0}>
@@ -1658,19 +1682,16 @@ function PullRequestPanelDetails({
               <div className="ml-auto shrink-0">{refreshButton}</div>
             </div>
             <div className="mt-1 flex flex-nowrap items-center gap-2">
-              <a
-                href={pr.url}
-                target="_blank"
-                rel="noreferrer"
-                className="group flex min-w-0 items-center gap-1 text-ui font-medium hover:underline"
-              >
-                <span className="truncate">{pr.title}</span>
-                <span className="shrink-0 text-muted-foreground">
-                  {copy.prNumberPrefix}
-                  {pr.number}
-                </span>
-                <ExternalLinkIcon className="size-3 shrink-0 text-muted-foreground" />
-              </a>
+              <PullRequestTitle
+                // A different PR starts fresh, so an open title edit can't outlive its PR.
+                key={data.selected_pr_url ?? pr.url}
+                conversationId={conversationId}
+                prUrl={data.selected_pr_url ?? null}
+                url={pr.url}
+                title={pr.title}
+                numberLabel={`${copy.prNumberPrefix}${pr.number}`}
+                editable={canEdit && !!data.capabilities.details_editing}
+              />
               <PullRequestStatus state={pr.state} />
             </div>
           </div>
@@ -1696,8 +1717,12 @@ function PullRequestPanelDetails({
           </TabsList>
         </div>
 
-        {/* Summary: reviewers, CI checks, and the PR description. */}
-        <TabsContent value="summary" className="min-h-0 flex-1 overflow-y-auto">
+        {/* Summary: reviewers, CI checks, and the PR description. A size container,
+            so the description editor can fit itself to the visible height (cqh). */}
+        <TabsContent
+          value="summary"
+          className="min-h-0 flex-1 overflow-y-auto [container-type:size]"
+        >
           <PullRequestSummaryTab
             reviewers={
               pr.reviewers !== undefined && (
@@ -1739,16 +1764,40 @@ function PullRequestPanelDetails({
             checks={checks}
             checksSupported={pr.checks_supported !== false}
             checksUnavailableHint={copy.checksUnavailableHint}
-            body={pr.body}
+            description={
+              <PullRequestDescription
+                conversationId={conversationId}
+                prUrl={data.selected_pr_url ?? null}
+                body={pr.body}
+                editable={canEdit && !!data.capabilities.details_editing}
+                attachments={!!data.capabilities.attachment_uploads}
+              />
+            }
           />
         </TabsContent>
 
-        <TabsContent value="comments" className="min-h-0 flex-1 overflow-y-auto">
-          <PullRequestCommentsTab
-            comments={comments}
-            commentsPartial={pr.comments_partial}
-            providerLabel={copy.label}
-          />
+        <TabsContent value="comments" className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div
+            role="region"
+            aria-label="PR comments"
+            tabIndex={0}
+            className="min-h-0 flex-1 overflow-y-auto"
+          >
+            <PullRequestCommentsTab
+              comments={comments}
+              hasComposer={canPostComment}
+              commentsPartial={pr.comments_partial}
+              providerLabel={copy.label}
+            />
+          </div>
+          {canPostComment && data.selected_pr_url && (
+            <PullRequestCommentComposer
+              key={`${conversationId}:${data.selected_pr_url}`}
+              conversationId={conversationId}
+              prUrl={data.selected_pr_url}
+              account={data.auth.selected_account}
+            />
+          )}
         </TabsContent>
 
         {/* Changes: a controls row, then the sidebar (jump-to-file) + one scroll
