@@ -1504,6 +1504,33 @@ def test_translate_input_to_messages_drops_id_less_tool_result_with_its_call() -
     ]
 
 
+def test_translate_input_to_messages_groups_id_less_pair_apart_from_any_call_id() -> None:
+    """An id-less pair never shares a group with a call whose id happens to look positional."""
+    from omnigent.runtime.harnesses import _executor_adapter as adapter
+
+    oversized_content = "x" * (adapter._REPLAYED_TOOL_HISTORY_MAX_BYTES + 1)
+    input_value: list[dict[str, Any]] = [
+        {"type": "message", "role": "user", "content": "rewrite the file"},
+        {
+            "type": "function_call",
+            "call_id": "#3",
+            "name": "write",
+            "arguments": json.dumps({"content": oversized_content}),
+        },
+        {"type": "function_call_output", "call_id": "#3", "output": "written"},
+        {"type": "function_call", "name": "read", "arguments": "{}"},
+        {"type": "function_call_output", "output": "new text"},
+    ]
+
+    messages = adapter._translate_input_to_messages(input_value, include_tool_history=True)
+
+    assert [(m["role"], m["content"]) for m in messages] == [
+        ("user", "rewrite the file"),
+        ("tool_call", {"tool": "read", "args": {}}),
+        ("tool_result", "new text"),
+    ]
+
+
 # ── MCP tool-call observed/dispatch correlation ──────────
 #
 # These unit tests pin the queue mechanic that fixes the tool-call

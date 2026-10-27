@@ -1561,16 +1561,18 @@ _REPLAYED_TOOL_OUTPUT_MAX_BYTES = 16 * 1024
 # Total budget across replayed tool calls and outputs, which bounds how much a long
 # session's tool history adds to a fresh session's first prompt.
 _REPLAYED_TOOL_HISTORY_MAX_BYTES = 128 * 1024
+# A call id, or the position of a call without one; tagged so the two never collide.
+_ToolHistoryKey = tuple[str, str | int]
 
 
 def _keep_recent_tool_history(messages: list[Message]) -> list[Message]:
     """Keep the newest tool calls and outputs that fit the budget, skipping any one over it."""
     keys = _tool_history_keys(messages)
-    sizes: dict[str, int] = {}
+    sizes: dict[_ToolHistoryKey, int] = {}
     for key, message in zip(keys, messages, strict=True):
         if key is not None:
             sizes[key] = sizes.get(key, 0) + len(json.dumps(message.get("content")).encode())
-    kept: set[str] = set()
+    kept: set[_ToolHistoryKey] = set()
     remaining = _REPLAYED_TOOL_HISTORY_MAX_BYTES
     for key, size in reversed(sizes.items()):
         # Call arguments are not capped, so one call can exceed the whole budget.
@@ -1585,9 +1587,9 @@ def _keep_recent_tool_history(messages: list[Message]) -> list[Message]:
     ]
 
 
-def _tool_history_keys(messages: list[Message]) -> list[str | None]:
-    """Group replayed tool messages by call id; ``None`` marks a conversation message."""
-    keys: list[str | None] = []
+def _tool_history_keys(messages: list[Message]) -> list[_ToolHistoryKey | None]:
+    """Group tool messages by call id, else by position; ``None`` marks a conversation message."""
+    keys: list[_ToolHistoryKey | None] = []
     for index, message in enumerate(messages):
         role = message.get("role")
         metadata = message.get("metadata")
@@ -1595,17 +1597,17 @@ def _tool_history_keys(messages: list[Message]) -> list[str | None]:
         if role not in ("tool_call", "tool_result"):
             keys.append(None)
         elif isinstance(call_id, str) and call_id:
-            keys.append(call_id)
+            keys.append(("call_id", call_id))
         elif (
             role == "tool_result"
             and index
-            and keys[-1] == f"#{index - 1}"
+            and keys[-1] == ("position", index - 1)
             and messages[index - 1].get("role") == "tool_call"
         ):
             # Without ids, a result belongs to the call just before it.
             keys.append(keys[-1])
         else:
-            keys.append(f"#{index}")
+            keys.append(("position", index))
     return keys
 
 
