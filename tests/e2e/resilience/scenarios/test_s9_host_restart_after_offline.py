@@ -21,6 +21,7 @@ from tests.e2e.resilience.lab.recorder import show_view
 from tests.e2e.resilience.lab.report import ScenarioReport, report_dir
 from tests.e2e.resilience.scenarios import _contract as contract
 
+#: Must outlast the grace, so S9 has no short case for ``contract.FULL`` to extend.
 _OUTAGE_S = contract.GRACE_S + 30
 _HOST_OFFLINE = "Host is offline. Waiting for it to reconnect…"
 #: Long enough for the page to see the host return; well under the runner grace.

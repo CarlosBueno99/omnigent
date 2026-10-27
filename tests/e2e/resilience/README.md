@@ -29,6 +29,9 @@ uv run --no-sync pytest tests/e2e/resilience -v
 OMNIGENT_E2E_RESILIENCE_FULL=1 uv run --no-sync pytest tests/e2e/resilience/scenarios -n 2  # 60 s/120 s outages
 ```
 
+S9 always runs its 120 s outage: it tests what happens after the grace, so it
+has no short variant.
+
 To poke at the UI by hand, start a lab with a fault console:
 
 ```sh

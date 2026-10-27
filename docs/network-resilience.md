@@ -45,7 +45,8 @@ is pinned as a strict expected failure (`xfail(strict=True)`, or `known_gap` on
 the single check), so a fix that makes it pass must also remove the marker.
 The one exception is R8: it is a race, so its marker does not turn stale when
 a run happens to pass. Outages beyond the short default run only with
-`OMNIGENT_E2E_RESILIENCE_FULL=1`.
+`OMNIGENT_E2E_RESILIENCE_FULL=1`. S9 is the exception: its single outage must
+outlast the grace, so it always runs.
 
 | Scenario | Phase / action | Outage | claude-native | codex-native |
 | --- | --- | --- | --- | --- |
