@@ -120,25 +120,36 @@ export function nowSeconds(): number {
  * `watchedTurnFinishId` is sent only with the write that newly reports it.
  */
 async function syncReadState(conversationId: string, watchedTurnFinishId?: string): Promise<void> {
-  const lastSeen = lastSeenMap[conversationId];
-  if (lastSeen === undefined) return;
-  const readState = { last_seen: lastSeen, unread: explicitlyUnread.has(conversationId) };
+  if (lastSeenMap[conversationId] === undefined) return;
+  // Read at send time so the retry below can't replay a superseded write.
+  const readState = () => ({
+    last_seen: lastSeenMap[conversationId],
+    unread: explicitlyUnread.has(conversationId),
+  });
   const put = (body: object) =>
     authenticatedFetch(`/v1/sessions/${encodeURIComponent(conversationId)}/read-state`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+  // Lets the next mark resend a finish the server never recorded.
+  const forgetWatched = () => {
+    if (watchedTurnFinish.get(conversationId) === watchedTurnFinishId) {
+      watchedTurnFinish.delete(conversationId);
+    }
+  };
   try {
     if (watchedTurnFinishId === undefined) {
-      await put(readState);
+      await put(readState());
       return;
     }
-    const response = await put({ ...readState, watched_turn_finish_id: watchedTurnFinishId });
+    const response = await put({ ...readState(), watched_turn_finish_id: watchedTurnFinishId });
     // A server without finish ids rejects the field; still record the read-state.
-    if (response.status === 422) await put(readState);
+    if (response.status === 422) await put(readState());
+    else if (!response.ok) forgetWatched();
   } catch {
     // Network/auth errors must not break the UI; local state stays.
+    if (watchedTurnFinishId !== undefined) forgetWatched();
   }
 }
 

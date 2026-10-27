@@ -145,9 +145,15 @@ export function useIdleNotifications(activeConversationId?: string): void {
   // Deferred turn-end notifications, keyed by conversation id. A `running` →
   // `idle` edge schedules one; the session resuming (`running` again) clears it
   // before it fires, so only a settled idle — the real end — notifies.
-  // `finishBaseline` is the turn-finish id seen while that turn was running.
   const idleNotifyTimers = useRef<
-    Map<string, { timer: ReturnType<typeof setTimeout>; finishBaseline: string | undefined }>
+    Map<
+      string,
+      {
+        timer: ReturnType<typeof setTimeout>;
+        // The turn-finish id seen while that turn was running.
+        finishBaseline: string | undefined;
+      }
+    >
   >(new Map());
   // Sessions we've already beeped a turn-end for and the user hasn't viewed
   // since. A session that finishes again while its notification is still
