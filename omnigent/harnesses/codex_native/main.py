@@ -302,7 +302,7 @@ def _codex_auth_unavailable_reason() -> HarnessUnavailableReason | None:
             or native_codex_launch_base_url(launch) is not None
         )
         defers_to_codex_config = not native_codex_launch_pins_model_provider(launch)
-    except Exception:  # readiness must never raise; fail onto auth.json.
+    except Exception:  # noqa: BLE001 -- readiness must never raise; fail onto auth.json.
         _logger.debug("codex readiness: launch resolve failed; using auth.json", exc_info=True)
         routes_through_provider = False
     if routes_through_provider and not defers_to_codex_config:
@@ -321,7 +321,7 @@ def _codex_auth_unavailable_reason() -> HarnessUnavailableReason | None:
         if not _codex_auth_json_has_available_credential(source.auth_path):
             return HARNESS_NEEDS_AUTH
         return None
-    except Exception:  # readiness must never raise.
+    except Exception:  # noqa: BLE001 -- readiness must never raise.
         _logger.debug("codex readiness: local auth check failed", exc_info=True)
         return HARNESS_NEEDS_AUTH
 
@@ -663,7 +663,7 @@ def _wrapper_spec_raw_instructions(spec_path: Path) -> str | None:
 
     try:
         spec = load_agent_spec(spec_path, expand_env=False)
-    except Exception:  # best-effort; never block the launch
+    except Exception:  # noqa: BLE001 -- best-effort; never block the launch.
         _logger.warning(
             "Could not resolve raw instructions from wrapper spec %s",
             spec_path,
@@ -2296,7 +2296,7 @@ def _codex_rollout_records_from_session_items(
                     and message.get("type") == "message"
                     and "content" in message
                     else message
-                    for message in compacted_msgs
+                    for message in _codex_items_with_outputs_in_call_order(compacted_msgs)
                 ]
                 replacement_call_ids = {
                     message.get("call_id")
@@ -2312,6 +2312,10 @@ def _codex_rollout_records_from_session_items(
                     for call_id, payload in open_function_calls.items()
                     if call_id in remaining_function_outputs
                     and call_id not in replacement_call_ids
+                )
+                # Later results can belong to calls retained only in this snapshot.
+                items[index + 1 :] = _codex_items_with_outputs_in_call_order(
+                    items[index + 1 :], call_history=replacement_history
                 )
                 compacted_payload: _JsonObject = {
                     "message": item.get("summary", ""),
@@ -2376,6 +2380,8 @@ def _codex_rollout_records_from_session_items(
 
 def _codex_items_with_outputs_in_call_order(
     items: list[_JsonObject],
+    *,
+    call_history: Sequence[_JsonObject] = (),
 ) -> list[_JsonObject]:
     """
     Reorder tool outputs separated only by metadata to match their calls' order.
@@ -2384,12 +2390,15 @@ def _codex_items_with_outputs_in_call_order(
     in call order, and providers that pair outputs by position reject the swap.
 
     :param items: Flat Omnigent item dicts in chronological order.
+    :param call_history: Prior replacement history containing calls still awaiting results.
     :returns: Items with output slots sorted by their calls' positions, preserving
         metadata positions and all content or compaction boundaries. Unmatched
         outputs keep their relative order at the end of the run.
     """
     call_positions: dict[str, int] = {}
-    for position, item in enumerate(items):
+    for position, item in enumerate([*call_history, *items]):
+        if not isinstance(item, dict):
+            continue
         call_id = item.get("call_id")
         if item.get("type") == "function_call" and isinstance(call_id, str):
             call_positions.setdefault(call_id, position)
@@ -2410,6 +2419,9 @@ def _codex_items_with_outputs_in_call_order(
         output_positions.clear()
 
     for position, item in enumerate(items):
+        if not isinstance(item, dict):
+            flush_run()
+            continue
         item_type = item.get("type")
         if item_type == "function_call_output":
             output_positions.append(position)
