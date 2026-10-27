@@ -5736,6 +5736,21 @@ describe("Composer session autofocus", () => {
     expect(textarea()).not.toHaveFocus();
   });
 
+  it("leaves a later enable alone after switching sessions while the composer is enabled", () => {
+    const { rerender } = render(<Composer {...composerProps()} />);
+    act(() => textarea().blur());
+    // An enabled composer can still miss the session-switch focus, e.g. while hidden.
+    const focus = vi.spyOn(HTMLTextAreaElement.prototype, "focus").mockImplementation(() => {});
+    act(() => setComposerState({ conversationId: "conv_autofocus_next" }));
+    focus.mockRestore();
+    expect(textarea()).not.toHaveFocus();
+
+    rerender(<Composer {...composerProps({ disabled: true })} />);
+    rerender(<Composer {...composerProps()} />);
+
+    expect(textarea()).not.toHaveFocus();
+  });
+
   it.each([
     ["focuses the composer", () => {}, () => textarea()],
     [
@@ -5785,22 +5800,26 @@ describe("Composer session autofocus", () => {
       () => window.getSelection()?.selectAllChildren(screen.getByText("transcript text")),
     ],
   ])("leaves the page alone once it enables when %s", (_case, moveOn) => {
-    const { rerender } = render(
+    const page = (disabled: boolean) => (
       <>
         <p>transcript text</p>
         <button type="button">elsewhere</button>
-        <Composer {...composerProps({ disabled: true })} />
-      </>,
+        <Composer {...composerProps({ disabled })} />
+      </>
     );
+    const { rerender } = render(page(true));
     act(moveOn);
 
-    rerender(
-      <>
-        <p>transcript text</p>
-        <button type="button">elsewhere</button>
-        <Composer {...composerProps()} />
-      </>,
-    );
+    rerender(page(false));
+
+    expect(textarea()).not.toHaveFocus();
+
+    act(() => {
+      screen.getByRole("button", { name: "elsewhere" }).blur();
+      window.getSelection()?.removeAllRanges();
+    });
+    rerender(page(true));
+    rerender(page(false));
 
     expect(textarea()).not.toHaveFocus();
   });
