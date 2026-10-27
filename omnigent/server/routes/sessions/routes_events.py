@@ -2645,6 +2645,13 @@ def register_events_routes(
                     or not is_side_chat_child(child.labels)
                 ):
                     raise OmnigentError("Invalid side chat child", code=ErrorCode.INVALID_INPUT)
+            from omnigent.harnesses.codex_native.side_chat import RESULT_LABEL_PREFIX
+
+            await asyncio.to_thread(
+                conversation_store.set_labels,
+                session_id,
+                {RESULT_LABEL_PREFIX + draft_id: child_id or "failed"},
+            )
             session_stream.publish(
                 session_id,
                 {
@@ -3590,6 +3597,19 @@ def register_events_routes(
             stay in this async hook.
             """
             events: list[dict[str, Any]] = []
+            from omnigent.harnesses.codex_native.side_chat import RESULT_LABEL_PREFIX
+
+            current = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+            for key, value in (current.labels if current is not None else {}).items():
+                if key.startswith(RESULT_LABEL_PREFIX):
+                    events.append(
+                        {
+                            "type": "session.side_chat_result",
+                            "conversation_id": session_id,
+                            "draft_id": key.removeprefix(RESULT_LABEL_PREFIX),
+                            "child_session_id": None if value == "failed" else value,
+                        }
+                    )
             try:
                 page = await asyncio.to_thread(
                     conversation_store.list_conversations,

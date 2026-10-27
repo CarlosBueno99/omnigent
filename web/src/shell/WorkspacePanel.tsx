@@ -1,3 +1,4 @@
+import { useSideChatSettingsSupport } from "@/hooks/useSideChatSettingsSupport";
 import type { FilePosition, OpenFileOptions } from "./FileViewerContext";
 import {
   BotIcon,
@@ -69,7 +70,12 @@ import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { MobilePanelDrawer } from "./MobilePanelDrawer";
 import { SideChatPane } from "@/components/chat/SideChatPane";
 import { useChatStore } from "@/store/chatStore";
-import { SIDE_CHAT_COMMAND_PREFIX, supportsSideChat, usesNativeSideChatFork } from "@/lib/sideChat";
+import {
+  newPendingSideChatId,
+  SIDE_CHAT_COMMAND_PREFIX,
+  supportsSideChat,
+  usesNativeSideChatFork,
+} from "@/lib/sideChat";
 import { createSideChat, stopSession } from "@/lib/sessionsApi";
 import { useSessionAgent } from "@/hooks/useAgents";
 import type { SessionLiveness } from "@/hooks/useSessionLiveness";
@@ -890,6 +896,11 @@ function WorkspacePanelImpl({
   const sideChats = useSideChats(conversationId);
   const activeHarness = useChatStore((s) => s.sessionHarness);
   const sideChatHarness = sessionHarness === undefined ? activeHarness : sessionHarness;
+  const nativeSettingsSupported = useSideChatSettingsSupport(
+    conversationId,
+    usesNativeSideChatFork(sideChatHarness),
+  );
+  const legacyPendingIdsRef = useRef<string[]>([]);
   const sideChatToOpen = useChatStore((s) => s.sideChatToOpen);
   const clearSideChatToOpen = useChatStore((s) => s.clearSideChatToOpen);
   const activeSideChatRef = useRef<HTMLDivElement | null>(null);
@@ -914,7 +925,7 @@ function WorkspacePanelImpl({
     } else {
       // Started this session → live (not a dead restored Codex fork).
       sideChatsStartedThisSession.add(childId);
-      const awaiting = sideChatToOpen.pendingId;
+      const awaiting = sideChatToOpen.pendingId ?? legacyPendingIdsRef.current.shift();
       if (awaiting !== undefined) {
         sideChats.rekey(awaiting, childId);
         useChatStore.getState().clearSideChatComposer(awaiting);
@@ -953,16 +964,32 @@ function WorkspacePanelImpl({
     const settings = useChatStore.getState().sideChatComposers[pendingId]?.settings;
     if (usesNativeSideChatFork(sideChatHarness)) {
       if (parentAgentId === null) return Promise.reject(new Error("no agent"));
-      // Keep the draft until the forwarder acknowledges the first native turn.
+      if (!nativeSettingsSupported) {
+        if (settings && Object.keys(settings).length > 0) {
+          toast.error("Update the host and restart the session to apply these side-chat settings.");
+          return Promise.reject(new Error("side chat settings unsupported"));
+        }
+        legacyPendingIdsRef.current.push(pendingId);
+      }
+      const requestId = nativeSettingsSupported ? newPendingSideChatId() : undefined;
+      if (requestId)
+        useChatStore.getState().updateSideChatComposer(pendingId, (current) => ({
+          ...current,
+          startRequestId: requestId,
+        }));
+      // Older backends settle through session.created; capable runners acknowledge the turn.
       let sendFailed = false;
       return useChatStore
         .getState()
         .send(SIDE_CHAT_COMMAND_PREFIX + text, parentAgentId, undefined, {
           pinnedConversationId: conversationId,
-          sideChatSettings: settings,
-          sideChatDraftId: pendingId,
+          sideChatSettings: nativeSettingsSupported ? settings : undefined,
+          sideChatDraftId: requestId,
           onError: (message) => {
             sendFailed = true;
+            legacyPendingIdsRef.current = legacyPendingIdsRef.current.filter(
+              (id) => id !== pendingId,
+            );
             toast.error(message);
           },
         })

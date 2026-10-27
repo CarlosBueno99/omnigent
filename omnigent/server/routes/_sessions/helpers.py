@@ -5729,6 +5729,18 @@ def _publish_btw_sidechat(
     session_stream.publish(session_id, event.model_dump())
 
 
+async def _runner_supports_side_chat_settings(client: httpx.AsyncClient | None) -> bool:
+    """Negotiate against the running process; older runners have no capability route."""
+    if client is None:
+        return False
+    try:
+        response = await asyncio.wait_for(client.get("/v1/side_chat_capabilities"), timeout=3)
+        payload = response.json() if response.status_code == 200 else None
+        return isinstance(payload, dict) and payload.get("settings") is True
+    except (httpx.HTTPError, TimeoutError, ValueError):
+        return False
+
+
 async def _get_runner_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient | None:
     """Call-time proxy so a ``sessions._get_runner_client`` patch is honored here.
 

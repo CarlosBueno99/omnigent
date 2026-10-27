@@ -7814,6 +7814,7 @@ async def _forward_codex_side_chat_turn(
         child lacks a parent id or a Codex thread-id label.
     """
     from omnigent.harnesses.claude_native.bridge import url_component
+    from omnigent.harnesses.codex_native.side_chat import EFFORT_RESET_LABEL
     from omnigent.server.routes._sessions.common import (
         _CODEX_NATIVE_SUBAGENT_THREAD_ID_LABEL_KEY,
     )
@@ -7831,7 +7832,8 @@ async def _forward_codex_side_chat_turn(
             **({"model_override": conv.model_override} if conv.model_override is not None else {}),
             **(
                 {"reasoning_effort": conv.reasoning_effort}
-                if conv.reasoning_effort is not None or conv.model_override is not None
+                if conv.reasoning_effort is not None
+                or conv.labels.get(EFFORT_RESET_LABEL) == "true"
                 else {}
             ),
         },
@@ -8034,6 +8036,22 @@ async def _dispatch_session_event_to_runner_impl(
         opens_side_chat = _native_pane_harness(conv) == "codex-native" and is_side_chat_command(
             _extract_user_text_for_routing(body)
         )
+        if opens_side_chat and (
+            body.data.get("side_chat_draft_id") is not None
+            or body.data.get("side_chat_settings") is not None
+        ):
+            from omnigent.server.routes._sessions.helpers import (
+                _runner_supports_side_chat_settings,
+            )
+
+            if not await _runner_supports_side_chat_settings(runner_client):
+                raise OmnigentError(
+                    (
+                        "This runner cannot apply side-chat settings. Update the host and "
+                        "restart the session, or open a side chat without settings."
+                    ),
+                    code=ErrorCode.INVALID_INPUT,
+                )
         # An older host forwards `/side` to Codex as a plain prompt (no fork), so
         # the web side chat opens and hangs and the question lands on the main
         # thread. Refuse here — before the forward — with a clear reason instead.

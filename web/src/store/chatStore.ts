@@ -1107,6 +1107,7 @@ export interface ConversationState {
  */
 /** One side chat's unsent composer contents. */
 export interface SideChatComposerDraft {
+  startRequestId?: string;
   settings?: SideChatModelSettings;
   starting?: boolean;
   quotes?: ReplyQuote[];
@@ -8647,20 +8648,23 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       });
       return;
     case "side_chat_result": {
-      const draft = useChatStore.getState().sideChatComposers[event.draftId];
-      if (!draft?.starting) return;
+      const entry = Object.entries(useChatStore.getState().sideChatComposers).find(
+        ([id, draft]) => (draft.startRequestId ?? id) === event.draftId,
+      );
+      if (!entry?.[1].starting) return;
+      const [pendingId] = entry;
       if (event.childSessionId) {
         useChatStore.setState({
           sideChatToOpen: {
             childId: event.childSessionId,
             parentId: event.conversationId,
-            pendingId: event.draftId,
+            pendingId,
           },
         });
       } else {
         useChatStore
           .getState()
-          .updateSideChatComposer(event.draftId, (current) => ({ ...current, starting: false }));
+          .updateSideChatComposer(pendingId, (current) => ({ ...current, starting: false }));
         toast.error("Couldn't start the side chat. Your question and settings are ready to retry.");
       }
       return;

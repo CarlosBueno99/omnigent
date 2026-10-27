@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { useSideChatSettingsSupport } from "@/hooks/useSideChatSettingsSupport";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ComposerAgentIcon } from "@/components/ComposerAgentIcon";
@@ -48,6 +49,10 @@ export function SideChatSettings({
   const queryClient = useQueryClient();
   const state = useConversationEntryState(session.id);
   const nativeSide = session.labels?.["omnigent.codex_native.agent_nickname"] === "Side chat";
+  const settingsSupported = useSideChatSettingsSupport(
+    session.id,
+    nativeSide || session.harness === "codex-native",
+  );
   const sourceId = session.parentSessionId ?? parentIdFromLabels(session.labels);
   const { session: parent } = useSession(nativeSide ? sourceId : null);
   const parentState = useConversationEntryState(nativeSide ? (sourceId ?? null) : null);
@@ -99,7 +104,7 @@ export function SideChatSettings({
   const supportsEffort = shouldShowEffortPicker(capabilities, family);
   const efforts = supportsEffort ? effortLevelsForConv(capabilities, options, model, family) : [];
   const showModels = kind !== null && options.length > 0;
-  if (!showModels && efforts.length === 0) return null;
+  if (!settingsSupported || (!showModels && efforts.length === 0)) return null;
   const disabled =
     saving ||
     draft?.disabled ||

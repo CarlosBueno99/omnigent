@@ -390,7 +390,10 @@ catalog as the main composer until the session's list arrives.
 Available choices follow the harness's capabilities; viewers and closed chats
 cannot change them. A failed start keeps the draft and selections for retry,
 including a native settings-save failure after child creation. Native drafts
-stay pending until their first turn is accepted.
+stay pending until their first turn is accepted; reconnecting replays a missed
+success or failure. Retrying uses a new request ID so an earlier result cannot
+settle the new attempt. Older servers or runners retain the legacy creation
+flow and hide the unsupported native settings controls.
 Native Codex applies draft choices to its first side-thread turn and saved choices
 to later turns. Existing native side chats remain read-only after a page reload.
 

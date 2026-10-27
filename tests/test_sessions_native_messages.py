@@ -41,6 +41,37 @@ def _message_event() -> SessionEventInput:
     )
 
 
+async def test_native_side_chat_rejects_settings_if_runner_lost_support() -> None:
+    from unittest.mock import AsyncMock, Mock
+
+    from omnigent.errors import OmnigentError
+    from omnigent.server.routes._sessions.orchestration import (
+        _dispatch_session_event_to_runner_impl,
+    )
+
+    conv = _conversation_with_wrapper("codex-native-ui")
+    body = _message_event()
+    body.data.update(
+        content=[{"type": "input_text", "text": "/side question"}],
+        side_chat_draft_id="pending:test",
+    )
+    runner = AsyncMock()
+    runner.get.return_value = httpx.Response(404)
+    with pytest.raises(OmnigentError, match="cannot apply side-chat settings"):
+        await _dispatch_session_event_to_runner_impl(
+            conv.id,
+            conv,
+            body,
+            Mock(),
+            runner,
+            agent_name=None,
+            file_store=None,
+            artifact_store=None,
+            native_terminal_ready=True,
+        )
+    runner.post.assert_not_awaited()
+
+
 def test_codex_native_session_uses_codex_harness_for_web_messages() -> None:
     """
     Codex-native sessions use the native bypass and dispatch web

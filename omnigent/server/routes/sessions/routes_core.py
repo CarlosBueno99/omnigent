@@ -159,6 +159,7 @@ from omnigent.server.routes._sessions.helpers import (
     _require_cost_control_label_authority,
     _require_permission_mode_forward,
     _resolve_harness,
+    _runner_supports_side_chat_settings,
     _RunnerForwardResult,
     _same_provider_family,
     _session_status_cache,
@@ -1573,6 +1574,27 @@ def register_core_routes(
         )
         _set_read_state(user_id, session_id, body.last_seen, body.unread)
         return Response(status_code=204)
+
+    @router.get("/sessions/{session_id}/side_chat_capabilities")
+    async def side_chat_capabilities(request: Request, session_id: str) -> dict[str, bool]:
+        """Report settings support only when both server and current runner implement it."""
+        user_id = _get_user_id(request, auth_provider)
+        access = await _require_access_and_level(
+            user_id, session_id, LEVEL_READ, permission_store, conversation_store
+        )
+        conv = access.conversation or await asyncio.to_thread(
+            conversation_store.get_conversation, session_id
+        )
+        if conv is None:
+            raise _session_not_found()
+        if is_side_chat_child(conv.labels) and conv.parent_conversation_id:
+            parent = await asyncio.to_thread(
+                conversation_store.get_conversation, conv.parent_conversation_id
+            )
+            if parent is not None:
+                conv = parent
+        client = await _get_runner_client(conv.id, runner_router, conversation=conv)
+        return {"settings": await _runner_supports_side_chat_settings(client)}
 
     # ── GET /sessions/{session_id} ───────────────────────────────
 
@@ -3223,6 +3245,14 @@ def register_core_routes(
         if update_result is None:
             raise _session_not_found()
         updated = update_result.conversation
+        if defer_side_settings and (clear_effort or effort is not None):
+            from omnigent.harnesses.codex_native.side_chat import EFFORT_RESET_LABEL
+
+            await asyncio.to_thread(
+                conversation_store.set_labels,
+                session_id,
+                {EFFORT_RESET_LABEL: "true" if clear_effort else "false"},
+            )
         effort_changed = update_result.reasoning_effort_changed
         saved = live_change.position() if live_change is not None else 0
         if body.silent:

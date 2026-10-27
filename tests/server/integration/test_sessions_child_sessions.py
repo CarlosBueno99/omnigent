@@ -1907,9 +1907,9 @@ async def _create_native_child(client: httpx.AsyncClient, name: str) -> dict[str
     return child_resp.json()
 
 
-@pytest.mark.parametrize("effort", ["max", "default"])
+@pytest.mark.parametrize("effort", ["max", "default", None])
 async def test_codex_side_settings_are_saved_and_forwarded_only_to_child_turn(
-    client: httpx.AsyncClient, db_uri: str, monkeypatch: pytest.MonkeyPatch, effort: str
+    client: httpx.AsyncClient, db_uri: str, monkeypatch: pytest.MonkeyPatch, effort: str | None
 ) -> None:
     from omnigent.server.routes._sessions.orchestration import _forward_codex_side_chat_turn
     from omnigent.server.routes.sessions import routes_core
@@ -1918,7 +1918,11 @@ async def test_codex_side_settings_are_saved_and_forwarded_only_to_child_turn(
     parent = await _create_parent_session(client, agent_name="side-settings")
     store = SqlAlchemyConversationStore(db_uri)
     store.set_labels(parent["id"], {"omnigent.wrapper": "codex-native-ui"})
-    store.update_conversation(parent["id"], model_override="gpt-5.5", reasoning_effort="high")
+    store.update_conversation(
+        parent["id"],
+        model_override="gpt-5.5",
+        reasoning_effort="high" if effort is not None else None,
+    )
     created = await client.post(
         f"/v1/sessions/{parent['id']}/events",
         json={
@@ -1934,6 +1938,13 @@ async def test_codex_side_settings_are_saved_and_forwarded_only_to_child_turn(
     monkeypatch.setattr(
         session_stream, "publish", lambda _session_id, event: published.append(event)
     )
+
+    # The live result may have been lost; a reconnect must replay the durable outcome.
+    async def snapshot_only(_request: Any, _session_id: str, snapshot: Any, **_kwargs: Any) -> Any:
+        for event in await snapshot():
+            yield "data: " + json.dumps(event) + "\n\n"
+
+    monkeypatch.setattr(routes_events_module, "_stream_live_events", snapshot_only)
     for result_child in (None, child_id):
         result = await client.post(
             f"/v1/sessions/{parent['id']}/events",
@@ -1949,6 +1960,19 @@ async def test_codex_side_settings_are_saved_and_forwarded_only_to_child_turn(
             "draft_id": "pending:test",
             "child_session_id": result_child,
         }
+        replay = await client.get(f"/v1/sessions/{parent['id']}/stream")
+        assert replay.status_code == 200, replay.text
+        replayed = [
+            json.loads(line.removeprefix("data: "))
+            for line in replay.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        assert {
+            "type": "session.side_chat_result",
+            "conversation_id": parent["id"],
+            "draft_id": "pending:test",
+            "child_session_id": result_child,
+        } in replayed
     invalid = await client.post(
         f"/v1/sessions/{parent['id']}/events",
         json={
@@ -1957,9 +1981,10 @@ async def test_codex_side_settings_are_saved_and_forwarded_only_to_child_turn(
         },
     )
     assert invalid.status_code == 400, invalid.text
+
     child = (await client.get(f"/v1/sessions/{child_id}")).json()
     assert child["model_override"] == "gpt-5.5"
-    assert child["reasoning_effort"] == "high"
+    assert child["reasoning_effort"] == ("high" if effort is not None else None)
     store.update_conversation(parent["id"], model_override="gpt-5.6-luna", reasoning_effort="low")
     parent_before = store.get_conversation(parent["id"])
     assert parent_before is not None
@@ -1973,7 +1998,7 @@ async def test_codex_side_settings_are_saved_and_forwarded_only_to_child_turn(
         f"/v1/sessions/{child['id']}",
         json={
             "model_override": "gpt-6-sol",
-            "reasoning_effort": effort,
+            **({"reasoning_effort": effort} if effort is not None else {}),
         },
     )
     assert response.status_code == 200, response.text
@@ -2015,7 +2040,7 @@ async def test_codex_side_settings_are_saved_and_forwarded_only_to_child_turn(
             "content": [{"type": "input_text", "text": "Follow up"}],
             "codex_side_thread_id": "thread-side",
             "model_override": "gpt-6-sol",
-            "reasoning_effort": saved_effort,
+            **({"reasoning_effort": saved_effort} if effort is not None else {}),
         }
     ]
     parent_after = store.get_conversation(child["parent_session_id"])
@@ -2551,3 +2576,21 @@ async def test_fork_of_child_promotes_it_into_the_sidebar(
     assert child_ids == {child.id}, (
         f"parent's children must be exactly the untouched source, got {child_ids}"
     )
+
+
+@pytest.mark.parametrize("runner_status,supported", [(404, False), (200, False), (200, True)])
+async def test_side_chat_capabilities_probe_current_runner(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, runner_status: int, supported: bool
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from omnigent.server.routes.sessions import routes_core
+
+    parent = await _create_parent_session(client)
+    runner = AsyncMock()
+    runner.get.return_value = httpx.Response(runner_status, json={"settings": supported})
+    monkeypatch.setattr(routes_core, "_get_runner_client", AsyncMock(return_value=runner))
+    response = await client.get(f"/v1/sessions/{parent['id']}/side_chat_capabilities")
+    assert response.status_code == 200
+    assert response.json() == {"settings": supported}
+    runner.get.assert_awaited_once_with("/v1/side_chat_capabilities")

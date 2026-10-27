@@ -1,3 +1,4 @@
+import { useSideChatSettingsSupport } from "@/hooks/useSideChatSettingsSupport";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -12,6 +13,9 @@ import { conversationRegistry } from "@/store/conversationRegistry";
 import { useChatStore } from "@/store/chatStore";
 import { SideChatSettings } from "./SideChatSettings";
 
+vi.mock("@/hooks/useSideChatSettingsSupport", () => ({
+  useSideChatSettingsSupport: vi.fn(() => true),
+}));
 vi.mock("@/lib/agentLabels", async (importOriginal) => ({
   ...(await importOriginal<typeof AgentLabels>()),
   useHarnessEffortFamilies: () => ({ "claude-sdk": "anthropic", codex: "openai" }),
@@ -85,6 +89,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.mocked(useSideChatSettingsSupport).mockReturnValue(true);
   cleanup();
   cache.clear();
   conversationRegistry.clear();
@@ -392,3 +397,9 @@ it.each([false, true])(
     expect(screen.getByRole("menuitemcheckbox", { name: "GPT 5.5" })).toBeInTheDocument();
   },
 );
+
+it("hides settings when the server or runner cannot apply them", () => {
+  vi.mocked(useSideChatSettingsSupport).mockReturnValue(false);
+  mount();
+  expect(screen.queryByRole("button", { name: "Side chat model and effort" })).toBeNull();
+});

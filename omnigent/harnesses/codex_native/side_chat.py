@@ -59,6 +59,8 @@ SIDE_REFERENCE_ONLY_INSTRUCTIONS = (
 # Display name stamped on a side-chat child so the web can tell it apart from a
 # Codex-spawned sub-agent (drives the "this is a side chat" banner).
 SIDE_CHAT_DISPLAY_NAME = "Side chat"
+EFFORT_RESET_LABEL = "omnigent.side_chat.effort_reset"
+RESULT_LABEL_PREFIX = "omnigent.side_chat.result."
 _NICKNAME_LABEL_KEY = "omnigent.codex_native.agent_nickname"
 
 _SIDE_PREFIX = "/side "

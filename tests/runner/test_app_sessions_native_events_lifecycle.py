@@ -5460,9 +5460,13 @@ async def test_events_stop_session_on_kiro_native_503_when_kill_fails(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("command", [False, True], ids=["follow-up", "side-command"])
+@pytest.mark.parametrize(
+    "command,inherited",
+    [(False, False), (False, True), (True, False)],
+    ids=["follow-up", "inherited-default", "side-command"],
+)
 async def test_events_codex_side_chat_preserves_indentation(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command: bool
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command: bool, inherited: bool
 ) -> None:
     from omnigent.harnesses.codex_native import app_server as codex_native_app_server
     from omnigent.harnesses.codex_native import side_chat
@@ -5503,7 +5507,8 @@ async def test_events_codex_side_chat_preserves_indentation(
     if not command:
         payload["codex_side_thread_id"] = "thread_side"
         payload["model_override"] = "gpt-6-sol"
-        payload["reasoning_effort"] = "max"
+        if not inherited:
+            payload["reasoning_effort"] = "max"
     async with _runner_client(app) as client:
         created = await client.post(
             "/v1/sessions", json={"session_id": conv_id, "agent_id": "agent_side"}
@@ -5529,10 +5534,12 @@ async def test_events_codex_side_chat_preserves_indentation(
                     "threadId": "thread_side",
                     "input": [{"type": "text", "text": question}],
                     "model": "gpt-6-sol",
-                    "effort": "max",
+                    **({"effort": "max"} if not inherited else {}),
                 },
             )
         ]
+        if inherited:
+            assert not any(method == "model/list" for method, _ in fake_client.requests)
         assert fake_client.closed
 
 

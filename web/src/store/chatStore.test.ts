@@ -9943,6 +9943,39 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
   });
 
   describe("side chat first-turn acceptance", () => {
+    it("settles a reconnect snapshot and ignores results from an earlier attempt", () => {
+      useChatStore.setState({
+        sideChatToOpen: null,
+        sideChatComposers: {
+          "pending:tab": {
+            text: "question",
+            files: [],
+            settings: { reasoningEffort: "high" },
+            starting: true,
+            startRequestId: "pending:retry",
+          },
+        },
+      });
+      handleSessionEvent({
+        type: "side_chat_result",
+        conversationId: "parent",
+        draftId: "pending:old",
+        childSessionId: null,
+      });
+      expect(useChatStore.getState().sideChatComposers["pending:tab"].starting).toBe(true);
+      // The live result was missed; reconnect replays this same persisted event.
+      handleSessionEvent({
+        type: "side_chat_result",
+        conversationId: "parent",
+        draftId: "pending:retry",
+        childSessionId: "child",
+      });
+      expect(useChatStore.getState().sideChatToOpen).toEqual({
+        childId: "child",
+        parentId: "parent",
+        pendingId: "pending:tab",
+      });
+    });
     it("keeps text and settings through child creation and asynchronous failure, then opens the successful retry", async () => {
       seedSession("conv_draft_parent", []);
       await useChatStore.getState().switchTo("conv_draft_parent");
