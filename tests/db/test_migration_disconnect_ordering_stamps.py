@@ -88,11 +88,25 @@ def test_live_status_at_downgrades_and_replays(tmp_path: Path) -> None:
         _stamp(uri, engine, _PRIOR_HEAD)
         _migrate(uri, engine, _THIS_REVISION)
         assert {"live_status_at", "runner_last_connected"} <= _columns(engine).keys()
+        row_id = "3f0c3d9a8a1b4c5d9e7f6a5b4c3d2e1f"
+        with engine.begin() as conn:
+            conn.execute(
+                sa.text(
+                    f"INSERT INTO {_TABLE} "
+                    "(id, live_status, live_status_at, runner_last_connected) "
+                    "VALUES (:id, 1, 2000, 3)"
+                ),
+                {"id": row_id},
+            )
 
         _migrate(uri, engine, _PRIOR_HEAD, downgrade=True)
         assert not {"live_status_at", "runner_last_connected"}.intersection(_columns(engine))
         _stamp(uri, engine, _THIS_REVISION)
         _migrate(uri, engine, _PRIOR_HEAD, downgrade=True)
         assert not {"live_status_at", "runner_last_connected"}.intersection(_columns(engine))
+        with engine.connect() as conn:
+            assert conn.execute(sa.text(f"SELECT id, live_status FROM {_TABLE}")).all() == [
+                (row_id, 1)
+            ]
     finally:
         engine.dispose()
