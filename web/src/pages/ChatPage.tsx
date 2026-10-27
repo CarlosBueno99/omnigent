@@ -2486,6 +2486,11 @@ function ComposerImpl(
   // structural reason takes priority for the placeholder text since it
   // explains *why* this specific row can't receive input.
   const isReadOnly = isComposerReadOnly(permissionLevel, readOnlyReason, sendDisabledReason);
+  // An Arca send waits in the queue for the host, so typing reopens; other gates stay.
+  const inputDisabled =
+    ((disabled || (unreachable && !sendReconnectsArca)) && sendDisabledReason === null) ||
+    isReadOnly ||
+    composerLockedByBtw;
   // A pending elicitation addressed to this session parks the turn
   // server-side (the runner blocks on the verdict Future), so a message
   // sent now would sit queued and unread until the card is answered —
@@ -2755,6 +2760,7 @@ function ComposerImpl(
   // the input, which would delete the draft. Only save when the user
   // has actually changed the value since the last restore.
   const dirtyRef = useRef(false);
+  const focusWhenEnabledRef = useRef(false);
   // Composer text captured when voice dictation starts, so Esc can revert to it.
   const voiceSnapshotRef = useRef("");
   // On mobile, programmatic focus immediately summons the software keyboard.
@@ -2826,6 +2832,9 @@ function ComposerImpl(
     setSettledConversationId(conversationId ?? null);
     draftConversationIdRef.current = conversationId ?? null;
     if (!isMobileRef.current) textareaRef.current?.focus();
+    // After a full page load the input is still disabled while agents load; focus it once enabled.
+    focusWhenEnabledRef.current =
+      !isMobileRef.current && document.activeElement !== textareaRef.current;
 
     return () => {
       if (!conversationId || !dirtyRef.current) return;
@@ -2836,6 +2845,16 @@ function ComposerImpl(
       });
     };
   }, [conversationId, replaceText]);
+
+  useEffect(() => {
+    if (inputDisabled || !focusWhenEnabledRef.current) return;
+    focusWhenEnabledRef.current = false;
+    // Leave focus and any text selection where the user put them meanwhile.
+    const active = document.activeElement;
+    if (active !== null && active !== document.body) return;
+    if (window.getSelection()?.isCollapsed === false) return;
+    if (!isMobileRef.current) textareaRef.current?.focus({ preventScroll: true });
+  }, [inputDisabled]);
 
   // Publish edits as they happen so the open sidebar updates immediately,
   // rather than only learning about a draft when this composer unmounts.
@@ -4025,11 +4044,7 @@ function ComposerImpl(
                         ? "Send a follow-up (queued) — Esc to stop"
                         : readyPlaceholder,
           rows: 1,
-          // An Arca send waits in the queue for the host, so typing reopens; other gates stay.
-          disabled:
-            ((disabled || (unreachable && !sendReconnectsArca)) && sendDisabledReason === null) ||
-            isReadOnly ||
-            composerLockedByBtw,
+          disabled: inputDisabled,
           "data-slash-command": composerIsCommand ? "true" : undefined,
           "data-has-draft": hasDraft ? "true" : undefined,
           className: cn(

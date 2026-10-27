@@ -5708,6 +5708,72 @@ describe("Composer startSideChat (text-select → Ask in side chat)", () => {
   });
 });
 
+describe("Composer session autofocus", () => {
+  beforeEach(() => {
+    setComposerState({ conversationId: "conv_autofocus", skills: [] });
+    clearSessionDrafts();
+  });
+
+  afterEach(() => {
+    cleanup();
+    window.getSelection()?.removeAllRanges();
+    vi.restoreAllMocks();
+  });
+
+  it("focuses the composer once it enables after opening the session disabled", () => {
+    const { rerender } = render(<Composer {...composerProps({ disabled: true })} />);
+    expect(textarea()).toBeDisabled();
+    expect(textarea()).not.toHaveFocus();
+
+    rerender(<Composer {...composerProps()} />);
+
+    expect(textarea()).toHaveFocus();
+  });
+
+  it("does not open the software keyboard once it enables on mobile", () => {
+    const matchMedia = window.matchMedia;
+    vi.spyOn(window, "matchMedia").mockImplementation((query) => ({
+      ...matchMedia(query),
+      matches: query.includes("max-width"),
+    }));
+    const { rerender } = render(<Composer {...composerProps({ disabled: true })} />);
+
+    rerender(<Composer {...composerProps()} />);
+
+    expect(textarea()).not.toHaveFocus();
+  });
+
+  it.each([
+    [
+      "focus moved to another control",
+      () => screen.getByRole("button", { name: "elsewhere" }).focus(),
+    ],
+    [
+      "text selected in the page",
+      () => window.getSelection()?.selectAllChildren(screen.getByText("transcript text")),
+    ],
+  ])("leaves the page alone once it enables when %s", (_case, moveOn) => {
+    const { rerender } = render(
+      <>
+        <p>transcript text</p>
+        <button type="button">elsewhere</button>
+        <Composer {...composerProps({ disabled: true })} />
+      </>,
+    );
+    act(moveOn);
+
+    rerender(
+      <>
+        <p>transcript text</p>
+        <button type="button">elsewhere</button>
+        <Composer {...composerProps()} />
+      </>,
+    );
+
+    expect(textarea()).not.toHaveFocus();
+  });
+});
+
 // Attaching a file via the paperclip button routes through the hidden file
 // <input>, whose click (and the OS file dialog) pulls focus off the composer.
 // The change handler must hand focus back so the user can keep typing the
