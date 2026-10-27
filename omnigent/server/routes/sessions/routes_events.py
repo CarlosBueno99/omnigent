@@ -193,6 +193,7 @@ from omnigent.server.routes._sessions.helpers import (
     _is_devin_native_subagent,
     _launch_runner_on_host,
     _native_coding_agent_for_session,
+    _owns_host_runner,
     _parse_background_tasks,
     _persist_external_acp_subagent_start,
     _persist_external_assistant_message,
@@ -242,6 +243,7 @@ from omnigent.server.routes._sessions.orchestration import (
     _cancel_runner_relays,
     _child_session_summaries_from_conversations,
     _codex_side_chat_fork_lost,
+    _codex_side_chat_thread_id,
     _dispatch_session_event_to_runner,
     _enrich_terminal_status_with_subagent_output,
     _ensure_native_terminal_ready,
@@ -1803,10 +1805,15 @@ def register_events_routes(
                         "Couldn't release the side chat's resources. Please try again.",
                         code=ErrorCode.RUNNER_UNAVAILABLE,
                     ) from exc
-            # Only the host-bound parent owns the shared runner. Stopping
-            # that process disconnects all its chats; child bindings keep it alive.
+            # Only the runner's owner stops it: the process serves every chat
+            # bound to it, so a sub-agent riding an ancestor's runner leaves it up.
             stop_conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
-            if stop_conv is not None and stop_conv.host_id and stop_conv.runner_id:
+            if (
+                stop_conv is not None
+                and stop_conv.host_id
+                and stop_conv.runner_id
+                and await _owns_host_runner(stop_conv, conversation_store)
+            ):
                 stop_host_registry = getattr(request.app.state, "host_registry", None)
                 host_stopped = await _stop_host_runner_intentionally(
                     session_id,
@@ -3232,11 +3239,16 @@ def register_events_routes(
                 )
         native_terminal_ready = False
         initializer = getattr(request.app.state, "runner_session_initializer", None)
-        if _runner_needs_session_init or (
-            conv.runner_id is not None
-            and _is_native_terminal_session(conv)
-            and initializer is not None
-            and not initializer.is_initialized(conv, runner_client)
+        # Codex child turns run on a thread in the parent's app-server, not their own session.
+        codex_child_turn = body.type == "message" and _codex_side_chat_thread_id(conv) is not None
+        if not codex_child_turn and (
+            _runner_needs_session_init
+            or (
+                conv.runner_id is not None
+                and _is_native_terminal_session(conv)
+                and initializer is not None
+                and not initializer.is_initialized(conv, runner_client)
+            )
         ):
             # Idle reconnects defer initialization until the next interaction.
             # The initializer coalesces completed handshakes for this generation.
