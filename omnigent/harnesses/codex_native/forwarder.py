@@ -75,6 +75,7 @@ from omnigent.native._native_post_delivery import (
     post_may_have_been_delivered,
     replay_dead_letters,
 )
+from omnigent.native._native_supersession import post_clear_supersession
 from omnigent.runtime.tool_output import cap_tool_output
 from omnigent.session_event_batch import MAX_SESSION_EVENT_REQUEST_BYTES
 from omnigent.util.json_types import JsonObject as _JsonObject
@@ -134,6 +135,9 @@ _EXTERNAL_COMPACTION_STATUS_TYPE = "external_compaction_status"
 # handlers are harmless no-ops if a build spells these differently.
 _CODEX_COMPACTION_ITEM_TYPE = "contextCompaction"
 _CODEX_THREAD_COMPACTED_METHOD = "thread/compacted"
+# In-progress turns in ``thread/resume`` identify items by position, not by
+# the native ids their live notifications carry.
+_CODEX_RESUME_POSITION_ITEM_ID = re.compile(r"item-\d+")
 # How often the forwarder claims pending ``/side`` questions from the bridge dir.
 # The executor writes one and returns, so this is the delay before the side chat
 # starts; a fork is cheap, so poll fast enough to feel immediate.
@@ -476,6 +480,12 @@ class _CodexForwarderState:
         assistant reply, the forwarder recovers and posts the turn's user
         message if the live stream missed it (see
         :func:`_ensure_user_message_posted`).
+    :param user_message_copy_balance: Unmatched user-message copies of
+        unfinished turns keyed by (thread, turn, content digest): positive
+        counts live copies and negative counts resumed copies with positional
+        ids such as ``item-1``.
+    :param resume_echo_thread_ids: Threads whose resume snapshot is being
+        replayed on a connection that also received its live notifications.
     :param partial_text_by_turn: Visible assistant/plan text fragments keyed
         by turn id, e.g. ``{"turn_123": [_PartialTextBuffer(...)]}``.
         Normal completed items remain the durable source of truth; this
@@ -528,6 +538,8 @@ class _CodexForwarderState:
     synced_item_keys: set[str] = field(default_factory=set)
     surfaced_terminal_error_turns: set[str] = field(default_factory=set)
     posted_user_turns: set[str] = field(default_factory=set)
+    user_message_copy_balance: dict[tuple[str, str, str], int] = field(default_factory=dict)
+    resume_echo_thread_ids: set[str] = field(default_factory=set)
     posted_tool_calls: set[str] = field(default_factory=set)
     partial_text_by_turn: dict[str, list[_PartialTextBuffer]] = field(default_factory=dict)
     _anon_item_counters: dict[tuple[str, str], int] = field(default_factory=dict)
@@ -777,6 +789,42 @@ class _CodexForwarderState:
         :returns: ``True`` when the turn's user message has been posted.
         """
         return turn_id in self.posted_user_turns
+
+    def pair_user_message_copy(self, key: tuple[str, str, str], *, resumed: bool) -> bool:
+        """
+        Match a user-message copy against the other delivery of the same input.
+
+        Codex identifies an in-progress turn's resumed user input by position
+        and its live notification by a native id, so the copies share only
+        their thread, turn and content. A live copy matches a resumed copy
+        only while that thread's echoing replay registered it.
+
+        :param key: ``(thread_id, turn_id, content_digest)`` for the copy.
+        :param resumed: Whether the copy came from a resume snapshot.
+        :returns: ``True`` when the copy duplicates an unmatched copy.
+        """
+        balance = self.user_message_copy_balance.get(key, 0)
+        step = -1 if resumed else 1
+        duplicate = balance * step < 0
+        if duplicate or not resumed or key[0] in self.resume_echo_thread_ids:
+            if balance + step:
+                self.user_message_copy_balance[key] = balance + step
+            else:
+                self.user_message_copy_balance.pop(key, None)
+        return duplicate
+
+    def forget_user_message_copies(self, turn_id: str) -> None:
+        """
+        Drop unmatched user-message copies once their turn ends.
+
+        Resume snapshots give positional ids only to in-progress turns, so a
+        finished turn's copies can no longer pair.
+
+        :param turn_id: Codex turn id, e.g. ``"turn_123"``.
+        :returns: None.
+        """
+        for key in [key for key in self.user_message_copy_balance if key[1] == turn_id]:
+            del self.user_message_copy_balance[key]
 
     def note_tool_call_posted(self, call_id: str) -> None:
         """Record that a command's live function-call item was posted."""
@@ -2501,6 +2549,12 @@ async def _maybe_rotate_session_on_thread_started(
         new_session_id,
         new_thread_id,
     )
+    await post_clear_supersession(
+        ap_client,
+        old_session_id=old_session_id,
+        new_session_id=new_session_id,
+        agent_name=_AGENT_NAME,
+    )
     return True
 
 
@@ -2717,6 +2771,7 @@ async def _subscribe_until_ready_inner(
     )
     saw_not_ready = False
     while True:
+        received_live_items = client.is_subscribed_to_thread(thread_id)
         try:
             params: _JsonObject = {"threadId": thread_id}
             if not saw_not_ready and replay_from_turn_id is None:
@@ -2774,16 +2829,22 @@ async def _subscribe_until_ready_inner(
             await _sync_codex_approval_mode_change(
                 ap_client, session_id=session_id, forwarder_state=forwarder_state
             )
-        await _replay_resume_response(
-            ap_client,
-            session_id=session_id,
-            bridge_dir=bridge_dir,
-            response=response,
-            usage_coalescer=usage_coalescer,
-            elicitation_tracker=elicitation_tracker,
-            forwarder_state=forwarder_state,
-            replay_from_turn_id=replay_from_turn_id,
-        )
+        if forwarder_state is not None and received_live_items:
+            forwarder_state.resume_echo_thread_ids.add(thread_id)
+        try:
+            await _replay_resume_response(
+                ap_client,
+                session_id=session_id,
+                bridge_dir=bridge_dir,
+                response=response,
+                usage_coalescer=usage_coalescer,
+                elicitation_tracker=elicitation_tracker,
+                forwarder_state=forwarder_state,
+                replay_from_turn_id=replay_from_turn_id,
+            )
+        finally:
+            if forwarder_state is not None:
+                forwarder_state.resume_echo_thread_ids.discard(thread_id)
         return
 
 
@@ -2906,13 +2967,13 @@ async def _replay_resume_response(
                     expected_thread_id=thread_id,
                     forwarder_state=forwarder_state,
                 )
-    await _post_resume_terminal_status(
-        client,
-        session_id=session_id,
-        bridge_dir=bridge_dir,
-        thread_id=thread_id,
-        turns=turns,
-    )
+        await _post_resume_turn_status(
+            client,
+            session_id=session_id,
+            bridge_dir=bridge_dir,
+            thread_id=thread_id,
+            turns=turns,
+        )
 
 
 def _resume_turns_from(turns: list[object], replay_from_turn_id: str | None) -> list[object]:
@@ -2929,7 +2990,7 @@ def _resume_turns_from(turns: list[object], replay_from_turn_id: str | None) -> 
     return turns
 
 
-async def _post_resume_terminal_status(
+async def _post_resume_turn_status(
     client: httpx.AsyncClient,
     *,
     session_id: str,
@@ -2938,14 +2999,12 @@ async def _post_resume_terminal_status(
     turns: list[object],
 ) -> None:
     """
-    Publish a missing terminal status edge from ``thread/resume`` data.
+    Publish a missed lifecycle edge from explicit ``thread/resume`` turn state.
 
-    A reconnect can miss the live ``turn/started`` and
-    ``turn/completed`` / ``turn/failed`` notifications. When the resume
-    payload explicitly says the latest turn on the current thread is
-    terminal, the forwarder can close the Omnigent session status even though no
-    live terminal boundary was observed. It deliberately does not infer
-    terminal state from transcript items alone.
+    A fresh thread cannot be subscribed until its first turn creates a rollout,
+    so the forwarder can miss ``turn/started``. Reconcile the latest turn's
+    explicit status while replay still owns delivery order, before queued live
+    boundaries run. Transcript items alone do not establish activity.
 
     :param client: HTTP client for Omnigent event posts.
     :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
@@ -2957,23 +3016,23 @@ async def _post_resume_terminal_status(
     """
     if thread_id is None:
         return
-    edge = _resume_terminal_status_edge_for_latest_turn(bridge_dir, thread_id, turns)
+    edge = _resume_turn_status_edge_for_latest_turn(bridge_dir, thread_id, turns)
     await _post_turn_status_edge(client, session_id, edge)
 
 
-def _resume_terminal_status_edge_for_latest_turn(
+def _resume_turn_status_edge_for_latest_turn(
     bridge_dir: Path,
     thread_id: str,
     turns: list[object],
 ) -> _CodexTurnStatusEdge | None:
     """
-    Return the Omnigent terminal status represented by the latest resume turn.
+    Return the Omnigent status represented by the latest resume turn.
 
     :param bridge_dir: Native Codex bridge directory.
     :param thread_id: Codex thread id from the resume payload, e.g.
         ``"thread_123"``.
     :param turns: Raw Codex resume turn list.
-    :returns: Terminal status edge when the latest turn is terminal and
+    :returns: Status edge when the latest turn has explicit lifecycle state and
         belongs to the bridge's current thread; otherwise ``None``.
     """
     state = read_bridge_state(bridge_dir)
@@ -2990,7 +3049,7 @@ def _resume_terminal_status_edge_for_latest_turn(
         status = _omnigent_status_from_resume_turn(turn)
         if status is None:
             return None
-        update_active_turn_id(bridge_dir, None)
+        update_active_turn_id(bridge_dir, turn_id if status == "running" else None)
         # Parity with the live path — surface ``turn.error`` (if any) that
         # forced this resume turn to ``failed``.
         error = _terminal_error_from_turn({"turn": turn})
@@ -3014,8 +3073,8 @@ def _omnigent_status_from_resume_turn(turn: _JsonObject) -> str | None:
 
     :param turn: Codex resume turn object, e.g.
         ``{"id": "turn_123", "status": "completed"}``.
-    :returns: Omnigent status literal for terminal turns, or ``None`` for active
-        or unrecognized statuses.
+    :returns: Omnigent status literal for explicit active or terminal turns,
+        or ``None`` for unrecognized statuses.
     """
     # A ``turn.error`` forces ``failed`` regardless of the recorded status.
     if _terminal_error_from_turn({"turn": turn}) is not None:
@@ -3023,6 +3082,8 @@ def _omnigent_status_from_resume_turn(turn: _JsonObject) -> str | None:
     status = turn.get("status")
     if isinstance(status, dict):
         status = status.get("type") or status.get("status")
+    if status == "inProgress":
+        return "running"
     if status in {"completed", "interrupted", "cancelled", "canceled"}:
         return "idle"
     if status in {"failed", "errored"}:
@@ -4152,6 +4213,9 @@ async def _handle_terminal_turn_boundary_inner(
         params=params,
         forwarder_state=forwarder_state,
     )
+    terminal_turn_id = _terminal_turn_id_from_params(params)
+    if forwarder_state is not None and terminal_turn_id is not None:
+        forwarder_state.forget_user_message_copies(terminal_turn_id)
     handled = terminal.handled
     if terminal.edge is not None:
         await _post_turn_status_edge(client, session_id, terminal.edge)
@@ -5276,11 +5340,20 @@ def _claim_completed_item(
     item_key, is_anon = _completed_item_key(params, item, forwarder_state)
     if not forwarder_state.claim_item_key(item_key):
         return None
+    thread_id = _thread_id_from_params(params) or "thread"
+    turn_id = params.get("turnId")
+    turn_id = turn_id if isinstance(turn_id, str) and turn_id else "turn"
     if is_anon:
-        thread_id = _thread_id_from_params(params) or "thread"
-        turn_id = params.get("turnId")
-        turn_id = turn_id if isinstance(turn_id, str) and turn_id else "turn"
         forwarder_state.advance_anon_counter(thread_id, turn_id)
+    elif item.get("type") == "userMessage" and isinstance(item.get("content"), list):
+        content = json.dumps(item["content"], sort_keys=True)
+        content_digest = hashlib.sha256(content.encode()).hexdigest()
+        resumed = _CODEX_RESUME_POSITION_ITEM_ID.fullmatch(str(item.get("id"))) is not None
+        if forwarder_state.pair_user_message_copy(
+            (thread_id, turn_id, content_digest), resumed=resumed
+        ):
+            _logger.info("Codex forwarder skipped duplicate user message: key=%s", item_key)
+            return None
     return item_key
 
 
@@ -6424,15 +6497,20 @@ async def _post_agent_message(
     text = item.get("text")
     if not isinstance(text, str) or not text:
         return False
+    item_data: _JsonObject = {
+        "role": "assistant",
+        "agent": _AGENT_NAME,
+        "content": [{"type": "output_text", "text": text}],
+    }
+    # Codex labels progress vs. answer text; the web UI folds commentary.
+    phase = item.get("phase")
+    if isinstance(phase, str):
+        item_data["phase"] = phase
     return await _post_external_item(
         client,
         session_id,
         item_type="message",
-        item_data={
-            "role": "assistant",
-            "agent": _AGENT_NAME,
-            "content": [{"type": "output_text", "text": text}],
-        },
+        item_data=item_data,
         response_id=_response_id(params),
         message_id=_completed_streaming_message_id(params, item, "agentMessage"),
         source_id=source_id or _source_id(params, item),
@@ -8707,10 +8785,10 @@ def _completed_item_key(
     Build a total dedup key for one durable Codex transcript item.
 
     The key is always non-empty so dedup is never silently disabled.
-    Items with stable Codex-assigned ``id`` fields use
-    ``threadId:turnId:item.id`` — identical across replay and live
-    deliveries of the same item, so the second delivery is correctly
-    dropped by the dedup gate.
+    Items with Codex-assigned ``id`` fields use ``threadId:turnId:item.id``.
+    Completed turns reuse live ids on replay; an in-progress turn's resumed
+    user input instead has a positional id that
+    :meth:`_CodexForwarderState.pair_user_message_copy` matches by content.
 
     Items without a stable ``id`` fall back to a per-(thread, turn)
     positional counter. The counter is peeked here and only advanced by
