@@ -269,7 +269,7 @@ def _resolve_extension_state(
     # Distribution metadata is an external installation boundary. Preserve the
     # rest of the server if global discovery itself fails before per-plugin
     # failure isolation can apply.
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- broken extension discovery cannot stop startup
         _logger.warning("could not discover installed extensions (%s)", exc, exc_info=True)
         return ExtensionPluginState(manifests=(), load_errors={"registry": str(exc)})
 
@@ -288,7 +288,7 @@ def _resolve_extension_assets(
                 ", ".join(sorted(overrides)),
             )
         return build_asset_index(state, overrides=overrides)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- broken extension assets cannot stop startup
         _logger.warning("could not build extension asset index (%s)", exc, exc_info=True)
         return {}, {"registry": str(exc)}
 
@@ -1215,7 +1215,7 @@ def _ensure_default_acp_agents(
 
         configured = list(acp_agents())
         shadowed: frozenset[str] = shadowed_builtin_acp_rows(configured)
-    except Exception:  # a malformed acp: block must never break startup
+    except Exception:  # noqa: BLE001 -- malformed optional ACP config cannot stop startup
         _logger.debug("acp agent seeding skipped (config unreadable)", exc_info=True)
         configured = []
         shadowed = frozenset()
@@ -3477,7 +3477,7 @@ def create_app(
             try:
                 await asyncio.to_thread(permission_store.ensure_user, user_id)
                 await asyncio.to_thread(promote_if_listed, admin_list, permission_store, user_id)
-            except Exception:
+            except Exception:  # noqa: BLE001 -- best-effort promotion cannot break identity lookup
                 _logger.warning("Could not promote listed admin %s", user_id, exc_info=True)
         # Still report the list, so admin chrome shows even if promotion failed.
         return {"user_id": user_id, "is_admin": flagged or listed}
@@ -3921,7 +3921,7 @@ def create_app(
             return own
         try:
             return await asyncio.to_thread(routing_host_id, convs[0], conversation_store)
-        except Exception:  # an unreadable ancestor leaves the host unknown
+        except Exception:  # noqa: BLE001 -- an unreadable ancestor leaves the host unknown
             _logger.warning("Host lookup failed for session=%s", convs[0].id, exc_info=True)
             return None
 
@@ -4061,21 +4061,12 @@ def create_app(
             runner_id, generation=connection.generation
         )
         await asyncio.gather(*cancelled, return_exceptions=True)
-        # Newest-wins guard: a superseded tunnel's teardown fires this
-        # hook after a fresh tunnel for the same ``runner_id`` already
-        # registered (``TunnelRegistry.register`` retires the old
-        # session, whose helper tasks then error out and run this
-        # teardown). Marking the runner's sessions ``failed`` here would
-        # clobber the live tunnel's recovery: reconnect-recovery
-        # (``_on_runner_connect`` -> ``_publish_runner_recovered_status``)
-        # may have just cleared a stale ``runner_disconnected`` failure,
-        # and this stale disconnect would silently re-fail the session.
-        # If a live tunnel is registered for this runner, the runner is
-        # NOT offline, so skip. Mirrors the registry's own
-        # generation-guarded ``deregister``.
-        if tunnel_registry.get(runner_id) is not None:
+        # Replaced tunnels still release their own initializers, but cannot
+        # cancel a newer outage or apply an old idle attestation to new work.
+        # The replacement may itself be gone before this cleanup finishes.
+        if connection.superseded or tunnel_registry.get(runner_id) is not None:
             _logger.info(
-                "Runner %s disconnect superseded by a live tunnel; skipping offline-marking",
+                "Runner %s disconnect superseded by a newer tunnel; skipping offline-marking",
                 runner_id,
             )
             return
