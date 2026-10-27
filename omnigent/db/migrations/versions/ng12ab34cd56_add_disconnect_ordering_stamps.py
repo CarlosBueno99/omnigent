@@ -27,6 +27,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     existing = {column["name"] for column in sa.inspect(op.get_bind()).get_columns(_TABLE)}
-    for name in reversed(_COLUMNS):
-        if name in existing:
-            op.drop_column(_TABLE, name)
+    with op.batch_alter_table(_TABLE) as batch_op:
+        for name in reversed(_COLUMNS):
+            if name in existing:
+                batch_op.drop_column(name)
