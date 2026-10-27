@@ -331,6 +331,10 @@ KUBERNETES_MANAGED_TOKEN_TTL_S = 7 * 24 * 3600
 # errors so an operator knows where to look inside the sandbox.
 _HOST_LOG_PATH = "/tmp/omnigent-host.log"
 
+# Deadline for reading a sandbox's logs before teardown, so a hung exec channel
+# cannot stall the delete or leave the sandbox running.
+SANDBOX_LOG_CAPTURE_TIMEOUT_S = 15.0
+
 # How long a message POST waits for an in-flight managed launch to
 # settle before giving up (see ManagedLaunchTracker). Covers the full
 # launch/wake pipeline ON TOP OF the host-registration wait
@@ -572,10 +576,14 @@ class ManagedLaunch:
     :param error: Failure detail once settled unsuccessfully, e.g.
         ``"managed sandbox launch failed: …"``. ``None`` while
         in flight and on success.
+    :param bound: Set once the session row records its new host. From
+        then on the host's replica can finish the launch and deliver
+        saved inputs, so a scheduled fire can hand off at this point.
     """
 
     settled: asyncio.Event
     error: str | None = None
+    bound: asyncio.Event = dataclass_field(default_factory=asyncio.Event)
 
 
 class ManagedLaunchTracker:
@@ -1803,11 +1811,29 @@ def _parse_single_provider_sandbox_config(raw: dict[str, object]) -> ManagedSand
         )
         token_ttl_s = MANAGED_TOKEN_TTL_S
     elif provider == "openshell":
+        openshell_section = _parse_provider_section(raw, "openshell")
+        if openshell_section is not None:
+            _reject_unknown_keys(
+                openshell_section,
+                {
+                    "image",
+                    "env",
+                    "cluster",
+                    "workspace",
+                    "providers",
+                    "node_selector",
+                    "runtime_class",
+                },
+                "sandbox.openshell",
+            )
         launcher_factory = _openshell_launcher_factory(
             image=_parse_provider_image(raw, "openshell"),
             env=_parse_provider_env(raw, "openshell"),
             cluster=_parse_provider_string(raw, "openshell", "cluster"),
             workspace=_parse_provider_string(raw, "openshell", "workspace"),
+            providers=_parse_provider_string_list(raw, "openshell", "providers"),
+            node_selector=_parse_provider_str_mapping(raw, "openshell", "node_selector"),
+            runtime_class=_parse_provider_string(raw, "openshell", "runtime_class"),
         )
         token_ttl_s = OPENSHELL_MANAGED_TOKEN_TTL_S
     elif provider in ("kubernetes", "agent_sandbox"):
@@ -2645,6 +2671,9 @@ def _openshell_launcher_factory(
     env: list[str] | None,
     cluster: str | None,
     workspace: str | None,
+    providers: list[str] | None,
+    node_selector: dict[str, str] | None,
+    runtime_class: str | None,
 ) -> Callable[[], SandboxHostLauncher]:
     """
     Build the launcher factory for the YAML ``provider: openshell`` path.
@@ -2661,6 +2690,8 @@ def _openshell_launcher_factory(
     :param workspace: OpenShell workspace for sandbox lifecycle, or
         ``None`` to resolve from ``$OMNIGENT_OPENSHELL_WORKSPACE``
         then ``"default"``.
+    :param providers: OpenShell credential provider names attached to
+        every created sandbox.
     :returns: A factory producing parameterized OpenShell launchers.
     """
 
@@ -2668,7 +2699,15 @@ def _openshell_launcher_factory(
         """Construct the OpenShell launcher (lazy SDK import inside)."""
         from omnigent.onboarding.sandboxes.openshell import OpenShellSandboxLauncher
 
-        return OpenShellSandboxLauncher(image=image, env=env, cluster=cluster, workspace=workspace)
+        return OpenShellSandboxLauncher(
+            image=image,
+            env=env,
+            cluster=cluster,
+            workspace=workspace,
+            providers=providers,
+            node_selector=node_selector,
+            runtime_class=runtime_class,
+        )
 
     return _build
 
@@ -2886,6 +2925,25 @@ def _parse_provider_env(raw: dict[str, object], provider: str) -> list[str] | No
             "'GIT_TOKEN']"
         )
     return [name.strip() for name in env]
+
+
+def _parse_provider_string_list(
+    raw: dict[str, object], provider: str, key: str
+) -> list[str] | None:
+    """Extract and validate an optional provider-name list."""
+    section = _parse_provider_section(raw, provider)
+    if section is None:
+        return None
+    value = section.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(
+        isinstance(name, str) and name.strip() for name in value
+    ):
+        raise ValueError(
+            f"server config 'sandbox.{provider}.{key}' must be a list of non-empty strings"
+        )
+    return [name.strip() for name in value]
 
 
 def _parse_provider_string(raw: dict[str, object], provider: str, key: str) -> str | None:
@@ -4454,6 +4512,8 @@ async def terminate_managed_host(
     host: Host,
     host_store: HostStore,
     config: ManagedSandboxDeployment | None,
+    *,
+    capture_logs: bool = False,
 ) -> None:
     """
     Terminate a managed host's sandbox and delete its host row.
@@ -4470,6 +4530,8 @@ async def terminate_managed_host(
     :param config: The deployment's current sandbox config (supplies
         the launcher for the provider-side terminate), or ``None``
         when managed hosts are no longer configured.
+    :param capture_logs: Log the in-sandbox host and runner log tails before
+        terminating, e.g. after a client saw the session's turn fail.
     """
     tombstone = await asyncio.to_thread(host_store.delete_host, host.host_id)
     if tombstone is None:
@@ -4478,6 +4540,10 @@ async def terminate_managed_host(
     sandbox_ids = dict.fromkeys((tombstone.sandbox_id, tombstone.terminating_sandbox_id))
     for sandbox_id in sandbox_ids:
         if sandbox_id is not None:
+            if capture_logs and launcher is not None:
+                await _log_sandbox_logs_best_effort(
+                    launcher, sandbox_id, host_id=tombstone.host_id
+                )
             terminated = await _terminate_sandbox_best_effort(
                 launcher,
                 sandbox_id,
@@ -4490,6 +4556,39 @@ async def terminate_managed_host(
                     tombstone.host_id,
                     sandbox_id=sandbox_id,
                 )
+
+
+async def _log_sandbox_logs_best_effort(
+    launcher: SandboxHostLauncher, sandbox_id: str, *, host_id: str
+) -> None:
+    """Log a sandbox's host and runner log tails; never raises."""
+    try:
+        logs = await asyncio.wait_for(
+            asyncio.to_thread(launcher.capture_logs, sandbox_id),
+            timeout=SANDBOX_LOG_CAPTURE_TIMEOUT_S,
+        )
+    except TimeoutError:
+        _logger.warning(
+            "Timed out after %ss capturing logs from managed sandbox %s for host %s",
+            SANDBOX_LOG_CAPTURE_TIMEOUT_S,
+            sandbox_id,
+            host_id,
+        )
+        return
+    except Exception:  # diagnostics must not block teardown.
+        _logger.warning(
+            "Failed to capture logs from managed sandbox %s for host %s",
+            sandbox_id,
+            host_id,
+            exc_info=True,
+        )
+        return
+    _logger.error(
+        "Managed sandbox %s logs before teardown (host %s):\n%s",
+        sandbox_id,
+        host_id,
+        logs or "<no logs captured>",
+    )
 
 
 async def _terminate_sandbox_best_effort(
