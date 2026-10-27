@@ -109,10 +109,34 @@ def browser_is_remote() -> bool:
     # select() can't poll a Windows console handle.
     if sys.platform == "win32" or not sys.stdin.isatty():
         return False
-    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
+    if _in_ssh_session():
         return True
     has_display = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
     return sys.platform.startswith("linux") and not has_display
+
+
+def opens_browser() -> bool:
+    """
+    Whether ``databricks auth login`` will try to open a browser here.
+
+    Over SSH an opener on this machine can't reach the person signing in,
+    so the CLI is told to print the link instead. Elsewhere it keeps its
+    usual launch, which a local relay (or a desktop) can still serve.
+
+    :returns: ``False`` when the CLI will only print the sign-in link.
+    """
+    if os.environ.get("BROWSER") == "none":
+        return False
+    return not (browser_is_remote() and _in_ssh_session())
+
+
+def _in_ssh_session() -> bool:
+    """
+    Whether this process runs inside an interactive SSH session.
+
+    :returns: ``True`` when ``SSH_CONNECTION`` or ``SSH_TTY`` is set.
+    """
+    return bool(os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"))
 
 
 def run_databricks_auth_login(argv: Sequence[str]) -> int:
@@ -141,8 +165,9 @@ def _run_with_pasted_redirect(argv: Sequence[str]) -> int:
     :param argv: The full ``databricks auth login`` command.
     :returns: The CLI's exit code.
     """
-    # BROWSER=none makes the CLI print the link rather than try (and maybe
-    # take over the terminal with) a text-mode browser on this machine.
+    # The CLI prints the link only when it can't open a browser, so the paste
+    # prompt appears exactly when the redirect has nowhere to land.
+    env = dict(os.environ) if opens_browser() else {**os.environ, "BROWSER": "none"}
     proc = subprocess.Popen(
         list(argv),
         stdin=subprocess.DEVNULL,
@@ -150,7 +175,7 @@ def _run_with_pasted_redirect(argv: Sequence[str]) -> int:
         stderr=subprocess.STDOUT,
         text=True,
         errors="replace",
-        env={**os.environ, "BROWSER": "none"},
+        env=env,
     )
     assert proc.stdout is not None
     authorize_urls: queue.Queue[str] = queue.Queue()

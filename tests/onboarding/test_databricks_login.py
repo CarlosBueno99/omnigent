@@ -15,7 +15,11 @@ from typing import TYPE_CHECKING
 import pytest
 
 from omnigent.onboarding import databricks_login
-from omnigent.onboarding.databricks_login import browser_is_remote, run_databricks_auth_login
+from omnigent.onboarding.databricks_login import (
+    browser_is_remote,
+    opens_browser,
+    run_databricks_auth_login,
+)
 from tests._helpers.live_server import reserve_port
 
 if TYPE_CHECKING:
@@ -78,23 +82,30 @@ def pasted(monkeypatch: pytest.MonkeyPatch) -> Iterator[int]:
     read_fd, write_fd = os.pipe()
     monkeypatch.setattr(sys, "stdin", os.fdopen(read_fd, "r"))
     monkeypatch.setattr(databricks_login, "browser_is_remote", lambda: True)
-    monkeypatch.delenv("BROWSER", raising=False)
+    for name in ("BROWSER", "SSH_CONNECTION", "SSH_TTY"):
+        monkeypatch.delenv(name, raising=False)
     yield write_fd
     os.close(write_fd)
     sys.stdin.close()
 
 
 @pytest.mark.parametrize(
-    ("env", "platform", "tty", "expected"),
+    ("env", "platform", "tty", "remote", "opens"),
     [
-        ({"SSH_CONNECTION": "10.0.0.1 5 10.0.0.2 22"}, "darwin", True, True),
-        ({}, "linux", True, True),
-        ({"BROWSER": "none", "DISPLAY": ":0", "SSH_TTY": "/dev/pts/1"}, "linux", True, True),
-        ({"BROWSER": "www-browser", "SSH_TTY": "/dev/pts/1"}, "linux", True, False),
-        ({"DISPLAY": ":0"}, "linux", True, False),
-        ({}, "darwin", True, False),
-        ({"SSH_CONNECTION": "10.0.0.1 5 10.0.0.2 22"}, "linux", False, False),
-        ({"SSH_CONNECTION": "10.0.0.1 5 10.0.0.2 22"}, "win32", True, False),
+        ({"SSH_CONNECTION": "10.0.0.1 5 10.0.0.2 22"}, "darwin", True, True, False),
+        ({}, "linux", True, True, True),
+        (
+            {"BROWSER": "none", "DISPLAY": ":0", "SSH_TTY": "/dev/pts/1"},
+            "linux",
+            True,
+            True,
+            False,
+        ),
+        ({"BROWSER": "www-browser", "SSH_TTY": "/dev/pts/1"}, "linux", True, False, True),
+        ({"DISPLAY": ":0"}, "linux", True, False, True),
+        ({}, "darwin", True, False, True),
+        ({"SSH_CONNECTION": "10.0.0.1 5 10.0.0.2 22"}, "linux", False, False, True),
+        ({"SSH_CONNECTION": "10.0.0.1 5 10.0.0.2 22"}, "win32", True, False, True),
     ],
     ids=[
         "ssh",
@@ -112,7 +123,8 @@ def test_browser_is_remote(
     env: dict[str, str],
     platform: str,
     tty: bool,
-    expected: bool,
+    remote: bool,
+    opens: bool,
 ) -> None:
     for name in ("BROWSER", "SSH_CONNECTION", "SSH_TTY", "DISPLAY", "WAYLAND_DISPLAY"):
         monkeypatch.delenv(name, raising=False)
@@ -121,12 +133,23 @@ def test_browser_is_remote(
     monkeypatch.setattr(sys, "platform", platform)
     monkeypatch.setattr(sys, "stdin", _Stdin(tty=tty))
 
-    assert browser_is_remote() is expected
+    assert browser_is_remote() is remote
+    assert opens_browser() is opens
 
 
+@pytest.mark.parametrize(
+    ("ssh", "browser"), [(True, "none"), (False, "None")], ids=["ssh", "local"]
+)
 def test_pasted_redirect_reaches_the_cli_listener(
-    fake_cli: list[str], pasted: int, capsys: pytest.CaptureFixture[str]
+    fake_cli: list[str],
+    pasted: int,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    ssh: bool,
+    browser: str,
 ) -> None:
+    if ssh:
+        monkeypatch.setenv("SSH_CONNECTION", "10.0.0.1 5 10.0.0.2 22")
     with reserve_port() as sock:
         port = sock.getsockname()[1]
         os.write(
@@ -138,7 +161,7 @@ def test_pasted_redirect_reaches_the_cli_listener(
 
     out = capsys.readouterr().out
     assert returncode == 0
-    assert "BROWSER=none" in out
+    assert f"BROWSER={browser}" in out
     assert out.index("/oidc/v1/authorize") < out.index("finish signing in by hand")
     assert f"That isn't the http://localhost:{port}/?code=... address" in out
 

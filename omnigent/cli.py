@@ -13514,12 +13514,13 @@ def _run_databricks_browser_login(workspace_host: str, org_id: str | None = None
     # distinct workspaces don't clobber each other under the CLI's ``DEFAULT``.
     from urllib.parse import urlsplit
 
-    from omnigent.onboarding.databricks_login import run_databricks_auth_login
+    from omnigent.onboarding.databricks_login import opens_browser, run_databricks_auth_login
 
     split = urlsplit(workspace_host.rstrip("/"))
     host = split.hostname or split.netloc or split.path
     profile = host.split(".")[0]
-    click.echo(f"Opening browser to log in to {login_host} (profile {profile}) ...")
+    action = "Opening browser to log in" if opens_browser() else "Signing in"
+    click.echo(f"{action} to {login_host} (profile {profile}) ...")
     returncode = run_databricks_auth_login(
         [databricks_bin, "auth", "login", "--host", login_host, "--profile", profile]
     )
