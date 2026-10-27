@@ -9929,6 +9929,7 @@ async def _delete_native_bridge_dirs(
     )
     from omnigent.harnesses.claude_native.bridge import (
         BRIDGE_ID_LABEL_KEY,
+        read_active_session_id,
     )
     from omnigent.harnesses.claude_native.bridge import (
         bridge_dir_for_bridge_id as claude_bridge_dir,
@@ -9967,6 +9968,7 @@ async def _delete_native_bridge_dirs(
         bridge_dir_for_session_id as qwen_bridge_dir,
     )
     from omnigent.inner.native_attachments import attachment_cache_dir
+    from omnigent.native.native_bridge_common import try_bridge_dir_cleanup_lock
 
     labels: dict[str, str] = {}
     if server_client is not None:
@@ -9975,11 +9977,13 @@ async def _delete_native_bridge_dirs(
             session_id=session_id,
         )
 
-    targets = {
-        antigravity_bridge_dir(labels.get(ANTIGRAVITY_NATIVE_BRIDGE_ID_LABEL_KEY) or session_id),
-        antigravity_bridge_dir(session_id),
+    claude_targets = {
         claude_bridge_dir(labels.get(BRIDGE_ID_LABEL_KEY) or session_id),
         claude_bridge_dir(session_id),
+    }
+    targets = claude_targets | {
+        antigravity_bridge_dir(labels.get(ANTIGRAVITY_NATIVE_BRIDGE_ID_LABEL_KEY) or session_id),
+        antigravity_bridge_dir(session_id),
         codex_bridge_dir(labels.get(CODEX_NATIVE_BRIDGE_ID_LABEL_KEY) or session_id),
         codex_bridge_dir(session_id),
         cursor_bridge_dir(session_id),
@@ -9992,17 +9996,38 @@ async def _delete_native_bridge_dirs(
         pi_bridge_dir(session_id),
         qwen_bridge_dir(session_id),
     }
-    # A cache can survive a missing bridge directory, including after a reboot.
-    targets.update(attachment_cache_dir(target) for target in tuple(targets))
-    for target in targets:
+    for bridge_target in targets:
         try:
-            shutil.rmtree(target, ignore_errors=False)
-        except FileNotFoundError:
-            pass
+            lock = (
+                try_bridge_dir_cleanup_lock(bridge_target)
+                if bridge_target in claude_targets
+                else contextlib.nullcontext(True)
+            )
+            with lock as acquired:
+                if not acquired:
+                    continue
+                if bridge_target in claude_targets:
+                    owner = read_active_session_id(bridge_target)
+                    if owner is not None and owner != session_id:
+                        continue
+                # /clear can transfer a Claude bridge and its cache to a new session.
+                # A cache can also survive a missing bridge directory after a reboot.
+                for target in (bridge_target, attachment_cache_dir(bridge_target)):
+                    try:
+                        shutil.rmtree(target, ignore_errors=False)
+                    except FileNotFoundError:
+                        pass
+                    except OSError as exc:
+                        _logger.debug(
+                            "Failed to remove native session directory %s for session %s: %s",
+                            target,
+                            session_id,
+                            exc,
+                        )
         except OSError as exc:
             _logger.debug(
-                "Failed to remove native session directory %s for session %s: %s",
-                target,
+                "Failed to clean native bridge directory %s for session %s: %s",
+                bridge_target,
                 session_id,
                 exc,
             )
