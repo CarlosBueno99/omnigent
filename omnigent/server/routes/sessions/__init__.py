@@ -174,6 +174,7 @@ from omnigent.util.reasoning_effort import (
 # objects. The mutable caches are shared by reference across the package.
 # isort: off
 from omnigent.server.routes._sessions.common import (
+    CLIENT_SESSION_EVENT_TYPES as CLIENT_SESSION_EVENT_TYPES,
     COST_CONTROL_OVERRIDE_VALUES as COST_CONTROL_OVERRIDE_VALUES,
     _ALLOWED_EVENT_TYPES as _ALLOWED_EVENT_TYPES,
     _ANTIGRAVITY_NATIVE_ELICITATION_HOOK_TIMEOUT_S as _ANTIGRAVITY_NATIVE_ELICITATION_HOOK_TIMEOUT_S,
@@ -213,6 +214,7 @@ from omnigent.server.routes._sessions.common import (
     _CODEX_NATIVE_SUBAGENT_TOOL_CALL_ID_LABEL_KEY as _CODEX_NATIVE_SUBAGENT_TOOL_CALL_ID_LABEL_KEY,
     _CODEX_NATIVE_SUBAGENT_WRAPPER_LABEL_VALUE as _CODEX_NATIVE_SUBAGENT_WRAPPER_LABEL_VALUE,
     _CODEX_NATIVE_WRAPPER_LABEL_VALUE as _CODEX_NATIVE_WRAPPER_LABEL_VALUE,
+    _CLEAR_TYPE as _CLEAR_TYPE,
     _COMPACT_TYPE as _COMPACT_TYPE,
     _CURSOR_FORK_HISTORY_HARNESSES as _CURSOR_FORK_HISTORY_HARNESSES,
     _CURSOR_NATIVE_HARNESS as _CURSOR_NATIVE_HARNESS,
@@ -279,6 +281,7 @@ from omnigent.server.routes._sessions.common import (
     _NATIVE_TERMINAL_ENSURE_FAILED_CODE as _NATIVE_TERMINAL_ENSURE_FAILED_CODE,
     _NATIVE_TERMINAL_START_FAILED_CODE as _NATIVE_TERMINAL_START_FAILED_CODE,
     _OPENCODE_NATIVE_WRAPPER_LABEL_VALUE as _OPENCODE_NATIVE_WRAPPER_LABEL_VALUE,
+    _PI_EXTENSION_UI_HOOK_TIMEOUT_S as _PI_EXTENSION_UI_HOOK_TIMEOUT_S,
     _PI_NATIVE_WRAPPER_LABEL_VALUE as _PI_NATIVE_WRAPPER_LABEL_VALUE,
     _RACE_TASK_REAP_TIMEOUT_S as _RACE_TASK_REAP_TIMEOUT_S,
     _RUNNER_CLIENT_RESOLVE_ATTEMPTS as _RUNNER_CLIENT_RESOLVE_ATTEMPTS,
@@ -898,6 +901,7 @@ def create_sessions_router(
     from omnigent.server.routes.sessions.routes_items import register_items_routes
     from omnigent.server.routes.sessions.routes_permissions import register_permissions_routes
     from omnigent.server.routes.sessions.routes_resources import register_resources_routes
+    from omnigent.server.routes.sessions.routes_ui import register_ui_routes
 
     register_core_routes(
         router,
@@ -947,6 +951,13 @@ def create_sessions_router(
         permission_store=permission_store,
         host_registry=host_registry,
         register_initial_file_upload=register_initial_file_upload,
+    )
+
+    register_ui_routes(
+        router,
+        conversation_store=conversation_store,
+        auth_provider=auth_provider,
+        permission_store=permission_store,
     )
 
     register_browser_routes(
