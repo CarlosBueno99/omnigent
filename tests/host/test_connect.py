@@ -274,16 +274,82 @@ async def test_host_skills_distinguishes_empty_and_failure(
     host = _make_host_process()
     frame = HostSkillsFrame(request_id="r", harness="claude-native", path=str(tmp_path))
     monkeypatch.setattr(skill_sources, "resolve_harness_skills", lambda *_: [])
-    assert host._handle_skills(frame) == HostSkillsResultFrame(request_id="r", status="ok")
+    with _captured_host_debug_rows() as rows:
+        assert host._handle_skills(frame) == HostSkillsResultFrame(request_id="r", status="ok")
+    assert rows == []
 
     def fail(*_args: object) -> None:
         raise OSError("unreadable skill directory")
 
     monkeypatch.setattr(skill_sources, "resolve_harness_skills", fail)
     host = _make_host_process()
-    result = host._handle_skills(frame)
+    with _captured_host_debug_rows() as rows:
+        result = host._handle_skills(frame)
     assert result.status == "failed"
     assert result.error_code == "discovery_failed"
+    assert rows[0]["session_id"] is None
+    assert rows[0]["attributes"]["discovery_scope"] == "directory"
+    assert rows[0]["attributes"]["error_type"] == "OSError"
+
+
+@pytest.mark.parametrize("failure", ["unauthorized", "unavailable", "timeout", "disk_full"])
+async def test_host_skill_failure_retains_session_and_typed_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    import httpx
+
+    host = _make_host_process()
+    frame = HostSkillsFrame(
+        request_id="skill-request",
+        harness="session",
+        path=str(tmp_path),
+        session_id="session-a",
+        agent_id="agent-a",
+        agent_version="1",
+    )
+    request = httpx.Request("GET", "https://server.test/private-bundle?opaque=private-value")
+
+    def fetch(_frame: HostSkillsFrame) -> httpx.Response:
+        if failure == "timeout":
+            raise httpx.ReadTimeout("private timeout detail", request=request)
+        if failure == "disk_full":
+            raise OSError(errno.ENOSPC, "private local path")
+        return httpx.Response(401 if failure == "unauthorized" else 503, request=request)
+
+    monkeypatch.setattr(host._skill_discovery, "_fetch_bundle", fetch)
+    with _captured_host_debug_rows() as rows:
+        result = host._handle_skills(frame)
+
+    assert result.status == "failed"
+    assert result.error_code == "discovery_failed"
+    assert result.error == "skill discovery failed; see the host log"
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["event_name"] == "host_skill_discovery_failed"
+    assert row["session_id"] == "session-a"
+    attrs = row["attributes"]
+    assert attrs["request_id"] == "skill-request"
+    assert attrs["host_id"] == "host_test_connect"
+    assert attrs["harness"] == "session"
+    assert attrs["discovery_scope"] == "session"
+    assert (
+        attrs["error_type"]
+        == {
+            "unauthorized": "HTTPStatusError",
+            "unavailable": "HTTPStatusError",
+            "timeout": "ReadTimeout",
+            "disk_full": "OSError",
+        }[failure]
+    )
+    if failure in ("unauthorized", "unavailable"):
+        assert attrs["http_status"] == ("401" if failure == "unauthorized" else "503")
+    else:
+        assert "http_status" not in attrs
+    if failure == "disk_full":
+        assert attrs["errno"] == str(errno.ENOSPC)
+    else:
+        assert "errno" not in attrs
+    assert "private" not in json.dumps(attrs)
 
 
 async def test_skill_bundle_fetch_survives_a_deleted_ssl_cert_file(
@@ -2357,10 +2423,13 @@ async def test_connect_watchdog_silent_on_intentional_stop(
 
 @pytest.mark.parametrize("had_connected", [None, False, True])
 @pytest.mark.parametrize("send_fails", [False, True])
+@pytest.mark.parametrize("console_error", [None, BrokenPipeError, ValueError])
 async def test_unreported_exit_flushes_after_reconnect(
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
     had_connected: bool | None,
     send_fails: bool,
+    console_error: type[Exception] | None,
 ) -> None:
     """An exit report that raced a disconnect is sent after the next hello.
 
@@ -2379,6 +2448,10 @@ async def test_unreported_exit_flushes_after_reconnect(
     )
     assert "runner_parked" in host._unreported_exits
     tunnel = _FakeTunnel()
+    if console_error is not None:
+        monkeypatch.setattr(
+            "omnigent.host.connect.print", Mock(side_effect=console_error), raising=False
+        )
 
     # _serve_frames sends hello, flushes parked reports, then hits the
     # fake recv's immediate disconnect.
@@ -7859,10 +7932,12 @@ async def test_sustained_recycle_failures_fall_back_to_backoff(
     assert prompt == [0, 1, 2], f"prompt cadence must stop after the streak cap: {prompt}"
 
 
+@pytest.mark.parametrize("console_error", [None, BrokenPipeError, ValueError])
 async def test_silent_connect_streak_escalates_and_slows_reconnects(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     capsys: pytest.CaptureFixture[str],
+    console_error: type[Exception] | None,
 ) -> None:
     """Repeated accepted-but-silent connections escalate to slow backoff."""
     monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
@@ -7873,6 +7948,10 @@ async def test_silent_connect_streak_escalates_and_slows_reconnects(
     spy = _ConnectSpy([None, None, None, None, None, asyncio.CancelledError()])
     _patch_connect(monkeypatch, spy)
     host = _host()
+    if console_error is not None:
+        monkeypatch.setattr(
+            "omnigent.host.connect.print", Mock(side_effect=console_error), raising=False
+        )
 
     with caplog.at_level(logging.WARNING, logger="omnigent.host.connect"):
         await host.run()
@@ -7880,7 +7959,9 @@ async def test_silent_connect_streak_escalates_and_slows_reconnects(
     errors = [record for record in caplog.records if record.levelno == logging.ERROR]
     assert len(errors) == 1
     assert "3 consecutive connections but never responded" in errors[0].message
-    assert capsys.readouterr().err.count("never responded") == 1
+    if console_error is None:
+        assert capsys.readouterr().err.count("never responded") == 1
+    assert spy.call_count == 6
     reconnects = [
         record.message for record in caplog.records if "Reconnecting in" in record.message
     ]
