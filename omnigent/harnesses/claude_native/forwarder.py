@@ -4531,7 +4531,7 @@ async def _forward_available_status_events(
                                         extra={"session_id": session_id},
                                     )
                                     return durable
-                        except Exception:
+                        except Exception:  # noqa: BLE001 - retain the compaction cursor on failure
                             # Non-HTTP failure (e.g. reading Claude session
                             # messages). Hold the cursor and retry next poll.
                             _logger.warning(
@@ -4737,6 +4737,16 @@ async def _forward_available_status_events(
             # assistant entry still inheriting it is marked as a scheduled
             # wake (see _promote_pending_settle and the bridge parser).
             dedupe.pending_settled_response_id = response_id
+            # Save the latch before the hook cursor can make this edge unreplayable.
+            transcript_state = await asyncio.to_thread(_read_forward_state, bridge_dir)
+            if transcript_state is not None:
+                await _write_forward_state_async(
+                    bridge_dir,
+                    replace(
+                        transcript_state,
+                        pending_settled_response_id=dedupe.pending_settled_response_id,
+                    ),
+                )
         durable = next_durable
         await _write_hook_state_async(bridge_dir, durable)
     durable = HookForwardState(
@@ -5086,7 +5096,7 @@ async def _handle_compact_summary_item(
             extra={"session_id": session_id},
         )
         return False
-    except Exception:
+    except Exception:  # noqa: BLE001 - retry compaction reads without advancing the cursor
         # Non-HTTP failure (e.g. reading Claude session messages). Retry.
         _logger.warning(
             "Unexpected error persisting compaction boundary (transcript path) for %s; seq=%s",
