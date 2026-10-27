@@ -5777,13 +5777,20 @@ describe("Composer session autofocus", () => {
     expect(focusTarget()).toHaveFocus();
   });
 
-  it("does not open the software keyboard once it enables on mobile", () => {
-    const matchMedia = window.matchMedia;
-    vi.spyOn(window, "matchMedia").mockImplementation((query) => ({
-      ...matchMedia(query),
-      matches: query.includes("max-width"),
-    }));
+  it.each([
+    ["on mobile", true],
+    ["after the viewport turns mobile", false],
+  ])("does not open the software keyboard once it enables %s", (_case, mobileAtOpen) => {
+    const emulateMobileViewport = () => {
+      const matchMedia = window.matchMedia;
+      vi.spyOn(window, "matchMedia").mockImplementation((query) => ({
+        ...matchMedia(query),
+        matches: query.includes("max-width"),
+      }));
+    };
+    if (mobileAtOpen) emulateMobileViewport();
     const { rerender } = render(<Composer {...composerProps({ disabled: true })} />);
+    if (!mobileAtOpen) emulateMobileViewport();
 
     rerender(<Composer {...composerProps()} />);
 
