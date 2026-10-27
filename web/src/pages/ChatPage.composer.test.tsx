@@ -5736,6 +5736,32 @@ describe("Composer session autofocus", () => {
     expect(textarea()).not.toHaveFocus();
   });
 
+  it.each([
+    ["focuses the composer", () => {}, () => textarea()],
+    [
+      "leaves focus on another control",
+      () => screen.getByRole("button", { name: "elsewhere" }).focus(),
+      () => screen.getByRole("button", { name: "elsewhere" }),
+    ],
+  ])("%s once it enables after switching to a disabled session", (_case, moveOn, focusTarget) => {
+    const page = (disabled: boolean) => (
+      <>
+        <button type="button">elsewhere</button>
+        <Composer {...composerProps({ disabled })} />
+      </>
+    );
+    const { rerender } = render(page(false));
+    act(() => textarea().blur());
+    rerender(page(true));
+    act(() => setComposerState({ conversationId: "conv_autofocus_next" }));
+    expect(textarea()).not.toHaveFocus();
+    act(moveOn);
+
+    rerender(page(false));
+
+    expect(focusTarget()).toHaveFocus();
+  });
+
   it("does not open the software keyboard once it enables on mobile", () => {
     const matchMedia = window.matchMedia;
     vi.spyOn(window, "matchMedia").mockImplementation((query) => ({
