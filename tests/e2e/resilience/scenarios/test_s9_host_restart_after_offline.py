@@ -95,14 +95,13 @@ def test_s9_host_restart_after_offline(
             f"without its runner; status={lab.snapshot(driver.session_id).get('status')}",
         )
 
-        contract.eventually(
+        held_turn_ended = contract.eventually(
             lambda: True if lab.snapshot(driver.session_id).get("status") != "running" else None,
             timeout=contract.RECOVERY_S + 60,
         )
-        next_turn = contract.eventually_round_trip(driver)
-        report.check(
-            "next_turn_round_trips",
-            next_turn is not None,
-            "" if next_turn else "a new message after the host returned got no reply",
-        )
+        next_turn = contract.eventually_round_trip(driver) if held_turn_ended else None
+        detail = "a new message after the host returned got no reply"
+        if not held_turn_ended:
+            detail = "the held turn was still running, so no new message was sent"
+        report.check("next_turn_round_trips", next_turn is not None, "" if next_turn else detail)
     report.require()

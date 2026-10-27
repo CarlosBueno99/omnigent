@@ -780,6 +780,8 @@ interface WorkspacePanelProps {
    *  connect affordance (Reconnecting… / Offline). Absent is treated as
    *  ready. */
   liveness?: SessionLiveness;
+  /** The open session's host is offline; its side chats share that host and wait for it. */
+  hostOffline?: boolean;
   /** Called when a shell create is initiated from the "+" menu, so the new
    *  shell is focused as soon as its tab lands (not only on the create POST). */
   onShellCreateStart?: () => void;
@@ -857,6 +859,7 @@ function WorkspacePanelImpl({
   filesPanelShowHidden,
   onShowHiddenChange,
   liveness,
+  hostOffline = false,
   onShellCreateStart,
   onShellCreateFailed,
   mobileSideChatsOpen = false,
@@ -1066,8 +1069,7 @@ function WorkspacePanelImpl({
       <SideChatPane
         key={selectedSideChat}
         childId={selectedSideChat}
-        // A side chat shares its source session's runner and host.
-        hostOffline={liveness?.kind === "host_offline"}
+        hostOffline={hostOffline}
         selectionParentId={
           (isMobile ? mobileSideChatsOpen : open && sideChatSelected) ? conversationId : undefined
         }
