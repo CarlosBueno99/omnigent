@@ -755,7 +755,7 @@ function PullRequestCheckCounts({
       <CheckPill
         compact={compact}
         label="cancelled"
-        count={checks.cancelled ?? 0}
+        count={compact ? 0 : (checks.cancelled ?? 0)}
         runs={checks.runs.filter((r) => r.bucket === "cancelled")}
         icon={<BanIcon className="size-2.5 text-muted-foreground" />}
         className="border-border bg-muted text-muted-foreground"
@@ -763,7 +763,7 @@ function PullRequestCheckCounts({
       <CheckPill
         compact={compact}
         label="skipped"
-        count={checks.skipped ?? 0}
+        count={compact ? 0 : (checks.skipped ?? 0)}
         runs={checks.runs.filter((r) => r.bucket === "skipped")}
         icon={<CircleMinusIcon className="size-2.5 text-muted-foreground" />}
         className="border-border bg-muted text-muted-foreground"
@@ -1112,8 +1112,7 @@ function PullRequestListRow({
       <div className="flex max-w-[45%] shrink-0 flex-wrap items-center justify-end gap-1 text-xs text-muted-foreground">
         {ready && pr ? (
           <>
-            {(checksUnavailable || !!checks?.failing || !!checks?.pending || !!checks?.cancelled) &&
-              checkStatus}
+            {(checksUnavailable || !!checks?.failing || !!checks?.pending) && checkStatus}
             <PullRequestMerge
               compact
               conversationId={conversationId}
