@@ -1145,6 +1145,12 @@ dedupe; the first-party web client deliberately does NOT (it keeps a
 client temp id for React-key stability and relies on a stable key +
 FIFO matching), so adoption is optional, not required.
 
+When the native harness explicitly reports that delivery failed before handoff,
+the server persists the rejected message alongside its error and removes only
+that queued input. Clients without a message stable ID are supported through
+the server's exact pending ID and delivery-attempt ID. Failures with uncertain
+acceptance stay pending for transcript reconciliation; they are not resent.
+
 **Interrupt is dual-path on purpose.** Posting `{"type": "interrupt"}`
 is exposed as an event for API uniformity, but it does NOT enter the
 queue — the route invokes the loop's `cancel_loop` directly so the
