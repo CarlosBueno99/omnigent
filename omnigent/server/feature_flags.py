@@ -8,10 +8,13 @@ is built, giving each one an immutable snapshot.
 
 from __future__ import annotations
 
+import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+
+_logger = logging.getLogger(__name__)
 
 FEATURES_ENV_VAR = "OMNIGENT_FEATURES"
 _REMOVED_HARNESS_INSTALL_ENV_VAR = "OMNIGENT_HARNESS_INSTALL_ENABLED"
@@ -20,6 +23,7 @@ _REMOVED_HARNESS_INSTALL_ENV_VAR = "OMNIGENT_HARNESS_INSTALL_ENABLED"
 class Feature(StrEnum):
     """Canonical release-feature keys accepted by ``OMNIGENT_FEATURES``."""
 
+    SESSION_ORCHESTRATION = "session_orchestration"
     USAGE_PAGE = "usage_page"
     HARNESS_INSTALL = "harness_install"
     CANVAS = "canvas"
@@ -31,6 +35,7 @@ class Feature(StrEnum):
     WORKSPACE_CONTENT_SEARCH = "workspace_content_search"
     GRID_SESSIONS_DISPLAY_UI = "grid_sessions_display_ui"
     AUTOMATIONS_V2 = "automations_v2"
+    SPLITTABLE_TERMINAL_VIEW_UI = "splittable_terminal_view_ui"
 
 
 @dataclass(frozen=True)
@@ -47,6 +52,14 @@ class FeatureDefinition:
 
 FEATURE_DEFINITIONS: tuple[FeatureDefinition, ...] = (
     FeatureDefinition(
+        feature=Feature.SESSION_ORCHESTRATION,
+        description="Private-owner session messaging and independent worker creation",
+        owner="server",
+        review_by_release="0.22.0",
+        frontend_visible=False,
+        default_enabled=True,
+    ),
+    FeatureDefinition(
         feature=Feature.AUTOMATIONS_V2,
         description=(
             "Automation improvements across scheduling, run management, execution targets and UI"
@@ -59,6 +72,12 @@ FEATURE_DEFINITIONS: tuple[FeatureDefinition, ...] = (
         description="Local session grids with up to four live conversations",
         owner="web",
         review_by_release="0.20.0",
+    ),
+    FeatureDefinition(
+        feature=Feature.SPLITTABLE_TERMINAL_VIEW_UI,
+        description="Split the main terminal view into several shell panes",
+        owner="web",
+        review_by_release="0.22.0",
     ),
     FeatureDefinition(
         feature=Feature.USAGE_PAGE,
@@ -141,6 +160,18 @@ class FeatureFlags:
     def enabled_names(self) -> tuple[str, ...]:
         """Return enabled canonical names in stable order."""
         return tuple(sorted(feature.value for feature in self.enabled_features))
+
+
+HarnessInstallGate = bool | Callable[[], bool]
+
+
+def harness_install_enabled(gate: HarnessInstallGate) -> bool:
+    """Resolve the harness-install gate for the current request."""
+    try:
+        return bool(gate() if callable(gate) else gate)
+    except Exception:  # deployment gates fail closed
+        _logger.warning("harness_install gate failed; disabling harness setup", exc_info=True)
+        return False
 
 
 def resolve_feature_flags(environ: Mapping[str, str] | None = None) -> FeatureFlags:
