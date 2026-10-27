@@ -1230,7 +1230,7 @@ def harness_cli_logged_in(key: str, timeout: float = _DEFAULT_CLI_PROBE_TIMEOUT_
     spec = harness_install_spec(key)
     if spec is None or spec.status_args is None:
         return False
-    binary = resolve_cli_binary(spec.binary) if key == GEMINI_FAMILY else shutil.which(spec.binary)
+    binary = harness_cli_binary(key)
     if binary is None:
         return False
     probe_cwd = _cli_probe_cwd()
@@ -1305,10 +1305,9 @@ def harness_login(key: str) -> bool:
     spec = harness_install_spec(key)
     if spec is None or spec.login_args is None:
         return False
-    binary = resolve_cli_binary(spec.binary) if key == GEMINI_FAMILY else shutil.which(spec.binary)
+    binary = harness_cli_binary(key)
     if binary is None:
         return False
-    argv_binary = binary if key == GEMINI_FAMILY else spec.binary
     if harness_cli_logged_in(key):
         return True
     try:
@@ -1324,7 +1323,7 @@ def harness_login(key: str) -> bool:
                 tty_fd = os.open("/dev/tty", os.O_RDWR)
             except OSError:
                 tty_fd = None
-        argv = [argv_binary, *spec.login_args]
+        argv = [binary, *spec.login_args]
         try:
             if tty_fd is not None:
                 subprocess.run(
@@ -1358,10 +1357,11 @@ def harness_logout(key: str) -> bool:
     spec = harness_install_spec(key)
     if spec is None or spec.logout_args is None:
         return False
-    if shutil.which(spec.binary) is None:
+    binary = harness_cli_binary(key)
+    if binary is None:
         return False
     try:
-        subprocess.run([spec.binary, *spec.logout_args], check=False, timeout=60)
+        subprocess.run([binary, *spec.logout_args], check=False, timeout=60)
     except (OSError, subprocess.TimeoutExpired):
         return False
     # Drop cached logged-in verdicts so the confirmation below re-probes —

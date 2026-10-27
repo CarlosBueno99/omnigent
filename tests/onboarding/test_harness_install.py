@@ -973,8 +973,8 @@ def test_harness_login_skips_when_already_logged_in(monkeypatch: pytest.MonkeyPa
 @pytest.mark.parametrize(
     "key,expected_argv",
     [
-        (ANTHROPIC_FAMILY, ["claude", "auth", "login", "--claudeai"]),
-        (OPENAI_FAMILY, ["codex", "login"]),
+        (ANTHROPIC_FAMILY, ["/usr/bin/claude", "auth", "login", "--claudeai"]),
+        (OPENAI_FAMILY, ["/usr/bin/codex", "login"]),
         (GEMINI_FAMILY, ["/usr/bin/agy"]),
     ],
 )
@@ -1150,8 +1150,8 @@ def test_harness_login_false_for_harness_without_login(monkeypatch: pytest.Monke
 @pytest.mark.parametrize(
     "key,expected_argv",
     [
-        (ANTHROPIC_FAMILY, ["claude", "auth", "logout"]),
-        (OPENAI_FAMILY, ["codex", "logout"]),
+        (ANTHROPIC_FAMILY, ["/usr/bin/claude", "auth", "logout"]),
+        (OPENAI_FAMILY, ["/usr/bin/codex", "logout"]),
     ],
 )
 def test_harness_logout_runs_cli_logout_then_verifies(
