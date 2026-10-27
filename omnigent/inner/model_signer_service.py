@@ -231,6 +231,8 @@ def _parse_strict_response_head(status_line: bytes, headers_raw: bytes) -> _Pars
 class _SignerRelay(EgressProxy):
     """Exact-route MITM relay whose credential exists only in this process."""
 
+    _accepts_plain_http_tunnels = False
+
     def __init__(
         self,
         *,

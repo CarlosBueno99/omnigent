@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from omnigent.inner.egress.ca import ensure_ca, ensure_ca_bundle
 from omnigent.inner.model_egress import FrozenModelRoute
 from omnigent.inner.model_signer_service import (
     _MAX_BODY_BYTES,
@@ -473,3 +475,32 @@ async def test_upstream_401_is_observed_without_replay() -> None:
     assert keep_alive
     credential.invalidate_after_unauthorized.assert_called_once_with()
     credential.token_for_request.assert_not_awaited()
+
+
+async def test_plain_http_inside_connect_is_never_served(tmp_path: Path) -> None:
+    cert_path, key_path = ensure_ca(cache_dir=tmp_path)
+    relay = _SignerRelay(
+        route=_ROUTE,
+        placeholder="oa_cred_test",
+        bearer_token="real-token",
+        ca_cert_path=cert_path,
+        ca_key_path=key_path,
+        ca_bundle_path=ensure_ca_bundle(cert_path, cache_dir=tmp_path),
+        provider_port=443,
+    )
+    port = await relay.start_tcp()
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(b"CONNECT model.test:443 HTTP/1.1\r\nHost: model.test:443\r\n\r\n")
+        await writer.drain()
+        assert (await reader.readuntil(b"\r\n\r\n")).startswith(b"HTTP/1.1 200")
+        writer.write(
+            b"POST /v1/responses HTTP/1.1\r\nHost: model.test\r\n"
+            b"Authorization: Bearer oa_cred_test\r\nContent-Length: 2\r\n\r\n{}"
+        )
+        await writer.drain()
+
+        assert await asyncio.wait_for(reader.read(), timeout=10) == b""
+        writer.close()
+    finally:
+        await relay.stop()

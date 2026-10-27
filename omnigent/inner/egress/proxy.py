@@ -6,6 +6,8 @@ and either forwards or rejects with HTTP 403.
 
 For HTTPS, the proxy performs a TLS man-in-the-middle using per-host
 certificates signed by the CA from :mod:`~omnigent.inner.egress.ca`.
+A CONNECT tunnel that carries plain HTTP (Node's env proxy tunnels
+``http://`` targets too) gets the same per-request checks.
 
 The proxy listens on a Unix socket (for hard enforcement via network
 namespace isolation) and/or a TCP port (for soft enforcement or
@@ -31,6 +33,7 @@ import email.policy
 import hmac
 import ipaddress
 import logging
+import os
 import socket
 import ssl
 from collections.abc import Callable
@@ -58,6 +61,7 @@ logger = logging.getLogger(__name__)
 
 _CONNECT_RESPONSE = b"HTTP/1.1 200 Connection Established\r\n\r\n"
 _HTTP2_PREFACE_FIRST_LINE = b"PRI * HTTP/2.0\r\n"
+_TLS_HANDSHAKE_RECORD = b"\x16"
 _BUF_SIZE = 65536
 _HEADER_MAX = 65536
 # S6 (security): the smallest printable ASCII byte (SP). Any byte below
@@ -213,6 +217,8 @@ class EgressProxy:
         for the real secret and rejects the same placeholder sent to any
         other host with ``403`` (the cross-host leak guard).
     """
+
+    _accepts_plain_http_tunnels = True
 
     def __init__(
         self,
@@ -451,11 +457,11 @@ class EgressProxy:
     async def _handle_connect(
         self,
         writer: asyncio.StreamWriter,
-        reader: asyncio.StreamReader,  # noqa: ARG002
+        reader: asyncio.StreamReader,
         target: str,
         proxy_headers: bytes,  # noqa: ARG002
     ) -> None:
-        """Handle CONNECT — TLS MITM, inspect inner HTTP, enforce rules."""
+        """Handle CONNECT — inspect inner HTTP (TLS MITM or plain), enforce rules."""
         host, port = self._parse_host_port(target, default_port=443)
 
         # S5 (security): hostname canonicalization. Reject any host
@@ -515,6 +521,15 @@ class EgressProxy:
 
         writer.write(_CONNECT_RESPONSE)
         await writer.drain()
+
+        if self._accepts_plain_http_tunnels:
+            first_byte = await self._peek_tunnel_first_byte(writer.transport)
+            if first_byte == b"":
+                return
+            if first_byte is not None and first_byte != _TLS_HANDSHAKE_RECORD:
+                cast(asyncio.ReadTransport, writer.transport).resume_reading()
+                await self._handle_tunneled_http(writer, reader, host, port)
+                return
 
         ssl_ctx = self._cert_cache.get_ssl_context(host)
         self._configure_server_ssl_context(host, ssl_ctx)
@@ -693,6 +708,58 @@ class EgressProxy:
                 await asyncio.wait_for(tls_writer.wait_closed(), timeout=2)
             except Exception:  # noqa: BLE001 — TLS close is best-effort
                 pass
+
+    @staticmethod
+    async def _peek_tunnel_first_byte(transport: asyncio.BaseTransport) -> bytes | None:
+        """Wait for the tunnel's first byte without consuming it, so TLS can still start.
+
+        Returns ``b""`` on client EOF and ``None`` when the loop cannot watch the socket.
+        """
+        raw_socket = transport.get_extra_info("socket")
+        if raw_socket is None:
+            return None
+        loop = asyncio.get_running_loop()
+        with socket.socket(fileno=os.dup(raw_socket.fileno())) as peek_socket:
+            while True:
+                readable: asyncio.Future[None] = loop.create_future()
+
+                def _mark_readable(future: asyncio.Future[None] = readable) -> None:
+                    if not future.done():
+                        future.set_result(None)
+
+                try:
+                    loop.add_reader(peek_socket.fileno(), _mark_readable)
+                except NotImplementedError:
+                    return None
+                try:
+                    await asyncio.wait_for(readable, timeout=30)
+                finally:
+                    loop.remove_reader(peek_socket.fileno())
+                try:
+                    return peek_socket.recv(1, socket.MSG_PEEK)
+                except BlockingIOError:
+                    continue
+
+    async def _handle_tunneled_http(
+        self,
+        writer: asyncio.StreamWriter,
+        reader: asyncio.StreamReader,
+        host: str,
+        port: int,
+    ) -> None:
+        """Serve one plain-HTTP request sent inside a CONNECT tunnel to *host*:*port*."""
+        request_line = await asyncio.wait_for(reader.readline(), timeout=30)
+        try:
+            method, path = self._parse_inner_request_line(request_line)
+            # The tunnel authority picks the upstream, so only origin-form targets are accepted.
+            if not path.startswith("/"):
+                raise ValueError("tunneled request target is not origin-form")
+            headers_raw = await self._read_headers(reader)
+            self._parse_inner_content_length(headers_raw)
+        except ValueError:
+            await self._send_forbidden(writer, "malformed inner request")
+            return
+        await self._forward_plain_http(writer, reader, method, host, port, path, headers_raw)
 
     def _allows_unrestricted_host(self, host: str) -> bool:
         """Return whether one rule allows every method and path for *host*."""
@@ -938,6 +1005,19 @@ class EgressProxy:
             await self._send_forbidden(writer, "host contains forbidden character")
             return
 
+        await self._forward_plain_http(writer, reader, method, host, port, path, headers_raw)
+
+    async def _forward_plain_http(
+        self,
+        writer: asyncio.StreamWriter,
+        reader: asyncio.StreamReader,
+        method: str,
+        host: str,
+        port: int,
+        path: str,
+        headers_raw: bytes,
+    ) -> None:
+        """Apply policy to one plain-HTTP request and relay it to *host*:*port*."""
         if not check_request(self._rules, method, host, path):
             logger.warning("BLOCKED %s http://%s%s", method, host, path)
             await self._send_forbidden(writer, f"{method} http://{host}{path} denied by policy")

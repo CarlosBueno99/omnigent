@@ -1302,9 +1302,11 @@ async def test_auto_create_kiro_terminal_skips_mcp_wiring_without_relay(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("sandbox_type", ["none", "linux_bwrap"])
 async def test_auto_create_pi_terminal_inherits_agent_sandbox(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    sandbox_type: str,
 ) -> None:
     """
     Pi-native auto-create must honour the agent's ``os_env.sandbox``.
@@ -1320,10 +1322,12 @@ async def test_auto_create_pi_terminal_inherits_agent_sandbox(
     Asserts the launched terminal spec's ``os_env.sandbox`` is the agent's
     ``none`` sandbox (not the platform default) and that the agent's ``os_env``
     is threaded through as the launch ``parent_os_env`` so the rest of the
-    policy (egress_rules / env_passthrough) is also inherited.
+    policy (egress_rules / env_passthrough) is also inherited. An enforcing
+    sandbox also gains a write grant for the session's bridge dir under $HOME.
 
     :param tmp_path: Pytest-provided temporary directory.
     :param monkeypatch: Pytest monkeypatch fixture.
+    :param sandbox_type: The agent's ``os_env.sandbox.type``.
     """
     import omnigent.harnesses.pi_native.bridge as pi_native_bridge
     import omnigent.harnesses.pi_native.credentials as pi_native_credentials
@@ -1378,12 +1382,10 @@ async def test_auto_create_pi_terminal_inherits_agent_sandbox(
                 metadata={"terminal_name": "pi", "session_key": "main", "running": True},
             )
 
-    # An agent that declares sandbox: none (runs unconfined; outer
-    # container/VM is the security boundary).
     agent_os_env = OSEnvSpec(
         type="caller_process",
         cwd=".",
-        sandbox=OSEnvSandboxSpec(type="none"),
+        sandbox=OSEnvSandboxSpec(type=sandbox_type, write_paths=["."]),
     )
     agent_spec = AgentSpec(
         spec_version=1,
@@ -1395,8 +1397,9 @@ async def test_auto_create_pi_terminal_inherits_agent_sandbox(
         os_env=agent_os_env,
     )
 
+    session_id = "28a25c47fe4fd8ccde95c80bab47c1c7"
     await _auto_create_pi_terminal(
-        "28a25c47fe4fd8ccde95c80bab47c1c7",
+        session_id,
         _FakeResourceRegistry(),  # type: ignore[arg-type]
         lambda _sid, _evt: None,
         server_client=NullServerClient(),  # type: ignore[arg-type]
@@ -1408,7 +1411,12 @@ async def test_auto_create_pi_terminal_inherits_agent_sandbox(
         "auto-create dropped the agent's sandbox; launch_required_terminal will "
         "fall back to _default_sandbox_for_platform (bwrap), overriding sandbox: none"
     )
-    assert launched_sandbox.type == "none"
+    assert launched_sandbox.type == sandbox_type
+    expected_write_paths = ["."]
+    if sandbox_type != "none":
+        expected_write_paths.append(str(pi_native_bridge.bridge_dir_for_session_id(session_id)))
+    assert launched_sandbox.write_paths == expected_write_paths
+    assert agent_os_env.sandbox.write_paths == ["."]
     # The whole os_env is threaded through as the inheritance parent.
     assert captured["parent_os_env"] is agent_os_env
 

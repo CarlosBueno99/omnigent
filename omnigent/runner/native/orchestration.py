@@ -2815,6 +2815,13 @@ async def _auto_create_pi_terminal(
     # and ``parent_os_env`` below, launch_required_terminal falls back to
     # _default_sandbox_for_platform (linux_bwrap), overriding the YAML config.
     agent_os_env = _agent_os_env_from_spec(agent_spec)
+    pi_sandbox = agent_os_env.sandbox if agent_os_env is not None else None
+    if pi_sandbox is not None and pi_sandbox.type != "none":
+        # Pi loads its extension and writes session files under this
+        # runner-created dir in $HOME, which sandboxes don't mount.
+        pi_sandbox = dataclasses.replace(
+            pi_sandbox, write_paths=[*(pi_sandbox.write_paths or []), str(bridge_dir)]
+        )
     terminal_view = await resource_registry.launch_required_terminal(
         session_id=session_id,
         terminal_name="pi",
@@ -2825,7 +2832,7 @@ async def _auto_create_pi_terminal(
             os_env=OSEnvSpec(
                 type="caller_process",
                 cwd=workspace,
-                sandbox=(agent_os_env.sandbox if agent_os_env is not None else None),
+                sandbox=pi_sandbox,
             ),
             command=pi_command,
             args=pi_args,

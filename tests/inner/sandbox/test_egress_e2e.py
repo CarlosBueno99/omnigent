@@ -569,10 +569,12 @@ def test_s2_egress_blocks_private_destination_by_default(
     )
 
 
+@pytest.mark.parametrize("through_connect_tunnel", [False, True], ids=["absolute-form", "tunnel"])
 def test_s2_egress_allows_private_destination_when_opt_in(
     tmp_path: Path,
     active_sandbox_spec_factory: Callable[..., OSEnvSandboxSpec],
     sandbox_pythonpath_env: None,
+    through_connect_tunnel: bool,
 ) -> None:
     """
     S2: with explicit ``egress_allow_private_destinations=True``, the
@@ -591,11 +593,13 @@ def test_s2_egress_allows_private_destination_when_opt_in(
     Plain HTTP avoids the MITM-cert-for-literal-IP wrinkle that
     affects the HTTPS path (Python's TLS stack rejects IP literals
     in DNS SANs), which would otherwise obscure the actual test
-    signal with a cert-verify error.
+    signal with a cert-verify error. The tunnel variant sends the same
+    plain GET inside ``CONNECT``, as Node's env proxy agent does.
     """
     probe = "\n".join(
         [
             "import http.client, os, sys, base64",
+            f"through_connect_tunnel = {through_connect_tunnel}",
             "proxy_url = os.environ['HTTP_PROXY']",
             "from urllib.parse import urlparse",
             "p = urlparse(proxy_url)",
@@ -608,10 +612,15 @@ def test_s2_egress_allows_private_destination_when_opt_in(
             "    extra_headers['Proxy-Authorization'] = (",
             "        'Basic ' + base64.b64encode(creds).decode()",
             "    )",
-            # Connect TO the proxy and send an absolute-form GET — that's
-            # the wire format for plain HTTP via a forward proxy.
+            # Connect TO the proxy and send an absolute-form GET (plain HTTP
+            # via a forward proxy) or an origin-form GET inside CONNECT.
             "conn = http.client.HTTPConnection(p.hostname, p.port or 80, timeout=10)",
-            "conn.request('GET', 'http://127.0.0.1:1/', headers=extra_headers)",
+            "if through_connect_tunnel:",
+            "    auth = {k: v for k, v in extra_headers.items() if k == 'Proxy-Authorization'}",
+            "    conn.set_tunnel('127.0.0.1', 1, headers=auth)",
+            "    conn.request('GET', '/', headers={'Connection': 'close'})",
+            "else:",
+            "    conn.request('GET', 'http://127.0.0.1:1/', headers=extra_headers)",
             "try:",
             "    resp = conn.getresponse()",
             "    print(f'STATUS_{resp.status}')",

@@ -324,6 +324,98 @@ async def test_proxy_allows_connect_to_permitted_host(
         await proxy.stop()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "expected_status"),
+    [("POST", b"HTTP/1.1 200"), ("GET", b"HTTP/1.1 403")],
+)
+async def test_connect_tunnel_carrying_plain_http_applies_rules(
+    ca_paths: tuple[Path, Path, Path],
+    method: str,
+    expected_status: bytes,
+) -> None:
+    """Plain HTTP sent through a CONNECT tunnel is rule-checked and forwarded, not TLS-parsed."""
+    cert_path, key_path, _ = ca_paths
+    upstream_requests: list[bytes] = []
+
+    async def _upstream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        upstream_requests.append(await reader.readline())
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        await writer.drain()
+        writer.close()
+
+    upstream = await asyncio.start_server(_upstream, "127.0.0.1", 0)
+    upstream_port = upstream.sockets[0].getsockname()[1]
+    proxy = EgressProxy(
+        parse_rules(["POST 127.0.0.1/**"]),
+        cert_path,
+        key_path,
+        block_private_destinations=False,
+    )
+    proxy_port = await proxy.start_tcp()
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", proxy_port)
+        writer.write(
+            f"CONNECT 127.0.0.1:{upstream_port} HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{upstream_port}\r\n\r\n".encode()
+        )
+        await writer.drain()
+        assert b"200" in await asyncio.wait_for(reader.readline(), timeout=5)
+        while (await asyncio.wait_for(reader.readline(), timeout=5)) not in (b"\r\n", b""):
+            pass
+
+        writer.write(
+            f"{method} /v1/sessions/s/events HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{upstream_port}\r\n"
+            "Content-Type: application/json\r\nContent-Length: 2\r\n"
+            "Connection: close\r\n\r\n{}".encode()
+        )
+        await writer.drain()
+        status_line = await asyncio.wait_for(reader.readline(), timeout=10)
+        writer.close()
+
+        assert status_line.startswith(expected_status), (
+            f"{method} inside the CONNECT tunnel got {status_line[:120]!r}, "
+            f"expected {expected_status!r}"
+        )
+        assert [line.split(b" ", 1)[0] for line in upstream_requests] == (
+            [b"POST"] if method == "POST" else []
+        )
+    finally:
+        await proxy.stop()
+        upstream.close()
+        await upstream.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_connect_tunnel_rejects_absolute_form_plain_http(
+    ca_paths: tuple[Path, Path, Path],
+) -> None:
+    """A tunneled request cannot name a target other than the CONNECT authority."""
+    cert_path, key_path, _ = ca_paths
+    proxy = EgressProxy(
+        parse_rules(["POST 127.0.0.1/**"]),
+        cert_path,
+        key_path,
+        block_private_destinations=False,
+    )
+    proxy_port = await proxy.start_tcp()
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", proxy_port)
+        writer.write(b"CONNECT 127.0.0.1:9 HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n")
+        await writer.drain()
+        await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
+        writer.write(
+            b"POST http://127.0.0.1:9/x HTTP/1.1\r\nHost: 127.0.0.1:9\r\nContent-Length: 0\r\n\r\n"
+        )
+        await writer.drain()
+        status_line = await asyncio.wait_for(reader.readline(), timeout=10)
+        writer.close()
+        assert status_line.startswith(b"HTTP/1.1 403"), status_line
+    finally:
+        await proxy.stop()
+
+
 # ---------------------------------------------------------------------------
 # S2 — destination-IP block (``_assert_destination_allowed``)
 # ---------------------------------------------------------------------------
@@ -1053,14 +1145,17 @@ async def test_handle_connect_passes_protocol_to_start_tls_directly(
     monkeypatch.setattr(loop, "start_tls", _fake_start_tls)
 
     try:
-        _, writer = await asyncio.open_connection("127.0.0.1", port)
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
         writer.write(
             b"CONNECT allowed.example.com:443 HTTP/1.1\r\nHost: allowed.example.com\r\n\r\n"
         )
         await writer.drain()
-        # Drain the 200 Connection Established and then wait for the
-        # handler to invoke start_tls — the fake raises so the handler
-        # returns immediately and the connection is closed.
+        # Drain the 200 Connection Established, send a TLS record byte so
+        # the handler picks the MITM path, and wait for it to invoke
+        # start_tls — the fake raises so the handler closes the connection.
+        await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
+        writer.write(b"\x16")
+        await writer.drain()
         with contextlib.suppress(Exception):
             await asyncio.wait_for(writer.wait_closed(), timeout=5)
 
