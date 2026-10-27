@@ -240,7 +240,7 @@ while True:
         if ch == "\x15":
             draft = ""
         elif ch == "\r":
-            lines.append(draft)
+            lines.append(draft.strip())
             draft = ""
             delivered.write_text(json.dumps(lines))
         elif ch >= " ":
