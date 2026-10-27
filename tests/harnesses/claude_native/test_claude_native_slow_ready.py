@@ -20,51 +20,80 @@ from omnigent.harnesses.claude_native import bridge
 
 _TERMINAL = r"""
 import json
-import logging
 import os
+import re
+import signal
 import sys
 import time
 import tty
 from pathlib import Path
 
+from tests.harnesses.claude_native.test_claude_native_shell_mode_draft import _InputBox
+
 gate_started, delivered = map(Path, sys.argv[1:3])
+startup = sys.argv[3]
 tty.setraw(sys.stdin.fileno())
 sys.stdout.write("\x1b[?2004h")
 sys.stdout.flush()
 while not gate_started.exists():
     time.sleep(0.01)
-if sys.argv[3] in {"dead", "dead-no-status"}:
+if startup in {"dead", "dead-no-status"}:
     print("Startup failed", flush=True)
     raise SystemExit(1)
 print("Starting Claude Code...", flush=True)
 time.sleep(1.0)
+draft = "\n".join(f"OLD {index}" for index in range(8)) if startup == "stale-frame" else ""
+box = _InputBox("prompt", draft)
 
-def render(draft=""):
-    sys.stdout.write("\x1b[H\x1b[2J" + "─" * 80 + "\r\n❯ " + draft + "\r\n" + "─" * 80 + "\r\n")
+
+def render(*_args):
+    screen = box.pane()
+    if startup == "stale-frame":
+        screen = "─" * 30 + "\n❯ previous message\n" + screen
+        screen = "\n".join(screen.splitlines()[:os.get_terminal_size().lines])
+    sys.stdout.write("\x1b[H\x1b[2J" + screen.replace("\n", "\r\n"))
     sys.stdout.flush()
 
+
+signal.signal(signal.SIGWINCH, render)
 render()
-buffer = b""
-draft = None
-messages = []
+pending = b""
 while True:
-    buffer += os.read(sys.stdin.fileno(), 65536)
-    if b"\x1b[200~" in buffer and b"\x1b[201~" in buffer:
-        pasted, buffer = buffer.split(b"\x1b[200~", 1)[1].split(b"\x1b[201~", 1)
-        draft = pasted.decode().strip()
-        render(draft)
-    if draft is not None and b"\r" in buffer:
-        messages.append(draft)
-        delivered.write_text(json.dumps(messages))
-        draft = None
-        buffer = b""
+    pending += os.read(sys.stdin.fileno(), 65536)
+    while pending:
+        if pending.startswith(b"\x1b[200~"):
+            if b"\x1b[201~" not in pending:
+                break
+            pasted, pending = pending[6:].split(b"\x1b[201~", 1)
+            text = pasted.decode().replace("\r", "\n")
+            box.draft = box.draft[:box.cursor] + text + box.draft[box.cursor:]
+            box.cursor += len(text)
+        else:
+            match = re.match(rb"\x1b\[\d+;5u", pending)
+            if match:
+                token = match[0].decode()
+                pending = pending[len(match[0]):]
+            elif pending.startswith(b"\x1b["):
+                break
+            else:
+                token = chr(pending[0])
+                pending = pending[1:]
+            if token == "\r":
+                box.key("Enter")
+                delivered.write_text(json.dumps([text for _, text in box.submitted]))
+            elif token == "\x15" or token.startswith("\x1b["):
+                box.key("C-u" if token == "\x15" else token)
+            elif token.isprintable():
+                box.draft = box.draft[:box.cursor] + token + box.draft[box.cursor:]
+                box.cursor += len(token)
         render()
 """
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required")
 @pytest.mark.parametrize(
-    "startup", ["slow", "dead", "dead-no-status", "base-budget-only", "exit-after-ready"]
+    "startup",
+    ["slow", "dead", "dead-no-status", "base-budget-only", "exit-after-ready", "stale-frame"],
 )
 @pytest.mark.timeout(20)
 def test_first_message_survives_slow_terminal_startup(
@@ -131,7 +160,7 @@ def test_first_message_survives_slow_terminal_startup(
                     "-x",
                     "120",
                     "-y",
-                    "24",
+                    "6" if startup == "stale-frame" else "24",
                     command,
                 ],
                 check=True,
@@ -153,6 +182,19 @@ def test_first_message_survives_slow_terminal_startup(
                 assert time.monotonic() - started_at[0] >= 1.0
                 assert json.loads(delivered.read_text()) == ["FIRST_PROMPT_DELIVERED"]
                 assert bridge._claude_pane_state(str(socket_path), "main").alive
+            elif startup == "stale-frame":
+                bridge.inject_user_message(bridge_dir, content="ONLY_NEW_INPUT", timeout_s=2.0)
+                assert json.loads(delivered.read_text()) == ["ONLY_NEW_INPUT"]
+                bridge.inject_slash_command(bridge_dir, command="/effort high", timeout_s=2.0)
+                assert json.loads(delivered.read_text()) == ["ONLY_NEW_INPUT", "/effort high"]
+                geometry = subprocess.run(
+                    [*tmux, "display-message", "-p", "-t", "main", "#{window_height}"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                assert geometry.stdout.strip() == "6"
             elif startup == "exit-after-ready":
                 caplog.set_level(logging.WARNING)
                 with pytest.raises(RuntimeError, match="tmux command failed"):
