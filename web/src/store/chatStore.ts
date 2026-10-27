@@ -113,7 +113,11 @@ import {
 import { recordOptimisticTitle } from "@/lib/optimisticTitles";
 import { getSessionDraft, setSessionDraft } from "@/lib/sessionDrafts";
 import { forgetUnsentSend, peekUnsentSend, rememberUnsentSend } from "@/lib/unsentSends";
-import { isSideChatCommand, usesNativeSideChatFork } from "@/lib/sideChat";
+import {
+  isSideChatCommand,
+  usesNativeSideChatFork,
+  type SideChatModelSettings,
+} from "@/lib/sideChat";
 // Re-exported below so existing `@/store/chatStore` importers keep working; the
 // pure helpers live in a leaf module so low-level session hooks can gate on temp
 // ids without an import cycle back to the store.
@@ -200,6 +204,7 @@ export interface SendOptions {
    * to another chat. Defaults to the active conversation.
    */
   pinnedConversationId?: string;
+  sideChatSettings?: SideChatModelSettings;
   /**
    * Failure handler that OWNS the send's error UX. When set, `send` reports the
    * failure here instead of its default surfacing (no error block appended, no
@@ -1101,6 +1106,7 @@ export interface ConversationState {
  */
 /** One side chat's unsent composer contents. */
 export interface SideChatComposerDraft {
+  settings?: SideChatModelSettings;
   starting?: boolean;
   quotes?: ReplyQuote[];
   text: string;
@@ -2836,6 +2842,14 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
             role: "user",
             content: serverContent,
             stable_id: stableId,
+            ...(opts?.sideChatSettings
+              ? {
+                  side_chat_settings: {
+                    model: opts.sideChatSettings.modelOverride,
+                    effort: opts.sideChatSettings.reasoningEffort,
+                  },
+                }
+              : {}),
           },
         },
         { holdWhenHostOffline: true },

@@ -2417,12 +2417,47 @@ async def _drive_side_chat_requests(
             # then can't fork, and consuming it would lose the question (#3).
             if parent_thread_id is not None:
                 for request in side_chat.peek_side_chat_requests(bridge_dir):
+
+                    async def configure_child(
+                        child_thread_id: str,
+                        parent_thread_id: str = parent_thread_id,
+                        settings: dict[str, str] = request.settings or {},
+                    ) -> None:
+                        child_session_id = await _register_child_session(
+                            ap_client,
+                            parent_session_id=target.session_id,
+                            parent_thread_id=parent_thread_id,
+                            child_thread_id=child_thread_id,
+                            item={"agent_nickname": side_chat.SIDE_CHAT_DISPLAY_NAME},
+                        )
+                        if child_session_id is None:
+                            raise RuntimeError("Could not register side chat")
+                        response = await ap_client.patch(
+                            f"/v1/sessions/{child_session_id}",
+                            json={
+                                "silent": True,
+                                **(
+                                    {"model_override": settings["model"]}
+                                    if "model" in settings
+                                    else {}
+                                ),
+                                **(
+                                    {"reasoning_effort": settings["effort"]}
+                                    if "effort" in settings
+                                    else {}
+                                ),
+                            },
+                        )
+                        response.raise_for_status()
+
                     try:
                         child_thread_id = await side_chat.open_side_chat_on_client(
                             codex_client,
                             parent_thread_id=parent_thread_id,
                             question=request.question,
                             bridge_dir=bridge_dir,
+                            settings_override=request.settings,
+                            before_turn=configure_child if request.settings else None,
                         )
                         if child_thread_id is None:
                             raise RuntimeError("thread/fork returned no thread id")

@@ -5497,8 +5497,12 @@ async def test_events_codex_side_chat_preserves_indentation(
             {"type": "input_text", "text": f" \n /side {question}" if command else question}
         ],
     }
+    if command:
+        payload["side_chat_settings"] = {"model": "gpt-6-sol", "effort": "max"}
     if not command:
         payload["codex_side_thread_id"] = "thread_side"
+        payload["model_override"] = "gpt-6-sol"
+        payload["reasoning_effort"] = "max"
     async with _runner_client(app) as client:
         created = await client.post(
             "/v1/sessions", json={"session_id": conv_id, "agent_id": "agent_side"}
@@ -5510,12 +5514,21 @@ async def test_events_codex_side_chat_preserves_indentation(
         assert [request.question for request in side_chat.peek_side_chat_requests(bridge_dir)] == [
             question
         ]
+        assert side_chat.peek_side_chat_requests(bridge_dir)[0].settings == {
+            "model": "gpt-6-sol",
+            "effort": "max",
+        }
         assert fake_client.requests == []
     else:
         assert fake_client.requests == [
             (
                 "turn/start",
-                {"threadId": "thread_side", "input": [{"type": "text", "text": question}]},
+                {
+                    "threadId": "thread_side",
+                    "input": [{"type": "text", "text": question}],
+                    "model": "gpt-6-sol",
+                    "effort": "max",
+                },
             )
         ]
         assert fake_client.closed

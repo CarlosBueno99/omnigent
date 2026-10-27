@@ -6459,7 +6459,11 @@ def create_runner_app(
                     )
                 else:
                     await side_chat.submit_side_turn(
-                        _side_client, str(_side_thread_id), _side_text
+                        _side_client,
+                        str(_side_thread_id),
+                        _side_text,
+                        model=body.get("model_override"),
+                        effort=body.get("reasoning_effort"),
                     )
             except CodexAppServerResponseError as exc:
                 # Codex refused the turn (e.g. typing into a multi-agent-v2
@@ -6518,6 +6522,7 @@ def create_runner_app(
                 _side_chat.request_side_chat(
                     await _codex_native_bridge_dir_for_session(conversation_id),
                     _side_question,
+                    settings=body.get("side_chat_settings"),
                 )
                 _logger.info(
                     "Codex /side recorded without starting a turn: conv=%s",

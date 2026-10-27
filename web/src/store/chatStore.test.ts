@@ -9881,7 +9881,18 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       await useChatStore.getState().switchTo("conv_codex_side");
       useChatStore.setState({ sessionHarness: "codex-native", awaitingSideChatFor: null });
 
-      await useChatStore.getState().send("/side what was my last message?", "agent_xyz");
+      await useChatStore
+        .getState()
+        .send("/side what was my last message?", "agent_xyz", undefined, {
+          sideChatSettings: { modelOverride: "gpt-6-sol", reasoningEffort: "max" },
+        });
+      const call = fetchMock.mock.calls.find(
+        ([url, init]) => String(url).endsWith("/conv_codex_side/events") && init?.method === "POST",
+      );
+      expect(JSON.parse(call![1]!.body as string).data.side_chat_settings).toEqual({
+        model: "gpt-6-sol",
+        effort: "max",
+      });
 
       const after = useChatStore.getState();
       expect(after.pendingUserMessages).toHaveLength(0);

@@ -37,7 +37,7 @@ import contextlib
 import json
 import logging
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -162,8 +162,7 @@ async def fork_ephemeral_side_thread(
     settings = settings or {}
     if settings.get("model"):
         params["model"] = settings["model"]
-    # thread/fork has no effort field; a later thread/settings/update would drop
-    # the fork's developer instructions, so set it as a fork config override.
+    # thread/fork has no effort field, so set it as a fork config override.
     if settings.get("effort"):
         params["config"] = {"model_reasoning_effort": settings["effort"]}
     response = await codex_client.request("thread/fork", params)
@@ -181,6 +180,8 @@ async def submit_side_turn(
     text: str,
     *,
     collaboration_mode: _JsonObject | None = None,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> str | None:
     """
     Submit one user turn to a side-chat thread over the app-server.
@@ -194,6 +195,8 @@ async def submit_side_turn(
     :param child_thread_id: Side-chat Codex thread id.
     :param text: User input for the turn.
     :param collaboration_mode: Optional Codex collaboration mode payload.
+    :param model: Side-thread model override for this and subsequent turns.
+    :param effort: Side-thread reasoning effort for this and subsequent turns.
     :returns: The started turn id, or ``None`` when absent.
     """
     params: _JsonObject = {
@@ -202,6 +205,10 @@ async def submit_side_turn(
     }
     if collaboration_mode is not None:
         params["collaborationMode"] = collaboration_mode
+    if model is not None:
+        params["model"] = model
+    if effort is not None:
+        params["effort"] = effort
     response = await codex_client.request("turn/start", params)
     result = response.get("result")
     turn = result.get("turn") if isinstance(result, dict) else None
@@ -260,6 +267,8 @@ async def open_side_chat_on_client(
     question: str,
     bridge_dir: Path | None = None,
     developer_instructions: str | None = SIDE_REFERENCE_ONLY_INSTRUCTIONS,
+    settings_override: Mapping[str, str] | None = None,
+    before_turn: Callable[[str], Awaitable[None]] | None = None,
 ) -> str | None:
     """
     Open a side chat on an already-connected app-server client (executor path).
@@ -277,6 +286,8 @@ async def open_side_chat_on_client(
         settings (:func:`parent_side_chat_settings`); ``None`` keeps the
         fork's own settings.
     :param developer_instructions: Reference-only boundary instructions.
+    :param settings_override: Draft selections overriding inherited model/effort.
+    :param before_turn: Optional child registration/configuration before its first turn.
     :returns: The child Codex thread id, or ``None`` if the fork failed.
     """
     settings = (
@@ -284,6 +295,7 @@ async def open_side_chat_on_client(
         if bridge_dir is not None
         else None
     )
+    settings = {**(settings or {}), **(settings_override or {})}
     child_thread_id = await fork_ephemeral_side_thread(
         codex_client,
         parent_thread_id,
@@ -292,7 +304,16 @@ async def open_side_chat_on_client(
     )
     if child_thread_id is None:
         return None
-    await submit_side_turn(codex_client, child_thread_id, question)
+    if before_turn is not None:
+        await before_turn(child_thread_id)
+    overrides = settings_override or {}
+    await submit_side_turn(
+        codex_client,
+        child_thread_id,
+        question,
+        model=overrides.get("model"),
+        effort=overrides.get("effort"),
+    )
     return child_thread_id
 
 
@@ -392,19 +413,22 @@ async def register_side_fork_child(
     return forwarder_state.session_for_child_thread(child_thread_id)
 
 
-def request_side_chat(bridge_dir: Path, question: str) -> None:
+def request_side_chat(
+    bridge_dir: Path, question: str, *, settings: Mapping[str, str] | None = None
+) -> None:
     """
     Record a ``/side`` question for the forwarder to fork.
 
     :param bridge_dir: Native Codex bridge directory.
     :param question: The side-chat question.
+    :param settings: Optional first-turn model and effort selections.
     :returns: None.
     """
     request_dir = bridge_dir / _SIDE_REQUEST_DIRNAME
     request_dir.mkdir(parents=True, exist_ok=True)
     path = request_dir / f"{uuid.uuid4().hex}.json"
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"question": question}), encoding="utf-8")
+    tmp.write_text(json.dumps({"question": question, "settings": settings}), encoding="utf-8")
     tmp.replace(path)  # atomic publish, so the drainer never reads a partial file
 
 
@@ -413,6 +437,7 @@ class SideChatRequest(NamedTuple):
 
     path: Path
     question: str
+    settings: dict[str, str] | None = None
 
 
 def peek_side_chat_requests(bridge_dir: Path) -> list[SideChatRequest]:
@@ -445,7 +470,17 @@ def peek_side_chat_requests(bridge_dir: Path) -> list[SideChatRequest]:
             continue
         question = payload.get("question") if isinstance(payload, dict) else None
         if isinstance(question, str) and question:
-            requests.append(SideChatRequest(path, question))
+            settings = payload.get("settings")
+            if settings is not None and (
+                not isinstance(settings, dict)
+                or any(
+                    key not in {"model", "effort"} or not isinstance(value, str)
+                    for key, value in settings.items()
+                )
+            ):
+                _unlink_quietly(path)
+                continue
+            requests.append(SideChatRequest(path, question, settings))
         else:
             _unlink_quietly(path)  # malformed content that can never fork
     return requests

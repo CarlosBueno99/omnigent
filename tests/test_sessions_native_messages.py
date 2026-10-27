@@ -287,3 +287,34 @@ def test_wrapper_label_session_is_native_without_resolving_harness(
 
     monkeypatch.setattr(sessions_routes, "_resolve_harness", _must_not_run)
     assert sessions_routes._is_native_terminal_session(conv) is True
+
+
+@pytest.mark.parametrize("settings", [{"model": "gpt-6-sol", "effort": "max"}, {"effort": "high"}])
+def test_native_side_chat_settings_are_forwarded_without_changing_parent(
+    settings: dict[str, str],
+) -> None:
+    from omnigent.server.routes import sessions as routes
+
+    conv = _conversation_with_wrapper("codex-native-ui")
+    message = _message_event()
+    message.data["content"] = [{"type": "input_text", "text": "/side hello"}]
+    message.data["side_chat_settings"] = settings
+    event = routes._build_native_terminal_message_event(conv, message)
+    assert event["side_chat_settings"] == settings
+    assert "model_override" not in event
+    assert conv.model_override is None
+    assert conv.reasoning_effort is None
+
+
+@pytest.mark.parametrize("settings", ["high", {"effort": "invalid"}, {"model": 10}])
+def test_native_side_chat_rejects_invalid_settings(settings: object) -> None:
+    from omnigent.errors import OmnigentError
+    from omnigent.server.routes import sessions as routes
+
+    message = _message_event()
+    message.data["content"] = [{"type": "input_text", "text": "/side hello"}]
+    message.data["side_chat_settings"] = settings
+    with pytest.raises(OmnigentError):
+        routes._build_native_terminal_message_event(
+            _conversation_with_wrapper("codex-native-ui"), message
+        )

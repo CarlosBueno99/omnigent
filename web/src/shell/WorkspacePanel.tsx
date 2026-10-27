@@ -956,6 +956,7 @@ function WorkspacePanelImpl({
   // the parent's live runner. Rejects so the composer re-enables and keeps
   // the typed text for a retry.
   const startPendingSideChat = (pendingId: string, text: string): Promise<void> => {
+    const settings = useChatStore.getState().sideChatComposers[pendingId]?.settings;
     if (usesNativeSideChatFork(sideChatHarness)) {
       if (parentAgentId === null) return Promise.reject(new Error("no agent"));
       // The child arrives asynchronously via session_created with no id to pair
@@ -971,6 +972,7 @@ function WorkspacePanelImpl({
         .getState()
         .send(SIDE_CHAT_COMMAND_PREFIX + text, parentAgentId, undefined, {
           pinnedConversationId: conversationId,
+          sideChatSettings: settings,
           onError: (message) => {
             sendFailed = true;
             awaitingPendingIdsRef.current = awaitingPendingIdsRef.current.filter(
@@ -983,7 +985,7 @@ function WorkspacePanelImpl({
           if (sendFailed) throw new Error("side chat send failed");
         });
     }
-    return createSideChat(conversationId).then(
+    return createSideChat(conversationId, settings).then(
       ({ childSessionId }) => {
         // We have the child id here, so rekey THIS pending tab directly — no
         // shared queue, so overlapping launches can't cross-assign. Seeding the
