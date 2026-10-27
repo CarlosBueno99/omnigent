@@ -14,6 +14,7 @@ import dataclasses
 import errno
 import json
 import logging
+import math
 import os
 import shlex
 import shutil
@@ -68,7 +69,11 @@ from omnigent.harness_plugins import native_provider_for_key
 from omnigent.host.harness_startup import env_wrapper_chdir, env_wrapper_environment
 from omnigent.inner.terminal import build_terminal_os_env_spec, terminal_pane_environment
 from omnigent.models.model_override import validate_model_override
-from omnigent.native.failure_telemetry import FailureContext, normalize_failure_context
+from omnigent.native.failure_telemetry import (
+    FailureContext,
+    exception_code_origin,
+    normalize_failure_context,
+)
 from omnigent.native.native_coding_agents import (
     native_coding_agent_for_harness,
     native_coding_agent_for_terminal_name,
@@ -713,7 +718,7 @@ class _PiNativeLaunchConfig:
     fork_carry_history: bool = False
     model_override: str | None = None
     reasoning_effort: str | None = None
-    native_usage_baseline: dict[str, int] | None = None
+    native_usage_baseline: dict[str, int | float] | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1306,12 +1311,21 @@ async def _pi_native_launch_config(
         "cumulative_output_tokens",
         "cumulative_cache_read_input_tokens",
     )
-    native_usage_baseline = (
+    native_usage_baseline: dict[str, int | float] | None = (
         {key: int(baseline[key]) for key in usage_fields}
         if isinstance(baseline, dict)
         and all(type(baseline.get(key)) is int and baseline[key] >= 0 for key in usage_fields)
         else None
     )
+    if native_usage_baseline is not None and isinstance(baseline, dict):
+        cost = baseline.get("cumulative_cost_usd")
+        if (
+            isinstance(cost, (int, float))
+            and not isinstance(cost, bool)
+            and math.isfinite(cost)
+            and cost >= 0
+        ):
+            native_usage_baseline["cumulative_cost_usd"] = cost
     return _PiNativeLaunchConfig(
         workspace=_pi_session_workspace(session_workspace),
         server_url=os.environ.get("RUNNER_SERVER_URL", "http://localhost:6767").rstrip("/"),
@@ -8143,6 +8157,7 @@ def _native_terminal_start_error_payload(
         if os_error is not None and os_error.errno is not None
         else None,
         native_launch_winerror=getattr(os_error, "winerror", None),
+        native_launch_code_origin=exception_code_origin(exc, prefer_module_prefix="omnigent."),
         exception_context_type=type(exc.__context__).__name__
         if exc.__context__ is not None
         else None,
@@ -8280,6 +8295,9 @@ def _native_terminal_start_failure_context(exc: BaseException, error_id: str) ->
             if os_error is not None and os_error.errno is not None
             else None,
             "native_launch_winerror": getattr(os_error, "winerror", None),
+            "native_launch_code_origin": exception_code_origin(
+                exc, prefer_module_prefix="omnigent."
+            ),
         }
     )
 
