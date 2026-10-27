@@ -1620,6 +1620,99 @@ async def test_executor_reaches_app_server_over_ws_transport(
     ) in _FakeCodexNativeClient.requests
 
 
+@pytest.mark.parametrize(
+    "changed_field", ["session_id", "thread_id", "socket_path", "codex_home", "active_turn_id"]
+)
+@pytest.mark.parametrize(
+    ("active_turn_id", "live_injection"),
+    [(None, False), ("turn_existing", False), ("turn_existing", True)],
+    ids=["start", "steer", "live-steer"],
+)
+def test_late_delivery_reply_preserves_newer_bridge_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    changed_field: str,
+    active_turn_id: str | None,
+    live_injection: bool,
+) -> None:
+    """An accepted old RPC must not move the next input onto a stale turn."""
+    _seed_bridge(tmp_path, active_turn_id=active_turn_id)
+    before = read_bridge_state(tmp_path)
+    assert before is not None
+    newer = replace(
+        before,
+        active_turn_id="turn_newer",
+        **({changed_field: "replacement"} if changed_field != "active_turn_id" else {}),
+    )
+
+    # Script only the Codex peer; the executor and durable bridge writer stay real.
+    class _LateReplyClient(_FakeCodexNativeClient):
+        requests = []
+        created = []
+        next_turn = 1
+
+        async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            response = await super().request(method, params)
+            if method in {"turn/start", "turn/steer"} and len(type(self).requests) == 1:
+                write_bridge_state(tmp_path, newer)
+            return response
+
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server.CodexAppServerClient", _LateReplyClient
+    )
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+    if live_injection:
+        assert asyncio.run(executor.enqueue_session_message("main", "accepted input")) is True
+    else:
+        assert _collect_turn_events(executor, "accepted input") == [TurnComplete(response=None)]
+
+    assert read_bridge_state(tmp_path) == newer
+    assert len(_LateReplyClient.requests) == 1
+    assert _LateReplyClient.requests[0][1]["threadId"] == before.thread_id
+    assert _collect_turn_events(executor, "follow-up") == [TurnComplete(response=None)]
+    method, params = _LateReplyClient.requests[1]
+    assert method == "turn/steer"
+    assert params["threadId"] == newer.thread_id
+    assert params["expectedTurnId"] == newer.active_turn_id
+
+
+@pytest.mark.parametrize("live_injection", [False, True], ids=["dispatch", "live-steer"])
+def test_late_steer_reply_does_not_resurrect_completed_turn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, live_injection: bool
+) -> None:
+    """A completion observed before the RPC reply still governs the next send."""
+    _seed_bridge(tmp_path, active_turn_id="turn_existing")
+    before = read_bridge_state(tmp_path)
+    assert before is not None
+
+    class _CompletedBeforeReplyClient(_FakeCodexNativeClient):
+        requests = []
+        created = []
+        next_turn = 1
+
+        async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            response = await super().request(method, params)
+            if method == "turn/steer":
+                write_bridge_state(tmp_path, replace(before, active_turn_id=None))
+            return response
+
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server.CodexAppServerClient",
+        _CompletedBeforeReplyClient,
+    )
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+    if live_injection:
+        assert asyncio.run(executor.enqueue_session_message("main", "accepted input")) is True
+    else:
+        assert _collect_turn_events(executor, "accepted input") == [TurnComplete(response=None)]
+    assert read_bridge_state(tmp_path) == replace(before, active_turn_id=None)
+    assert _collect_turn_events(executor, "follow-up") == [TurnComplete(response=None)]
+    assert [method for method, _ in _CompletedBeforeReplyClient.requests] == [
+        "turn/steer",
+        "turn/start",
+    ]
+
+
 def test_next_web_message_starts_new_codex_turn_after_forwarder_marks_idle(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
