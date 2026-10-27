@@ -215,12 +215,17 @@ async def test_fork_returns_none_when_response_has_no_thread_id() -> None:
         {},
         {"model": "gpt-6-sol", "effort": "max"},
         {"model": "gpt-6-sol", "reset_effort": True},
+        {"reset_effort": True},
         {"model": "gpt-5.5", "effort": "max"},
     ],
 )
 async def test_submit_side_turn_targets_child_thread(settings: dict[str, Any]) -> None:
     client = _FakeCodexClient(
-        {"turn/start": {"result": {"turn": {"id": "turn_1"}}}, "model/list": _CATALOG}
+        {
+            "turn/start": {"result": {"turn": {"id": "turn_1"}}},
+            "model/list": _CATALOG,
+            "thread/read": {"result": {"thread": {"model": "gpt-6-sol"}}},
+        }
     )
 
     turn_id = await side_chat.submit_side_turn(
@@ -265,22 +270,42 @@ async def test_interrupt_side_turn_propagates_unrelated_errors(error: Exception)
 
 
 @pytest.mark.asyncio
-async def test_open_side_chat_forks_then_submits_first_turn() -> None:
+@pytest.mark.parametrize("reset", [False, True])
+async def test_open_side_chat_forks_then_submits_first_turn(reset: bool) -> None:
     client = _FakeCodexClient(
         {
+            "thread/read": {"result": {"thread": {"model": "gpt-6-sol"}}},
+            "model/list": _CATALOG,
             "thread/fork": {"result": {"thread": {"id": "thread_side"}}},
             "turn/start": {"result": {"turn": {"id": "turn_1"}}},
         }
     )
 
     child = await side_chat.open_side_chat_on_client(
-        client, parent_thread_id="thread_parent", question="what does this repo do?"
+        client,
+        parent_thread_id="thread_parent",
+        question="what does this repo do?",
+        settings_override={"effort": None} if reset else None,
     )
 
     assert child == "thread_side"
     # order: fork first, then the first turn on the CHILD (not the main thread)
-    assert [m for m, _ in client.calls] == ["thread/fork", "turn/start"]
-    assert client.calls[1][1]["threadId"] == "thread_side"
+    assert [m for m, _ in client.calls] == (["thread/read", "model/list"] if reset else []) + [
+        "thread/fork",
+        "turn/start",
+    ]
+    assert client.calls[-1][1]["threadId"] == "thread_side"
+    assert "model" not in client.calls[-1][1]
+    if reset:
+        assert client.calls[-2][1]["config"] == {"model_reasoning_effort": "medium"}
+
+
+@pytest.mark.asyncio
+async def test_side_effort_reset_without_live_model_does_not_submit() -> None:
+    client = _FakeCodexClient({"thread/read": {"result": {"thread": {}}}})
+    with pytest.raises(ValueError, match="capabilities unavailable"):
+        await side_chat.submit_side_turn(client, "thread_side", "hello", reset_effort=True)
+    assert client.calls == [("thread/read", {"threadId": "thread_side", "includeTurns": False})]
 
 
 @pytest.mark.asyncio
@@ -597,7 +622,8 @@ async def test_drive_side_chat_requests_forks_on_the_forwarder_client(
         expected_effort = settings["effort"] or "medium"
         assert turns[0][1]["model"] == settings["model"]
         assert turns[0][1]["config"] == {"model_reasoning_effort": expected_effort}
-        assert turns[1][1]["effort"] == expected_effort
+        assert "effort" not in turns[1][1]
+        assert [method for method, _ in client.calls].count("model/list") == 1
         ap_client.patch.assert_awaited_once_with(
             "/v1/sessions/conv_side",
             json={
@@ -643,6 +669,7 @@ async def test_drive_side_chat_requests_forks_with_the_parents_switched_settings
     assert forks[0]["config"] == {"model_reasoning_effort": "max"}
     assert "side conversation" in forks[0]["developerInstructions"]
     assert [method for method, _ in client.calls][-1] == "turn/start"
+    assert [method for method, _ in client.calls].count("model/list") == 1
 
 
 @pytest.mark.asyncio

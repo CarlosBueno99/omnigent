@@ -5638,6 +5638,15 @@ async def test_events_rotated_codex_side_chat_uses_the_launch_directory(
             "thread not found: 0199-abc",
         ),
         (ConnectionError("websocket closed 1011"), 503, "codex_side_chat_unavailable", None),
+        (
+            ValueError("Codex model capabilities unavailable for None"),
+            409,
+            "codex_side_chat_settings_unavailable",
+            (
+                "Could not resolve the side chat's default effort. "
+                "Select an explicit effort and retry."
+            ),
+        ),
     ],
 )
 async def test_events_codex_side_chat_message_failure_is_structured(

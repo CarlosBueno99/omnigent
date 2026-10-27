@@ -6488,6 +6488,17 @@ def create_runner_app(
                         "detail": _rpc_message,
                     },
                 )
+            except ValueError:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "error": "codex_side_chat_settings_unavailable",
+                        "detail": (
+                            "Could not resolve the side chat's default effort. "
+                            "Select an explicit effort and retry."
+                        ),
+                    },
+                )
             except (ConnectionError, OSError, TimeoutError, WebSocketException) as exc:
                 _logger.warning(
                     "Codex side-chat app-server unreachable: conv=%s thread=%s error=%r",

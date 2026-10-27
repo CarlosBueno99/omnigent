@@ -174,6 +174,23 @@ async def fork_ephemeral_side_thread(
     return None
 
 
+async def _resolve_side_effort(
+    codex_client: CodexAppServerClient, thread_id: str, effort: str | None, model: str | None
+) -> str:
+    """Resolve a reset against the live thread when no model override was saved."""
+    from omnigent.harnesses.codex_native.app_server import resolve_codex_effort_for_model
+
+    if effort is None and model is None:
+        response = await codex_client.request(
+            "thread/read", {"threadId": thread_id, "includeTurns": False}
+        )
+        result = response.get("result")
+        thread = result.get("thread") if isinstance(result, dict) else None
+        actual_model = thread.get("model") if isinstance(thread, dict) else None
+        model = actual_model if isinstance(actual_model, str) and actual_model else None
+    return await resolve_codex_effort_for_model(codex_client, effort, model)
+
+
 async def submit_side_turn(
     codex_client: CodexAppServerClient,
     child_thread_id: str,
@@ -202,10 +219,8 @@ async def submit_side_turn(
     :returns: The started turn id, or ``None`` when absent.
     """
     if reset_effort or effort is not None:
-        from omnigent.harnesses.codex_native.app_server import resolve_codex_effort_for_model
-
-        effort = await resolve_codex_effort_for_model(
-            codex_client, None if reset_effort else effort, model
+        effort = await _resolve_side_effort(
+            codex_client, child_thread_id, None if reset_effort else effort, model
         )
     params: _JsonObject = {
         "threadId": child_thread_id,
@@ -308,11 +323,12 @@ async def open_side_chat_on_client(
         **(settings or {}),
         **{key: value for key, value in overrides.items() if value is not None},
     }
-    if "effort" in settings or "effort" in overrides:
-        from omnigent.harnesses.codex_native.app_server import resolve_codex_effort_for_model
-
-        settings["effort"] = await resolve_codex_effort_for_model(
-            codex_client, overrides.get("effort", settings.get("effort")), settings.get("model")
+    if "effort" in overrides or ("model" in overrides and "effort" in settings):
+        settings["effort"] = await _resolve_side_effort(
+            codex_client,
+            parent_thread_id,
+            overrides.get("effort", settings.get("effort")),
+            settings.get("model"),
         )
     child_thread_id = await fork_ephemeral_side_thread(
         codex_client,
@@ -324,13 +340,8 @@ async def open_side_chat_on_client(
         return None
     if before_turn is not None:
         await before_turn(child_thread_id)
-    await submit_side_turn(
-        codex_client,
-        child_thread_id,
-        question,
-        model=overrides.get("model"),
-        effort=settings.get("effort") if "effort" in overrides else None,
-    )
+    # The fork already applied the resolved settings; its first turn inherits them.
+    await submit_side_turn(codex_client, child_thread_id, question)
     return child_thread_id
 
 
