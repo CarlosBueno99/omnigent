@@ -1573,6 +1573,9 @@ def _keep_recent_tool_history(messages: list[Message]) -> list[Message]:
     kept: set[str] = set()
     remaining = _REPLAYED_TOOL_HISTORY_MAX_BYTES
     for key, size in reversed(sizes.items()):
+        # Call arguments are not capped, so one call can exceed the whole budget.
+        if size > _REPLAYED_TOOL_HISTORY_MAX_BYTES:
+            continue
         if size > remaining:
             break
         kept.add(key)

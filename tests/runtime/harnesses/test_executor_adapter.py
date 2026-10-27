@@ -1451,6 +1451,33 @@ def test_translate_input_to_messages_bounds_total_tool_history() -> None:
     ] == adapter._translate_input_to_messages(input_value)
 
 
+def test_translate_input_to_messages_skips_tool_call_too_large_to_replay() -> None:
+    """A newest call larger than the whole budget is skipped, not every older call."""
+    from omnigent.runtime.harnesses import _executor_adapter as adapter
+
+    oversized_content = "x" * (adapter._REPLAYED_TOOL_HISTORY_MAX_BYTES + 1)
+    input_value: list[dict[str, Any]] = [
+        {"type": "message", "role": "user", "content": "rewrite the file"},
+        {"type": "function_call", "call_id": "call_read", "name": "read", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_read", "output": "old text"},
+        {
+            "type": "function_call",
+            "call_id": "call_write",
+            "name": "write",
+            "arguments": json.dumps({"content": oversized_content}),
+        },
+        {"type": "function_call_output", "call_id": "call_write", "output": "written"},
+    ]
+
+    messages = adapter._translate_input_to_messages(input_value, include_tool_history=True)
+
+    assert [(m["role"], m.get("metadata", {}).get("call_id")) for m in messages] == [
+        ("user", None),
+        ("tool_call", "call_read"),
+        ("tool_result", "call_read"),
+    ]
+
+
 # ── MCP tool-call observed/dispatch correlation ──────────
 #
 # These unit tests pin the queue mechanic that fixes the tool-call
