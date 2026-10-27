@@ -6874,6 +6874,25 @@ def _wait_for_claude_prompt_ready(
             empty_polls += 1
         if _claude_prompt_rendered(pane):
             return
+        remaining = hard_deadline - time.monotonic()
+        if (
+            bridge_dir is not None
+            and remaining > 0
+            and _occupying_surface(pane) == _SHELL_MODE_SURFACE
+        ):
+            # A blank startup capture can precede a restored shell draft.
+            surface = _restore_occupied_input(
+                socket_path,
+                tmux_target,
+                bridge_dir=bridge_dir,
+                timeout_s=min(_OCCUPIED_INPUT_DISMISS_TIMEOUT_S, remaining),
+            )
+            if surface == _SHELL_MODE_SURFACE:
+                raise ClaudeTerminalDialog(
+                    "Claude Code's input box is occupied by shell mode, so nothing was sent. "
+                    "Open the terminal, dismiss it, then retry."
+                )
+            continue
         billing_notice = auto_mode_billing_notice_visible(pane)
         if billing_notice:
             _acknowledge_auto_mode_billing_notice(socket_path, tmux_target)

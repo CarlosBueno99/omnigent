@@ -44,8 +44,11 @@ if startup in {"dead", "dead-no-status"}:
     raise SystemExit(1)
 print("Starting Claude Code...", flush=True)
 time.sleep(1.0)
-draft = "\n".join(f"OLD {index}" for index in range(8)) if startup.startswith("stale-") else ""
-box = _InputBox("bash" if startup == "stale-shell-frame" else "prompt", draft)
+draft = (
+    "\n".join(f"OLD {index}" for index in range(8))
+    if startup.startswith("stale-") or startup == "late-shell" else ""
+)
+box = _InputBox("bash" if startup in {"stale-shell-frame", "late-shell"} else "prompt", draft)
 
 
 def render(*_args):
@@ -103,6 +106,7 @@ while True:
         "exit-after-ready",
         "stale-frame",
         "stale-shell-frame",
+        "late-shell",
     ],
 )
 @pytest.mark.timeout(20)
@@ -206,7 +210,7 @@ def test_first_message_survives_slow_terminal_startup(
                 assert time.monotonic() - started_at[0] >= 1.0
                 assert json.loads(delivered.read_text()) == [["prompt", "FIRST_PROMPT_DELIVERED"]]
                 assert bridge._claude_pane_state(str(socket_path), "main").alive
-            elif startup.startswith("stale-"):
+            elif startup.startswith("stale-") or startup == "late-shell":
                 bridge.inject_user_message(bridge_dir, content="ONLY_NEW_INPUT", timeout_s=2.0)
                 assert json.loads(delivered.read_text()) == [["prompt", "ONLY_NEW_INPUT"]]
                 bridge.inject_slash_command(bridge_dir, command="/effort high", timeout_s=2.0)
@@ -221,7 +225,7 @@ def test_first_message_survives_slow_terminal_startup(
                     text=True,
                     timeout=5,
                 )
-                assert geometry.stdout.strip() == "6"
+                assert geometry.stdout.strip() == ("24" if startup == "late-shell" else "6")
             elif startup == "exit-after-ready":
                 caplog.set_level(logging.WARNING)
                 with pytest.raises(RuntimeError, match="tmux command failed"):

@@ -13628,11 +13628,12 @@ def test_inject_slash_command_confirms_a_surface_before_refusing_under_a_tiny_ca
 
 
 @pytest.mark.parametrize(
-    ("pane", "surface"),
+    ("pane", "surface", "first_capture_empty"),
     [
-        pytest.param(_SHELL_MODE_PANE, "shell mode", id="shell-mode"),
+        pytest.param(_SHELL_MODE_PANE, "shell mode", False, id="shell-mode"),
+        pytest.param(_SHELL_MODE_PANE, "shell mode", True, id="shell-after-blank-capture"),
         pytest.param(
-            _INLINE_REVERSE_SEARCH_PANE, "the prompt-history search", id="history-search"
+            _INLINE_REVERSE_SEARCH_PANE, "the prompt-history search", False, id="history-search"
         ),
     ],
 )
@@ -13641,6 +13642,7 @@ def test_inject_slash_command_refuses_an_input_mode_that_survives_the_restore(
     monkeypatch: pytest.MonkeyPatch,
     pane: str,
     surface: str,
+    first_capture_empty: bool,
 ) -> None:
     """
     A mode that outlives the dismissal Escapes is refused at once, not waited on.
@@ -13650,7 +13652,7 @@ def test_inject_slash_command_refuses_an_input_mode_that_survives_the_restore(
     refusal comes straight from the restore's result with nothing typed.
     """
     bridge_dir = _picker_bridge_dir(tmp_path)
-    sends = _fake_tmux(monkeypatch, [pane])
+    sends = _fake_tmux(monkeypatch, ["", pane] if first_capture_empty else [pane])
     clock = claude_native_bridge.time
 
     with pytest.raises(claude_native_bridge.ClaudeTerminalDialog, match=f"occupied by {surface}"):
