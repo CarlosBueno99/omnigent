@@ -6,6 +6,8 @@ import configparser
 import json
 import os
 import stat
+import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,6 +41,25 @@ def _isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv(HOST_TOKEN_ENV_VAR, "host-tok")
     monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(tmp_path / ".databrickscfg"))
     monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
+
+
+@pytest.fixture
+def _credential_env(tmp_path: Path) -> dict[str, str]:
+    source = Path(__file__).resolve().parents[2]
+    credential_home = tmp_path / "home"
+    credential_home.mkdir()
+    return {
+        "HOME": str(credential_home),
+        "PYTHONPATH": os.pathsep.join(
+            str(source / entry) for entry in (".", "sdks/python-client", "sdks/ui")
+        ),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "IS_SANDBOX": "1",
+        HOST_TOKEN_ENV_VAR: "host-tok",
+        "DATABRICKS_CONFIG_FILE": str(tmp_path / ".databrickscfg"),
+        "OMNIGENT_CONFIG_HOME": str(tmp_path / "config"),
+        "OMNIGENT_DATA_DIR": str(tmp_path / "data"),
+    }
 
 
 def _patch_get(monkeypatch: pytest.MonkeyPatch, resp_or_exc) -> dict:
@@ -512,15 +533,23 @@ async def test_broker_cancels_retry_and_closes_worker_from_an_active_loop(
     assert not workers[0].is_alive()
 
 
-def test_broker_deadline_closes_a_slow_response(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("reader", ["fetch", "cli"])
+def test_broker_deadline_closes_a_slow_response(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    _credential_env: dict[str, str],
+    reader: str,
+) -> None:
     """Periodic response bytes must not extend the total credential deadline."""
     disconnected = threading.Event()
+    stopped = threading.Event()
     received: list[str] = []
+    deadline = dc._TIMEOUT_S if reader == "cli" else 0.5
 
     class BrokerHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             received.append(self.path)
-            body = b" " * 400 + b'{"connected":false}'
+            body = b" " * (1500 if reader == "cli" else 400) + b'{"connected":false}'
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -528,26 +557,59 @@ def test_broker_deadline_closes_a_slow_response(monkeypatch: pytest.MonkeyPatch)
                 for offset in range(0, len(body), 10):
                     self.wfile.write(body[offset : offset + 10])
                     self.wfile.flush()
-                    time.sleep(0.05)
+                    if stopped.wait(0.2 if reader == "cli" else 0.05):
+                        break
             except (BrokenPipeError, ConnectionResetError):
                 disconnected.set()
 
         def log_message(self, _format: str, *_args: object) -> None:
             pass
 
-    monkeypatch.setattr(dc, "_TIMEOUT_S", 0.5)
+    if reader == "fetch":
+        monkeypatch.setattr(dc, "_TIMEOUT_S", deadline)
     server = ThreadingHTTPServer(("127.0.0.1", 0), BrokerHandler)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
     try:
+        url = f"http://127.0.0.1:{server.server_port}"
+        coords = tmp_path / dc._SIDECAR_NAME
+        coords.write_text(
+            json.dumps(
+                {
+                    "server": url,
+                    "host_id": "host",
+                    "host_token": "test-token",
+                    "workspace_host": "https://workspace.example.test",
+                }
+            )
+        )
         started = time.monotonic()
-        result = dc._fetch(f"http://127.0.0.1:{server.server_port}", "host", "test-token")
+        if reader == "cli":
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "omnigent.host.databricks_credential",
+                    "token",
+                    "--coords",
+                    str(coords),
+                ],
+                env=_credential_env,
+                cwd=tmp_path,
+                capture_output=True,
+                text=True,
+                timeout=deadline + 5,
+            )
+            assert completed.returncode == 0, completed.stderr
+            assert completed.stdout == ""
+        else:
+            assert dc._fetch(url, "host", "test-token") is None
         elapsed = time.monotonic() - started
-        assert result is None
-        assert elapsed < 1.5
-        assert disconnected.wait(1.0), "deadline must close the in-flight response"
+        assert deadline - 0.1 <= elapsed < deadline + (5 if reader == "cli" else 1)
+        assert disconnected.wait(2.0), "deadline must close the in-flight response"
         assert received == ["/v1/hosts/host/credentials/databricks"]
     finally:
+        stopped.set()
         server.shutdown()
         server.server_close()
         server_thread.join(timeout=2.0)
