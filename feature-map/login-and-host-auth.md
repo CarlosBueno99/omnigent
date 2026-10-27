@@ -15,6 +15,11 @@ be able to write resources without a separate Omnigent account.
 - `login-auto-detect`: `omnigent login <url>` detects the server's sign-in mode.
   States: accounts, OIDC, header mode, Databricks-fronted, and a workspace URL
   with an org selector.
+- `workspace-selector-validation`: a URL's `?o=` routes the current command
+  without replacing saved login details. Login and launch auth probes compare
+  it with the server's workspace header, even on HTTP 200; a mismatch names both
+  workspaces and asks for the full URL. Only successful verification saves the
+  selector. Servers without the header retain their existing login behavior.
 - `cli-browser-ticket-consent`: an OIDC sign-in opens a ticket-specific browser
   login and then an **Authorize sign-in** page. Compare its code with the CLI,
   choose **Approve** to complete sign-in, or **Deny** to stop it. Signing in
@@ -28,7 +33,9 @@ be able to write resources without a separate Omnigent account.
 - `expired-credential`: an expired or revoked Databricks credential leads to a
   re-authentication prompt. When a newly launched runner explicitly reports a
   pending host sign-in, its first message waits on that same runner until the
-  sign-in finishes or its bounded wait expires.
+  sign-in finishes or its bounded wait expires. A runner the server refuses on
+  credentials before it connects is reported with a sign-in-again instruction
+  naming `omnigent login`, not as a runner crash.
 - `proxy-env`: login detects the right mode even with HTTP proxy variables set.
 - `host-lifecycle`: register in the foreground or background, run as a per-user
   system service, and check status, stop, stop a session, or reset the host ID.
@@ -133,6 +140,14 @@ Never run these commands against the real `~/.omnigent` or `~/.databrickscfg`.
   (starts its own accounts server; run with plain `uv run pytest`).
 - **`profile-selection`:**
   `tests/e2e/test_host_auth_prefers_user_over_m2m_sp_e2e.py::test_resolve_auth_for_host_must_not_select_m2m_sp_over_user_profile`
+- **`workspace-selector-validation`:**
+  `tests/e2e/test_host_inline_login.py::test_login_rejects_truncated_workspace_selector`
+  runs the real CLI and local server behind the existing mock HTTPS workspace,
+  using a test-owned PAT and CA. The proxy accepts the bearer but reports a
+  different workspace. Login must fail without changing auth/config files; a
+  corrected URL must succeed. This tests CLI, HTTP and file boundaries, not a
+  live Databricks deployment. The login and backend unit suites cover cached,
+  refreshed and header-auth responses, omitted headers, and process-local routing.
 - **`expired-credential`:**
   `tests/e2e/test_expired_databricks_credential_launch.py::test_expired_databricks_credential_offers_reauth_not_edge_403`
 - **Pending host sign-in:**
@@ -144,6 +159,10 @@ Never run these commands against the real `~/.omnigent` or `~/.databrickscfg`.
   covers cancellation, stop, replacement, process exit and expiry. The isolated
   header-mode environment has no interactive credential source, so it cannot
   drive an actual browser reauthorization.
+- **Runner refused on credentials:**
+  `tests/host/test_connect.py::test_watch_runner_reports_refused_credentials_as_sign_in`
+  (plain `uv run pytest`) checks the sign-in instruction before a connection
+  and an ordinary runner fault after one.
 - **`databricks-credential-kind`:** needs a real workspace and one test
   profile of each kind. No e2e covers the host daemon against a real workspace.
 - **`host-lifecycle`:** run `omnigent host --help` and the management commands
