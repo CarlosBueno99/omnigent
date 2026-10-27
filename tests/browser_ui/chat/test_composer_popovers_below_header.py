@@ -191,11 +191,23 @@ def test_mcp_server_menu_stays_below_header_on_short_window(
     _assert_scrolls(_scroll_container(first_server))
 
 
+@pytest.mark.parametrize("native_safe_top", ["", "48px"], ids=["browser", "native-shell"])
 def test_background_task_card_opens_below_header_on_short_window(
-    page: Page, chat_session_contract: ChatSessionContract
+    page: Page, chat_session_contract: ChatSessionContract, native_safe_top: str
 ) -> None:
     chat = chat_session_contract
     _open(page, chat, _SHORT_WINDOW)
+    if native_safe_top:
+        # Native shells move the header down by the status-bar safe area.
+        page.evaluate(
+            """(safeTop) => {
+              const root = document.documentElement;
+              root.style.setProperty("--omnigent-android-safe-area-top", safeTop);
+              document.querySelector(".app-shell").dataset.androidNative = "true";
+            }""",
+            native_safe_top,
+        )
+        assert box(_header(page))["y"] > 0, box(_header(page))
     chat.emit(
         {
             "event": "session.status",

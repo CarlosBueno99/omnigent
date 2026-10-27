@@ -11,8 +11,31 @@ export const COMPOSER_POPOVER_Z = "z-20";
 export const COMPOSER_POPOVER_MAX_H =
   "max-h-[calc(var(--omnigent-viewport-height,100svh)_-_var(--omnigent-header-height)_-_var(--omnigent-safe-top)_-_var(--omnigent-safe-bottom)_-_100%_-_4rem)]";
 
+const POPOVER_VIEWPORT_INSET = 8;
+
 /**
  * Collision padding for the Radix background-task popover so it opens below the
  * z-30 header (h-14 = 3.5rem); other sides keep the default 8px viewport inset.
  */
-export const COMPOSER_POPOVER_HEADER_INSET = { top: 56, right: 8, bottom: 8, left: 8 };
+export const COMPOSER_POPOVER_HEADER_INSET = {
+  top: 56,
+  right: POPOVER_VIEWPORT_INSET,
+  bottom: POPOVER_VIEWPORT_INSET,
+  left: POPOVER_VIEWPORT_INSET,
+};
+
+/** {@link COMPOSER_POPOVER_HEADER_INSET}, lowered to clear a header that native shells move down. */
+export function measureComposerPopoverHeaderInset(): typeof COMPOSER_POPOVER_HEADER_INSET {
+  const headerBottom = Math.max(
+    0,
+    ...Array.from(
+      document.querySelectorAll(".chat-header"),
+      (header) => header.getBoundingClientRect().bottom,
+    ),
+  );
+  const top = Math.max(
+    COMPOSER_POPOVER_HEADER_INSET.top,
+    Math.ceil(headerBottom) + POPOVER_VIEWPORT_INSET,
+  );
+  return { ...COMPOSER_POPOVER_HEADER_INSET, top };
+}
