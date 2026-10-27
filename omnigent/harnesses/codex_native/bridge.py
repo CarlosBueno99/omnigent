@@ -15,7 +15,7 @@ import tempfile
 import time
 import tomllib
 from collections.abc import Callable, Iterator, Mapping, MutableMapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -186,6 +186,8 @@ class CodexNativeBridgeState:
         ``"/home/user/project"``.
     :param active_turn_id: Current Codex turn id, if one is running,
         e.g. ``"turn_abc123"``.
+    :param file_revision: Inode and modification time of the observed state file;
+        excluded from logical equality and never persisted in the payload.
     """
 
     session_id: str
@@ -194,6 +196,7 @@ class CodexNativeBridgeState:
     codex_home: str
     active_turn_id: str | None = None
     cwd: str | None = None
+    file_revision: tuple[int, int] | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -1525,7 +1528,9 @@ def read_bridge_state_result(bridge_dir: Path) -> CodexNativeBridgeStateRead:
     try:
         if not stat.S_ISREG(path.stat().st_mode):
             return CodexNativeBridgeStateRead(None, "not_file")
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        with path.open(encoding="utf-8") as handle:
+            state_stat = os.fstat(handle.fileno())
+            raw = json.load(handle)
     except FileNotFoundError as exc:
         return CodexNativeBridgeStateRead(None, "missing", exc.errno)
     except OSError as exc:
@@ -1564,6 +1569,7 @@ def read_bridge_state_result(bridge_dir: Path) -> CodexNativeBridgeStateRead:
             codex_home=codex_home,
             active_turn_id=parsed_active_turn_id,
             cwd=cwd if isinstance(cwd, str) and cwd else None,
+            file_revision=(state_stat.st_ino, state_stat.st_mtime_ns),
         ),
         "ready",
     )
@@ -1601,7 +1607,8 @@ def update_active_turn_id(
     :param active_turn_id: Active turn id, e.g. ``"turn_abc123"``,
         or ``None`` when no turn is running.
     :param expected_state: RPC's original bridge snapshot. When provided,
-        preserve a binding or active turn changed while its reply was pending.
+        preserve any file revision observed while its reply was pending,
+        including a completed turn whose fields are idle again.
     :returns: None.
     """
     with _bridge_state_lock(bridge_dir):
@@ -1616,6 +1623,10 @@ def update_active_turn_id(
             or state.socket_path != expected_state.socket_path
             or state.codex_home != expected_state.codex_home
             or state.active_turn_id != expected_state.active_turn_id
+            or (
+                expected_state.file_revision is not None
+                and state.file_revision != expected_state.file_revision
+            )
         ):
             return
         _write_bridge_state_unlocked(

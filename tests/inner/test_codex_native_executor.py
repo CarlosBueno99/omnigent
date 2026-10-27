@@ -1676,12 +1676,21 @@ def test_late_delivery_reply_preserves_newer_bridge_state(
     assert params["expectedTurnId"] == newer.active_turn_id
 
 
-@pytest.mark.parametrize("live_injection", [False, True], ids=["dispatch", "live-steer"])
-def test_late_steer_reply_does_not_resurrect_completed_turn(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, live_injection: bool
+@pytest.mark.parametrize(
+    ("active_turn_id", "live_injection"),
+    [(None, False), ("turn_existing", False), ("turn_existing", True)],
+    ids=["start", "steer", "live-steer"],
+)
+def test_late_delivery_reply_does_not_resurrect_completed_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    active_turn_id: str | None,
+    live_injection: bool,
 ) -> None:
     """A completion observed before the RPC reply still governs the next send."""
-    _seed_bridge(tmp_path, active_turn_id="turn_existing")
+    from omnigent.harnesses.codex_native import forwarder
+
+    _seed_bridge(tmp_path, active_turn_id=active_turn_id)
     before = read_bridge_state(tmp_path)
     assert before is not None
 
@@ -1692,8 +1701,13 @@ def test_late_steer_reply_does_not_resurrect_completed_turn(
 
         async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
             response = await super().request(method, params)
-            if method == "turn/steer":
-                write_bridge_state(tmp_path, replace(before, active_turn_id=None))
+            if method in {"turn/start", "turn/steer"} and len(type(self).requests) == 1:
+                result = response["result"]
+                turn_id = result["turn"]["id"] if method == "turn/start" else result["turnId"]
+                params = {"threadId": before.thread_id, "turn": {"id": turn_id}}
+                forwarder._turn_started_status_edge(tmp_path, params)
+                edge = forwarder._terminal_turn_status_edge(tmp_path, "turn/completed", params)
+                assert edge is not None and edge.status == "idle"
             return response
 
     monkeypatch.setattr(
@@ -1708,7 +1722,7 @@ def test_late_steer_reply_does_not_resurrect_completed_turn(
     assert read_bridge_state(tmp_path) == replace(before, active_turn_id=None)
     assert _collect_turn_events(executor, "follow-up") == [TurnComplete(response=None)]
     assert [method for method, _ in _CompletedBeforeReplyClient.requests] == [
-        "turn/steer",
+        "turn/start" if active_turn_id is None else "turn/steer",
         "turn/start",
     ]
 

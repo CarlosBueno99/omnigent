@@ -125,8 +125,10 @@ def test_bridge_state_preserves_native_working_directory(tmp_path: Path) -> None
     state = read_bridge_state(tmp_path)
     assert state is not None
     assert state.cwd == str(tmp_path)
+    assert state.file_revision is not None
     observation = codex_native_bridge.read_bridge_state_result(tmp_path)
     assert observation.state == state
+    assert observation.state.file_revision == state.file_revision
     assert observation.status == "ready"
     assert observation.os_errno is None
 
@@ -135,6 +137,7 @@ def test_bridge_state_preserves_native_working_directory(tmp_path: Path) -> None
     updated = read_bridge_state(tmp_path)
     assert updated is not None
     assert updated.cwd == str(tmp_path)
+    assert updated.file_revision != state.file_revision
 
 
 @pytest.mark.parametrize(
