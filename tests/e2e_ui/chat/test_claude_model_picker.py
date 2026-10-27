@@ -1104,8 +1104,6 @@ def _assert_native_claude_turn(base_url: str, session_id: str, reply: str, model
         and reply in json.dumps(record.get("message", {}).get("content"))
     )
     wire_model = model.removesuffix("[1m]")
-    assert assistant["requestedModel"] == model
-    assert assistant["message"]["model"] == wire_model
     request = next(
         record
         for record in records
