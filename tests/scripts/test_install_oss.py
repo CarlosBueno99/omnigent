@@ -16,6 +16,7 @@ package-manager probe is driven by putting fake executables on ``PATH``.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shlex
 import shutil
@@ -24,6 +25,7 @@ import sys
 import zipfile
 from pathlib import Path
 
+import pexpect
 import pytest
 
 # repo-root/scripts/install_oss.sh, from tests/scripts/test_install_oss.py
@@ -32,6 +34,137 @@ INSTALLER = Path(__file__).resolve().parents[2] / "scripts" / "install_oss.sh"
 # Resolve sh up front: some tests override PATH to probe package-manager
 # detection, which would otherwise hide the launcher from subprocess.
 SH = shutil.which("sh") or "/bin/sh"
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize("platform", ["Linux", "Darwin"])
+@pytest.mark.parametrize(
+    ("version", "answer", "upgrade_version", "upgrade_status"),
+    [
+        pytest.param("3.3a", None, "3.3a", 0, id="supported"),
+        pytest.param("3.0", None, "3.3a", 0, id="noninteractive"),
+        pytest.param("3.0", "n", "3.3a", 0, id="declined"),
+        pytest.param("3.0", "y", "3.3a", 0, id="upgraded"),
+        pytest.param("3.0", "y", "3.0", 0, id="package-did-not-upgrade"),
+        pytest.param("3.0", "y", "3.0", 17, id="package-failed"),
+    ],
+)
+def test_installer_main_checks_tmux_with_explicit_consent(
+    tmp_path: Path,
+    platform: str,
+    version: str,
+    answer: str | None,
+    upgrade_version: str,
+    upgrade_status: int,
+) -> None:
+    """Drive the complete installer with a PTY and local executable dependencies."""
+    home = tmp_path / "home"
+    home.mkdir()
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "sh").symlink_to(SH)
+    calls = tmp_path / "calls.jsonl"
+    calls.touch()
+    version_file = tmp_path / "tmux-version"
+    version_file.write_text(version)
+    dispatcher = tools / "fake-tool"
+    dispatcher.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "tool, args = Path(sys.argv[0]).name, sys.argv[1:]\n"
+        "with open(os.environ['TEST_CALLS'], 'a') as log:\n"
+        "    log.write(json.dumps([tool, args]) + '\\n')\n"
+        "if tool == 'uname':\n"
+        "    print(os.environ['TEST_PLATFORM'])\n"
+        "elif tool == 'tmux':\n"
+        "    print('tmux ' + Path(os.environ['TEST_VERSION']).read_text())\n"
+        "elif tool in ('sudo', 'brew'):\n"
+        "    expected = ['apt-get', 'install', '-y', 'tmux'] if tool == 'sudo' "
+        "else ['upgrade', 'tmux']\n"
+        "    assert args == expected, args\n"
+        "    Path(os.environ['TEST_VERSION']).write_text(os.environ['TEST_UPGRADE_VERSION'])\n"
+        "    sys.exit(int(os.environ['TEST_UPGRADE_STATUS']))\n"
+        "elif tool == 'uv' and args[:2] == ['tool', 'dir']:\n"
+        "    print(os.environ['PATH'])\n"
+        "elif tool == 'uv' and args[:2] == ['tool', 'install']:\n"
+        "    assert args == ['tool', 'install', '--force', '-q', '--python', '3.12', 'omnigent']\n"
+        "elif args == ['--version']:\n"
+        "    print(tool + ' synthetic')\n"
+    )
+    dispatcher.chmod(0o755)
+    for tool in ("uname", "tmux", "uv", "node", "npm", "bwrap", "apt-get", "sudo", "brew"):
+        (tools / tool).symlink_to(dispatcher)
+    for tool in ("omnigent", "omni"):
+        executable = tools / tool
+        executable.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -m omnigent "$@"\n')
+        executable.chmod(0o755)
+    environment = {
+        "HOME": str(home),
+        "PATH": str(tools),
+        "TERM": "dumb",
+        "LANG": "C.UTF-8",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPATH": os.pathsep.join(
+            str(INSTALLER.parents[1] / relative)
+            for relative in (".", "sdks/python-client", "sdks/ui")
+        ),
+        "OMNIGENT_DATA_DIR": str(home / ".omnigent"),
+        "TEST_CALLS": str(calls),
+        "TEST_PLATFORM": platform,
+        "TEST_VERSION": str(version_file),
+        "TEST_UPGRADE_VERSION": upgrade_version,
+        "TEST_UPGRADE_STATUS": str(upgrade_status),
+    }
+    command = [str(INSTALLER), "--no-databricks", "--verbose"]
+    transcript = tmp_path / "installer.log"
+    if answer is None:
+        result = subprocess.run(
+            [SH, *command, "--non-interactive"],
+            env=environment,
+            cwd=home,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        output = result.stdout + result.stderr
+        transcript.write_text(output)
+        status = result.returncode
+    else:
+        with transcript.open("w") as log:
+            child = pexpect.spawn(SH, command, env=environment, cwd=str(home), encoding="utf-8")
+            child.logfile = log
+            try:
+                child.expect_exact("[Y/n] ", timeout=30)
+                assert "native terminals need tmux 3.3 or newer" in child.before
+                before_consent = [json.loads(line) for line in calls.read_text().splitlines()]
+                assert not [call for call in before_consent if call[0] in {"sudo", "brew"}]
+                child.sendline(answer)
+                child.expect(pexpect.EOF, timeout=90)
+                child.close()
+                status = child.exitstatus
+            finally:
+                child.close(force=True)
+        output = transcript.read_text()
+    assert status == 0, output
+    assert "Omnigent installed successfully" in output
+    invocations = [json.loads(line) for line in calls.read_text().splitlines()]
+    upgrades = [call for call in invocations if call[0] in {"sudo", "brew"}]
+    assert len(upgrades) == (1 if answer == "y" else 0)
+    assert sum(call[0] == "uv" and call[1][:2] == ["tool", "install"] for call in invocations) == 1
+    supported = version == "3.3a" or (answer == "y" and upgrade_version == "3.3a")
+    assert ("tmux 3.3a is supported" in output) is supported
+    if not supported:
+        assert "tmux 3.3 or newer" in output
+        assert "tmux -V" in output
+    if answer == "y" and not supported:
+        assert "tmux 3.3 or newer is still unavailable" in output
+    if answer == "y" and upgrade_status:
+        assert "tmux install/upgrade failed" in output
+    assert version_file.read_text() == (upgrade_version if answer == "y" else version)
+    ledger = json.loads((home / ".omnigent" / "install_ledger.json").read_text())
+    assert ledger["entries"]["deps"]["tmux"]["installed_by"] == "preexisting"
+
 
 # Agent credentials must not leak into the script under test (CLAUDE.md).
 _STRIP_ENV = ("DATABRICKS_TOKEN", "ANTHROPIC_API_KEY", "CODEX", "CLAUDE_CODE")
