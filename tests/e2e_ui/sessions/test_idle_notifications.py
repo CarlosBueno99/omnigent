@@ -33,13 +33,15 @@ groups.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
+
 import httpx
 import pytest
 from playwright.sync_api import Browser, Page, expect
 
+from tests._helpers.browser import user_page
 from tests._helpers.polling import poll_until
-from tests.e2e_ui.conftest import configure_mock_llm
-from tests.e2e_ui.mobile.test_composer_model_label_stop_overlap import _release_gates
+from tests.e2e_ui.conftest import configure_mock_llm, reset_mock_llm
 
 # Records constructed notifications and makes visibility/focus controllable
 # from the test via window.__hidden. Runs before any app script on every
@@ -492,16 +494,22 @@ def test_idle_notification_skipped_on_phone_when_watched_on_laptop(
         httpx.post(f"{mock_llm_server_url}/gate/release", timeout=5.0).raise_for_status()
         _wait_for_observed_session_status(phone, session_id, "idle", timeout=60_000)
 
-    laptop_context = browser.new_context(viewport={"width": 1280, "height": 800})
-    phone_context = browser.new_context(
-        viewport={"width": 390, "height": 844},
-        is_mobile=True,
-        has_touch=True,
-        device_scale_factor=3,
-    )
-    try:
-        laptop = laptop_context.new_page()
-        phone = phone_context.new_page()
+    with ExitStack() as cleanup:
+        # The reset also releases a turn still parked on the gate.
+        cleanup.callback(reset_mock_llm, mock_llm_server_url)
+        laptop = cleanup.enter_context(
+            user_page(browser, headers={}, viewport={"width": 1280, "height": 800})
+        )
+        phone = cleanup.enter_context(
+            user_page(
+                browser,
+                headers={},
+                viewport={"width": 390, "height": 844},
+                is_mobile=True,
+                has_touch=True,
+                device_scale_factor=3,
+            )
+        )
         for device in (laptop, phone):
             device.add_init_script(_HARNESS_INIT_SCRIPT)
             device.goto(f"{base_url}/c/{session_id}")
@@ -529,7 +537,3 @@ def test_idle_notification_skipped_on_phone_when_watched_on_laptop(
         notifs = phone.evaluate("window.__notifs")
         assert len(notifs) == 1, f"expected exactly one notification, got {notifs}"
         assert notifs[0]["options"]["tag"] == f"omnigent:session:{session_id}", notifs
-    finally:
-        _release_gates(mock_llm_server_url)
-        laptop_context.close()
-        phone_context.close()

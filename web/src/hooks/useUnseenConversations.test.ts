@@ -398,6 +398,32 @@ describe("useMarkConversationSeen", () => {
     expect(putCount()).toBe(0);
   });
 
+  it("sends a watched turn finish only with the write that reports it", async () => {
+    const mod = await loadFresh();
+    mod.seedReadState([]);
+    setWindowFocused(true);
+    renderHook(() => mod.useMarkConversationSeen("conv-1", 4_000, "p-1"));
+    expect(lastPutBody()).toHaveProperty("watched_turn_finish_id", "p-1");
+
+    mod.markConversationUnread("conv-1", 9_000);
+
+    expect(lastPutBody()).toEqual({ last_seen: 8_999, unread: true });
+  });
+
+  it("retries without the turn finish when the server rejects that field", async () => {
+    const mod = await loadFresh();
+    mod.seedReadState([]);
+    setWindowFocused(true);
+    authFetch.mockResolvedValueOnce({ ok: false, status: 422, json: async () => ({}) });
+
+    renderHook(() => mod.useMarkConversationSeen("conv-1", 4_000, "p-1"));
+
+    await vi.waitFor(() => expect(putCount()).toBe(2));
+    const legacyBody = lastPutBody();
+    expect(legacyBody).not.toHaveProperty("watched_turn_finish_id");
+    expect(legacyBody).toHaveProperty("unread", false);
+  });
+
   it("preserves a seeded explicit-unread on reload (first mount does not clear)", async () => {
     // Reload landing back on /c/conv-1: the list seeds the server's unread,
     // and the first mount must neither clear the override nor mark seen.

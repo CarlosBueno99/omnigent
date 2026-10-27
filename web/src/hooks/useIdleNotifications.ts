@@ -25,9 +25,7 @@ import { useLoadedConversations } from "@/hooks/useSidebarData";
 // that finished while the app was closed. A session is suppressed only while
 // the user is actively viewing it: the window is focused AND it's the open
 // conversation. Notifications follow the same rule — anything that needs
-// attention notifies, except the conversation you're actively looking at. A
-// turn-end is also skipped when the server reports the user watched that same
-// finish on another device (`viewer_watched_turn_finish_id`).
+// attention notifies, except the conversation you're actively looking at.
 //
 // Notifications are on by default — there's no settings toggle. In a plain
 // browser the Web Notifications API still requires a permission grant, so we
@@ -147,9 +145,10 @@ export function useIdleNotifications(activeConversationId?: string): void {
   // Deferred turn-end notifications, keyed by conversation id. A `running` →
   // `idle` edge schedules one; the session resuming (`running` again) clears it
   // before it fires, so only a settled idle — the real end — notifies.
-  const idleNotifyTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
-  // The turn-finish id each pending turn-end saw while its turn was running.
-  const idleNotifyFinishBaselines = useRef<Map<string, string | undefined>>(new Map());
+  // `finishBaseline` is the turn-finish id seen while that turn was running.
+  const idleNotifyTimers = useRef<
+    Map<string, { timer: ReturnType<typeof setTimeout>; finishBaseline: string | undefined }>
+  >(new Map());
   // Sessions we've already beeped a turn-end for and the user hasn't viewed
   // since. A session that finishes again while its notification is still
   // outstanding must NOT beep again — "sound only when a new banner appears,
@@ -202,7 +201,7 @@ export function useIdleNotifications(activeConversationId?: string): void {
   useEffect(() => {
     const timers = idleNotifyTimers.current;
     return () => {
-      for (const timer of timers.values()) clearTimeout(timer);
+      for (const pending of timers.values()) clearTimeout(pending.timer);
       timers.clear();
     };
   }, []);
@@ -304,9 +303,9 @@ export function useIdleNotifications(activeConversationId?: string): void {
     const timers = idleNotifyTimers.current;
     const presentIds = new Set(conversations.map((c) => c.id));
     // An inactive scope must not deliver a previously queued notification.
-    for (const [id, timer] of timers) {
+    for (const [id, pending] of timers) {
       if (!presentIds.has(id)) {
-        clearTimeout(timer);
+        clearTimeout(pending.timer);
         timers.delete(id);
       }
     }
@@ -319,9 +318,9 @@ export function useIdleNotifications(activeConversationId?: string): void {
       if (pending === undefined) continue;
       if (
         conversation.status === "running" ||
-        isTurnFinishWatched(conversation, idleNotifyFinishBaselines.current.get(conversation.id))
+        isTurnFinishWatched(conversation, pending.finishBaseline)
       ) {
-        clearTimeout(pending);
+        clearTimeout(pending.timer);
         timers.delete(conversation.id);
       }
     }
@@ -355,16 +354,16 @@ export function useIdleNotifications(activeConversationId?: string): void {
         // is what collapses an async task's multiple turn-ends into one beep.
         if (notifiedSessions.current.has(id)) continue;
         const finishBaseline = runningFinishIds.get(id);
+        // The user already watched this exact finish on another device.
         if (isTurnFinishWatched(conversation, finishBaseline)) continue;
         // Defer: a turn-end notifies only if the session is STILL idle after
         // the settle window (a step-by-step agent resumes before then, which
         // the resume loop above cancels). Re-arm if one was already pending.
         const existing = timers.get(id);
-        if (existing !== undefined) clearTimeout(existing);
-        idleNotifyFinishBaselines.current.set(id, finishBaseline);
-        timers.set(
-          id,
-          setTimeout(() => {
+        if (existing !== undefined) clearTimeout(existing.timer);
+        timers.set(id, {
+          finishBaseline,
+          timer: setTimeout(() => {
             timers.delete(id);
             // Re-check suppression at fire time — the user may have opened the
             // session (or refocused the window) during the settle window.
@@ -375,7 +374,7 @@ export function useIdleNotifications(activeConversationId?: string): void {
             // Agent's final words as the body when fetchable, else IDLE_BODY.
             notifyWithPreview(conversation, navigateRef.current);
           }, IDLE_SETTLE_MS),
-        );
+        });
       }
       for (const conversation of newElicitations) {
         if (windowFocused && conversation.id === activeConversationId) continue;
@@ -386,7 +385,7 @@ export function useIdleNotifications(activeConversationId?: string): void {
         // cue for this session — it's awaiting input, not quietly finishing.
         const pending = timers.get(conversation.id);
         if (pending !== undefined) {
-          clearTimeout(pending);
+          clearTimeout(pending.timer);
           timers.delete(conversation.id);
         }
         notify(conversation, ELICITATION_BODY, navigate);

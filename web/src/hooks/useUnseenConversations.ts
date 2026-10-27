@@ -117,22 +117,26 @@ export function nowSeconds(): number {
  * Best-effort and fire-and-forget: a failed PUT leaves the optimistic local
  * mirror in place, which the next mutation or a reload reconciles. Skips the
  * call when there's no baseline to report (nothing meaningful to sync).
+ * `watchedTurnFinishId` is sent only with the write that newly reports it.
  */
-async function syncReadState(conversationId: string): Promise<void> {
+async function syncReadState(conversationId: string, watchedTurnFinishId?: string): Promise<void> {
   const lastSeen = lastSeenMap[conversationId];
   if (lastSeen === undefined) return;
-  const watchedTurnFinishId = watchedTurnFinish.get(conversationId);
-  try {
-    await authenticatedFetch(`/v1/sessions/${encodeURIComponent(conversationId)}/read-state`, {
+  const readState = { last_seen: lastSeen, unread: explicitlyUnread.has(conversationId) };
+  const put = (body: object) =>
+    authenticatedFetch(`/v1/sessions/${encodeURIComponent(conversationId)}/read-state`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        last_seen: lastSeen,
-        unread: explicitlyUnread.has(conversationId),
-        // Only servers that report finish ids accept this field.
-        ...(watchedTurnFinishId !== undefined && { watched_turn_finish_id: watchedTurnFinishId }),
-      }),
+      body: JSON.stringify(body),
     });
+  try {
+    if (watchedTurnFinishId === undefined) {
+      await put(readState);
+      return;
+    }
+    const response = await put({ ...readState, watched_turn_finish_id: watchedTurnFinishId });
+    // A server without finish ids rejects the field; still record the read-state.
+    if (response.status === 422) await put(readState);
   } catch {
     // Network/auth errors must not break the UI; local state stays.
   }
@@ -253,11 +257,11 @@ export function isExplicitlyUnread(conversationId: string): boolean {
 // clock — used to dismiss self-initiated `updated_at` bumps like a
 // rename, which would otherwise flag the conversation unseen because
 // the server's new updated_at can land slightly past the client's
-// nowSeconds() under clock skew. `turnFinishId` reports the server's
-// `last_turn_finish_id` the user is watching, in the same PUT.
+// nowSeconds() under clock skew.
 export function markConversationSeen(
   conversationId: string,
   atSeconds?: number,
+  // The server's `last_turn_finish_id` being watched, reported in the same PUT.
   turnFinishId?: string,
 ): void {
   // A conversation the user explicitly marked unread stays unread until they
@@ -281,7 +285,7 @@ export function markConversationSeen(
     persistToStorage();
     notifySubscribers();
   }
-  void syncReadState(conversationId);
+  void syncReadState(conversationId, newlyWatched ? turnFinishId : undefined);
 }
 
 /**

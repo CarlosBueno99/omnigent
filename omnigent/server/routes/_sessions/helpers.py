@@ -628,6 +628,20 @@ def _watched_turn_finish_id(user_id: str | None, session_id: str) -> str | None:
     return _read_watched_turn_finish.get(_discovery_key(user_id), {}).get(session_id)
 
 
+def _local_turn_finish_sequence(turn_finish_id: str) -> int | None:
+    """
+    Read the sequence of a turn finish id this process issued.
+
+    :param turn_finish_id: A ``last_turn_finish_id``, e.g. ``"3f9c0d1e2a4b-17"``.
+    :returns: The sequence, e.g. ``17``, or ``None`` for an id from another
+        replica or an earlier process.
+    """
+    prefix, _, sequence = turn_finish_id.rpartition("-")
+    if prefix != _TURN_FINISH_ID_PREFIX or not sequence.isdigit():
+        return None
+    return int(sequence)
+
+
 def _set_read_state(
     user_id: str | None,
     session_id: str,
@@ -644,12 +658,18 @@ def _set_read_state(
     :param unread: Whether the session is explicitly flagged unread.
     :param watched_turn_finish_id: The ``last_turn_finish_id`` the caller just
         watched with the session open, e.g. ``"3f9c0d1e2a4b-17"``. ``None``
-        keeps the stored value.
+        keeps the stored value, as does an id older than the stored one.
     """
     key = _discovery_key(user_id)
     _read_last_seen.setdefault(key, {})[session_id] = last_seen
     if watched_turn_finish_id is not None:
-        _read_watched_turn_finish.setdefault(key, {})[session_id] = watched_turn_finish_id
+        watched = _read_watched_turn_finish.setdefault(key, {})
+        stored = watched.get(session_id)
+        stored_sequence = None if stored is None else _local_turn_finish_sequence(stored)
+        new_sequence = _local_turn_finish_sequence(watched_turn_finish_id)
+        # A delayed acknowledgment must not replace a newer finish's.
+        if stored_sequence is None or new_sequence is None or new_sequence >= stored_sequence:
+            watched[session_id] = watched_turn_finish_id
     if unread:
         _read_explicit_unread.setdefault(key, set()).add(session_id)
     else:

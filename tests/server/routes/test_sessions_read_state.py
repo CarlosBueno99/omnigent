@@ -292,3 +292,24 @@ def test_put_records_the_watched_turn_finish_for_the_caller() -> None:
         == "p-2"
     )
     assert _build_item("bob@example.com", conv).viewer_watched_turn_finish_id is None  # type: ignore[attr-defined]
+
+
+def test_put_keeps_the_newer_watched_turn_finish() -> None:
+    """A delayed acknowledgment of an earlier finish does not replace a newer one."""
+    client = TestClient(_build_app())
+    conv = _make_conversation("conv_finish")
+    finish_ids = []
+    for _ in range(2):
+        sessions_mod._publish_status("conv_finish", "running")
+        sessions_mod._publish_status("conv_finish", "idle")
+        finish_ids.append(_build_item(None, conv).last_turn_finish_id)  # type: ignore[attr-defined]
+    earlier_finish, current_finish = finish_ids
+
+    for watched in (current_finish, earlier_finish):
+        resp = client.put(
+            "/v1/sessions/conv_finish/read-state",
+            json={"last_seen": 5_000, "unread": False, "watched_turn_finish_id": watched},
+        )
+        assert resp.status_code == 204, resp.text
+
+    assert _build_item(None, conv).viewer_watched_turn_finish_id == current_finish  # type: ignore[attr-defined]
