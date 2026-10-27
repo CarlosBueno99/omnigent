@@ -4737,18 +4737,10 @@ async def _forward_available_status_events(
             # assistant entry still inheriting it is marked as a scheduled
             # wake (see _promote_pending_settle and the bridge parser).
             dedupe.pending_settled_response_id = response_id
-            # Save the latch before the hook cursor can make this edge unreplayable.
-            transcript_state = await asyncio.to_thread(_read_forward_state, bridge_dir)
-            if transcript_state is not None:
-                await _write_forward_state_async(
-                    bridge_dir,
-                    replace(
-                        transcript_state,
-                        pending_settled_response_id=dedupe.pending_settled_response_id,
-                    ),
-                )
         durable = next_durable
-        await _write_hook_state_async(bridge_dir, durable)
+        await _write_hook_state_async(
+            bridge_dir, durable, pending_settled_response_id=dedupe.pending_settled_response_id
+        )
     durable = HookForwardState(
         event_cursor=result.event_cursor,
         byte_offset=result.byte_offset,
@@ -7279,14 +7271,26 @@ def _write_hook_state(bridge_dir: Path, state: HookForwardState) -> None:
     _write_json_atomic(bridge_dir / _HOOK_STATE_FILE, payload)
 
 
-async def _write_hook_state_async(bridge_dir: Path, state: HookForwardState) -> None:
-    """
-    Persist hook state without blocking the asyncio event loop.
+async def _write_hook_state_async(
+    bridge_dir: Path,
+    state: HookForwardState,
+    *,
+    pending_settled_response_id: str | None = None,
+) -> None:
+    """Persist a terminal latch before the hook cursor makes its edge unreplayable.
 
     :param bridge_dir: Native Claude bridge directory.
     :param state: Cursor state to persist.
+    :param pending_settled_response_id: Acknowledged turn's pending settlement.
     :returns: None.
     """
+    if pending_settled_response_id is not None:
+        transcript_state = await asyncio.to_thread(_read_forward_state, bridge_dir)
+        if transcript_state is not None:
+            await _write_forward_state_async(
+                bridge_dir,
+                replace(transcript_state, pending_settled_response_id=pending_settled_response_id),
+            )
     await asyncio.to_thread(_write_hook_state, bridge_dir, state)
 
 
