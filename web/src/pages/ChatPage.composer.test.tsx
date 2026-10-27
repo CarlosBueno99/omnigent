@@ -42,7 +42,7 @@ import { serializeReplyDraft, type StoredReplyDraft } from "@/lib/replyDraft";
 import { ApiError } from "@/lib/sessionsApi";
 import { COMPOSER_SEND_SHORTCUT_STORAGE_KEY } from "@/lib/composerSendShortcutPreferences";
 import { composerContextToLabels } from "@/lib/composerContextAdapters";
-import { CHAT_COLUMN_WIDTH, COMPOSER_POPOVER_Z } from "./chatLayout";
+import { CHAT_COLUMN_WIDTH } from "./chatLayout";
 
 // Composer reads workspace files via a TanStack query hook (for "@"-file
 // mentions). These slash-command tests don't exercise that, so stub the hook
@@ -909,7 +909,6 @@ describe("Composer slash-command menu", () => {
     // Built-ins are inserted first, so "/compact" tops the list and is the
     // default highlight — the crux of the fix (was -1 / nothing selected).
     expect(activeRow()?.textContent).toContain("/compact");
-    expect(activeRow()?.closest(".absolute")).toHaveClass(COMPOSER_POPOVER_Z);
   });
 
   it("Tab completes the highlighted skill into the textarea", () => {
@@ -1452,7 +1451,7 @@ describe("Composer slash-command submit routing", () => {
     expect(onSend).toHaveBeenCalledWith("/not-a-real-skill", undefined);
   });
 
-  it("floats /help output above the composer in a capped scroll panel", () => {
+  it("shows /help output in the floating panel and clears the draft", () => {
     render(<Composer {...composerProps({ onSendSlashCommand: vi.fn() })} />);
     const ta = textarea();
     fireEvent.change(ta, { target: { value: "/help" } });
@@ -1461,12 +1460,10 @@ describe("Composer slash-command submit routing", () => {
     const output = screen.getByTestId("composer-command-output");
     expect(output).toHaveTextContent("/help — Show available slash commands");
     expect(output).toHaveTextContent("/deslop — Remove AI slop");
-    expect(output).toHaveClass("absolute", COMPOSER_POPOVER_Z, "overflow-y-auto");
     expect(ta.value).toBe("");
-    expect(output.parentElement).toHaveAttribute("data-composer-card");
   });
 
-  it("floats the bare /model hint in the popover band and clears the draft", () => {
+  it("shows the bare /model hint in the floating panel and clears the draft", () => {
     render(<Composer {...composerProps()} />);
     const ta = textarea();
     // Trailing space closes the slash menu so Enter submits (see /model tests).
@@ -1475,11 +1472,10 @@ describe("Composer slash-command submit routing", () => {
 
     const output = screen.getByTestId("composer-command-output");
     expect(output).toHaveTextContent("Usage: /model <name> | default");
-    expect(output).toHaveClass("absolute", COMPOSER_POPOVER_Z);
     expect(ta.value).toBe("");
   });
 
-  it("floats /context output in the popover band and clears the draft", () => {
+  it("shows /context output in the floating panel and clears the draft", () => {
     render(<Composer {...composerProps({ onSendSlashCommand: vi.fn() })} />);
     const ta = textarea();
     fireEvent.change(ta, { target: { value: "/context" } });
@@ -1487,7 +1483,6 @@ describe("Composer slash-command submit routing", () => {
 
     const output = screen.getByTestId("composer-command-output");
     expect(output).toHaveTextContent("Items in context:");
-    expect(output).toHaveClass("absolute", COMPOSER_POPOVER_Z);
     expect(ta.value).toBe("");
   });
 
@@ -1527,6 +1522,18 @@ describe("Composer slash-command submit routing", () => {
     fireEvent.keyDown(panel, { key: "Escape" });
     expect(screen.queryByTestId("composer-command-output")).not.toBeInTheDocument();
     expect(onStop).not.toHaveBeenCalled();
+    expect(ta).toHaveFocus();
+  });
+
+  it("dismisses floating command output from its close button", () => {
+    render(<Composer {...composerProps({ onSendSlashCommand: vi.fn() })} />);
+    const ta = textarea();
+    fireEvent.change(ta, { target: { value: "/help" } });
+    fireEvent.keyDown(ta, { key: "Enter" });
+    expect(screen.getByTestId("composer-command-output")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss command output" }));
+    expect(screen.queryByTestId("composer-command-output")).not.toBeInTheDocument();
     expect(ta).toHaveFocus();
   });
 

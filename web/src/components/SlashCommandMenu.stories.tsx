@@ -51,6 +51,10 @@ export const FilteredSkill: Story = {
   },
 };
 
+export const LoadingSkills: Story = {
+  args: { query: "", activeIndex: 0, commands: BUILTIN_SLASH_COMMANDS, skillsStatus: "loading" },
+};
+
 export const LoadingFilteredSkills: Story = {
   args: {
     query: "review",

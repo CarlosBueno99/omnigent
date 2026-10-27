@@ -4,9 +4,12 @@ export const CHAT_COLUMN_WIDTH =
 /** Stack composer popovers below the transparent z-30 header. */
 export const COMPOSER_POPOVER_Z = "z-20";
 
-/** Cap popovers at max-h-64 or the space above the composer on short screens. */
+/**
+ * Cap a popover anchored in the composer card to the space above that card: 100% is the
+ * card's height, and 4rem covers the form padding, Plan-mode status line and mb-2 gap.
+ */
 export const COMPOSER_POPOVER_MAX_H =
-  "max-h-[min(--spacing(64),calc(100svh_-_var(--omnigent-header-height)_-_10.5rem))]";
+  "max-h-[calc(var(--omnigent-viewport-height,100svh)_-_var(--omnigent-header-height)_-_var(--omnigent-safe-top)_-_var(--omnigent-safe-bottom)_-_100%_-_4rem)]";
 
 /**
  * Collision padding for the Radix background-task popover so it opens below the

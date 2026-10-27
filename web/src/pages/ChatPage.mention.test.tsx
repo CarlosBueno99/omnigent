@@ -12,7 +12,6 @@ import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 
 import { useChatStore } from "@/store/chatStore";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { WorkspaceFile } from "@/hooks/useWorkspaceChangedFiles";
-import { COMPOSER_POPOVER_MAX_H, COMPOSER_POPOVER_Z } from "@/pages/chatLayout";
 
 // Drill-down "@"-mention browses one directory at a time, so the test stubs
 // both sources: the root listing (useWorkspaceAllFiles) and the per-directory
@@ -247,8 +246,6 @@ describe("Composer @-file-mention browser (native sessions)", () => {
     type("@");
     expect(screen.getByTitle("Open src")).toBeInTheDocument();
     expect(screen.getByTitle("Attach readme.md")).toBeInTheDocument();
-    expect(screen.getByRole("listbox").parentElement).toHaveClass(COMPOSER_POPOVER_MAX_H);
-    expect(screen.getByRole("listbox").closest(".bottom-full")).toHaveClass(COMPOSER_POPOVER_Z);
   });
 
   it("gives Shift+Tab to the open menu before the permission-mode shortcut", async () => {

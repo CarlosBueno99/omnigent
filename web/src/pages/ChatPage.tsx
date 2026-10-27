@@ -3125,6 +3125,11 @@ function ComposerImpl(
     setCommandError(text);
   };
 
+  const dismissCommandOutput = () => {
+    setCommandError(null);
+    textareaRef.current?.focus();
+  };
+
   /**
    * Execute a slash command by name + optional argument string.
    * Clears the input and error state on success (or sets an error on
@@ -4124,30 +4129,40 @@ function ComposerImpl(
                 />
               )}
               {commandError !== null && (
-                // Focusable so keyboard-only users can scroll output longer than the cap.
                 <div
-                  data-testid="composer-command-output"
-                  role="status"
-                  tabIndex={0}
-                  aria-label="Slash command output"
-                  // The panel is focusable for scrolling, so Escape here must
-                  // dismiss it too — mirror the textarea path and restore focus.
-                  onKeyDown={(e) => {
-                    if (e.key === "Escape") {
-                      e.preventDefault();
-                      setCommandError(null);
-                      textareaRef.current?.focus();
-                    }
-                  }}
                   className={cn(
-                    "absolute inset-x-0 bottom-full mb-2 overflow-y-auto overscroll-contain rounded-[12px] border border-border bg-popover px-3 py-2 shadow-menu",
+                    "absolute inset-x-0 bottom-full mb-2 flex flex-col overflow-hidden rounded-[12px] border border-border bg-popover shadow-menu",
                     COMPOSER_POPOVER_Z,
                     COMPOSER_POPOVER_MAX_H,
                   )}
                 >
-                  <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-muted-foreground">
-                    {commandError}
-                  </p>
+                  {/* Focusable so keyboard-only users can scroll output longer than the cap. */}
+                  <div
+                    data-testid="composer-command-output"
+                    role="status"
+                    tabIndex={0}
+                    aria-label="Slash command output"
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") {
+                        e.preventDefault();
+                        dismissCommandOutput();
+                      }
+                    }}
+                    className="max-h-64 min-h-0 overflow-y-auto overscroll-contain py-2 pr-9 pl-3"
+                  >
+                    <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-muted-foreground">
+                      {commandError}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label="Dismiss command output"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={dismissCommandOutput}
+                    className="absolute top-1.5 right-1.5 rounded-full p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  >
+                    <XIcon className="size-3.5" />
+                  </button>
                 </div>
               )}
               {/* "@"-file-mention browser — native coding-agent sessions only.
