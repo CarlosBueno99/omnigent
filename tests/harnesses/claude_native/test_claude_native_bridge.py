@@ -11596,11 +11596,13 @@ def test_a_draft_taller_than_the_pane_is_cleared_before_delivery(
 
 @pytest.mark.parametrize("slash", [False, True], ids=["web-message", "slash-command"])
 @pytest.mark.parametrize("cursor_at_end", [False, True], ids=["cursor-at-start", "cursor-at-end"])
+@pytest.mark.parametrize("wrapped_opening", [False, True], ids=["whole-title", "wrapped-title"])
 def test_a_quoted_prompt_in_a_clipped_draft_cannot_end_clearing_early(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     slash: bool,
     cursor_at_end: bool,
+    wrapped_opening: bool,
 ) -> None:
     """Nested draft rules cannot prove the real composer's hidden rows were cleared."""
     draft = (
@@ -11608,6 +11610,15 @@ def test_a_quoted_prompt_in_a_clipped_draft_cannot_end_clearing_early(
     )
     composer = _EditableComposer(draft, cursor=len(draft) if cursor_at_end else 0, visible_rows=4)
     composer.install(monkeypatch)
+    if wrapped_opening:
+        capture = claude_native_bridge._capture_pane
+        monkeypatch.setattr(
+            claude_native_bridge,
+            "_capture_pane",
+            lambda *args: capture(*args).replace(
+                composer._RULE + "\n", "first part of a long title\nlast part ─\n", 1
+            ),
+        )
     monkeypatch.setattr(
         claude_native_bridge, "_usable_composer_height", lambda *_: nullcontext(False)
     )

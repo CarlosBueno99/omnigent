@@ -6357,7 +6357,7 @@ def _composer_frame_ambiguous(lines: list[str], rules: list[int] | None = None) 
     """Detect an apparent input frame nested beneath another aligned prompt."""
     if rules is None:
         rules = [idx for idx, line in enumerate(lines) if _is_box_rule(line)]
-    if len(rules) < 3:
+    if len(rules) < 2:
         return False
     frame_indent = min(len(lines[idx]) - len(lines[idx].lstrip()) for idx in rules[-2:])
     frame_rules = [
@@ -6370,22 +6370,15 @@ def _composer_frame_ambiguous(lines: list[str], rules: list[int] | None = None) 
     )
     if inner_row.strip()[:1] not in _COMPOSER_MODE_GLYPHS:
         return False
-    seen_indents: set[int] = set()
-    for idx in reversed(rules[: rules.index(frame_rules[-2])]):
-        indent = len(lines[idx]) - len(lines[idx].lstrip())
-        if indent >= frame_indent or indent in seen_indents:
-            continue
-        seen_indents.add(indent)
-        first = next(
-            (row for row in range(idx + 1, frame_rules[-2]) if lines[row].strip()), frame_rules[-2]
-        )
+    # A clipped or wrapped opening title may leave no recognizable outer rule.
+    for first, row in enumerate(lines[: frame_rules[-2]]):
+        indent = len(row) - len(row.lstrip())
         if (
-            first < frame_rules[-2]
-            and lines[first].strip()[:1] in _COMPOSER_MODE_GLYPHS
-            and len(lines[first]) - len(lines[first].lstrip()) == indent
+            indent < frame_indent
+            and row.strip()[:1] in _COMPOSER_MODE_GLYPHS
             and all(
-                not row.strip() or len(row) - len(row.lstrip()) > indent
-                for row in lines[first + 1 :]
+                not following.strip() or len(following) - len(following.lstrip()) > indent
+                for following in lines[first + 1 :]
             )
         ):
             return True
