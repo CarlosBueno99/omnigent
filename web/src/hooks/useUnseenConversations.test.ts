@@ -360,6 +360,44 @@ describe("useMarkConversationSeen", () => {
     expect(mod.isConversationUnseen("conv-1", 6_000, "idle")).toBe(false); // no baseline written
   });
 
+  it("reports each newly watched turn finish while focused", async () => {
+    const mod = await loadFresh();
+    mod.seedReadState([]);
+    setWindowFocused(true);
+    vi.useFakeTimers({ now: 5_000_000 });
+
+    const { rerender } = renderHook(
+      ({ finishId }) => mod.useMarkConversationSeen("conv-1", 4_000, finishId),
+      { initialProps: { finishId: "p-1" as string | null } },
+    );
+    expect(lastPutBody()).toEqual({
+      last_seen: 5_000,
+      unread: false,
+      watched_turn_finish_id: "p-1",
+    });
+
+    rerender({ finishId: "p-2" });
+    expect(lastPutBody()).toEqual({
+      last_seen: 5_000,
+      unread: false,
+      watched_turn_finish_id: "p-2",
+    });
+    const putsAfterSecondFinish = putCount();
+
+    rerender({ finishId: "p-2" });
+    expect(putCount()).toBe(putsAfterSecondFinish);
+  });
+
+  it("does not report a turn finish while the window is blurred", async () => {
+    const mod = await loadFresh();
+    mod.seedReadState([]);
+    setWindowFocused(false);
+
+    renderHook(() => mod.useMarkConversationSeen("conv-1", 4_000, "p-1"));
+
+    expect(putCount()).toBe(0);
+  });
+
   it("preserves a seeded explicit-unread on reload (first mount does not clear)", async () => {
     // Reload landing back on /c/conv-1: the list seeds the server's unread,
     // and the first mount must neither clear the override nor mark seen.
