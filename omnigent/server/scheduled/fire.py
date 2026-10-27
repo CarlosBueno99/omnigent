@@ -74,6 +74,7 @@ from omnigent.server.routes._session_create_validation import (
     validate_session_permission_mode,
 )
 from omnigent.server.schemas import SessionEventInput
+from omnigent.stores.conversation_store import SCHEDULED_TASK_ORIGIN_LABEL_KEY
 
 _logger = logging.getLogger(__name__)
 
@@ -226,13 +227,11 @@ def build_run_now(
 ) -> Callable[[int, str], Awaitable[bool]]:
     """Build the manual "run now" trigger — an immediate fire of a task.
 
-    Reuses the exact scheduled-fire machinery (the same
-    :func:`_run_fire_for_task` body, dispatch/preflight seams, and the shared
-    ``_IN_FLIGHT_TASKS`` overlap guard) so a manual run cannot duplicate the fire
-    logic and cannot collide with a scheduled fire of the same task. It differs
-    from :func:`build_on_fire` in ONE way: a **paused** task is still runnable
-    (``require_active=False``), because run-now is an explicit manual override.
-    A deleted / missing row is still a no-op.
+    Reuses the legacy :func:`_run_fire_for_task` path and its process-local
+    ``_IN_FLIGHT_TASKS`` overlap guard. Persistent scheduled runs use database
+    claims and do not share this guard, so they can overlap a manual run.
+    Unlike :func:`build_on_fire`, a paused task is runnable here
+    (``require_active=False``). A deleted or missing task is still a no-op.
 
     Fire-and-forget like the scheduler path: the session create + launch runs in
     the background and the returned callback resolves as soon as the fire is
@@ -889,6 +888,7 @@ async def _create_session(deps: FireDeps, task: ScheduledTask) -> Conversation:
         host_id=task.host_id,
         workspace=task.workspace,
         terminal_launch_args=await _permission_mode_launch_args(deps, task),
+        labels={SCHEDULED_TASK_ORIGIN_LABEL_KEY: task.id},
     )
     reasoning_effort = task.reasoning_effort
     if reasoning_effort is None:
