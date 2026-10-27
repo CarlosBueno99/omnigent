@@ -2832,7 +2832,7 @@ function ComposerImpl(
     setSettledConversationId(conversationId ?? null);
     draftConversationIdRef.current = conversationId ?? null;
     if (!isMobileRef.current) textareaRef.current?.focus();
-    // The input may still be disabled (agents loading after a page load); focus it once enabled.
+    // The input may still be disabled (e.g. no agent picked yet); focus it once it enables.
     focusWhenEnabledRef.current =
       !isMobileRef.current && document.activeElement !== textareaRef.current;
 
