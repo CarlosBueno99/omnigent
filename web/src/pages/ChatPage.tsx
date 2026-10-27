@@ -1830,6 +1830,7 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
             loadingMoreHistory={loadingMoreHistory}
             isMobileViewport={isMobileViewport}
             showsWorking={showsWorking}
+            hostOffline={liveness.kind === "host_offline"}
             agentsError={agentsError}
             sandboxLaunching={sandboxLaunching}
             spacerMeasureRef={spacerMeasureRef}

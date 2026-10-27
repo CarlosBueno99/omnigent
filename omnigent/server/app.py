@@ -3933,12 +3933,30 @@ def create_app(
             return False
         return await _host_row_offline(host_store, host_id)
 
+    async def _wait_for_runner_or_host(
+        runner_id: str, host_id: str | None, timeout_s: float
+    ) -> None:
+        """Return once *runner_id* or *host_id* registers on this replica, or at the timeout."""
+        waits: set[asyncio.Future[object]] = {
+            asyncio.ensure_future(tunnel_registry.wait_for_runner(runner_id, timeout_s=timeout_s))
+        }
+        if host_id is not None:
+            waits.add(
+                asyncio.ensure_future(host_registry.wait_for_host(host_id, timeout_s=timeout_s))
+            )
+        try:
+            await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for wait in waits:
+                wait.cancel()
+
     async def _hold_for_offline_host(runner_id: str, affected: "list[Conversation]") -> str | None:
         """Wait for a runner whose user-run host dropped with it mid-turn.
 
         A laptop that sleeps or loses Wi-Fi takes its runner along and usually
         resumes the turn when it wakes, so the turn waits for it instead of
-        failing. A host that comes back without its runner gets one more grace.
+        failing. A host that comes back still running the runner gets one more
+        grace; one that reconnects here without it ends the hold almost at once.
         A crash report cancels this task and fails the turn as before.
 
         :returns: ``None`` when nothing was held, else how the hold ended:
@@ -3947,6 +3965,7 @@ def create_app(
         """
         from omnigent.server.routes.sessions import (
             _MID_TURN_STATUSES,
+            HOST_BACK_WITHOUT_RUNNER_S,
             HOST_OFFLINE_HOLD_S,
             HOST_OFFLINE_RECHECK_S,
             RUNNER_DISCONNECT_GRACE_S,
@@ -3961,7 +3980,7 @@ def create_app(
             and _session_status_cache.get(conv.id, conv.live_status) in _MID_TURN_STATUSES
         ]
         host_id = await _routing_host_id(held)
-        if not held or await _host_offline(host_id) is not True:
+        if not held or host_id is None or await _host_offline(host_id) is not True:
             return None
         loop = asyncio.get_running_loop()
         started = loop.time()
@@ -3987,12 +4006,12 @@ def create_app(
                 if remaining <= 0:
                     outcome = "host_back_without_runner" if host_back else "expired"
                     break
-                if (
-                    await tunnel_registry.wait_for_runner(
-                        runner_id, timeout_s=min(HOST_OFFLINE_RECHECK_S, remaining)
-                    )
-                    is not None
-                ):
+                await _wait_for_runner_or_host(
+                    runner_id,
+                    None if host_back else host_id,
+                    min(HOST_OFFLINE_RECHECK_S, remaining),
+                )
+                if tunnel_registry.get(runner_id) is not None:
                     outcome = "runner_reconnected"
                     break
                 if shutdown_state.server_shutting_down():
@@ -4000,9 +4019,15 @@ def create_app(
                     break
                 # An unreadable host row keeps holding; only a live one ends it early.
                 if not host_back and await _host_offline(host_id) is False:
-                    # The host is back; give its runner one more grace to follow.
                     host_back = True
-                    deadline = min(deadline, loop.time() + RUNNER_DISCONNECT_GRACE_S)
+                    # It registered after the hold began, so its hello lists the
+                    # runners alive now; one back elsewhere gets the full grace.
+                    host = host_registry.get(host_id)
+                    runner_lost = host is not None and runner_id not in host.hello.runners
+                    grace = (
+                        HOST_BACK_WITHOUT_RUNNER_S if runner_lost else RUNNER_DISCONNECT_GRACE_S
+                    )
+                    deadline = min(deadline, loop.time() + grace)
         finally:
             for conv in held:
                 _logger.info(
