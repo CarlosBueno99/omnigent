@@ -1928,6 +1928,35 @@ async def test_codex_side_settings_are_saved_and_forwarded_only_to_child_turn(
     )
     assert created.status_code == 202, created.text
     child_id = created.json()["child_session_id"]
+    from omnigent.runtime import session_stream
+
+    published: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        session_stream, "publish", lambda _session_id, event: published.append(event)
+    )
+    for result_child in (None, child_id):
+        result = await client.post(
+            f"/v1/sessions/{parent['id']}/events",
+            json={
+                "type": "external_side_chat_result",
+                "data": {"draft_id": "pending:test", "child_session_id": result_child},
+            },
+        )
+        assert result.status_code == 202, result.text
+        assert published[-1] == {
+            "type": "session.side_chat_result",
+            "conversation_id": parent["id"],
+            "draft_id": "pending:test",
+            "child_session_id": result_child,
+        }
+    invalid = await client.post(
+        f"/v1/sessions/{parent['id']}/events",
+        json={
+            "type": "external_side_chat_result",
+            "data": {"draft_id": "pending:test", "child_session_id": parent["id"]},
+        },
+    )
+    assert invalid.status_code == 400, invalid.text
     child = (await client.get(f"/v1/sessions/{child_id}")).json()
     assert child["model_override"] == "gpt-5.5"
     assert child["reasoning_effort"] == "high"

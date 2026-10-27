@@ -201,10 +201,12 @@ async def submit_side_turn(
     :param reset_effort: Resolve the selected model's default instead of inheriting effort.
     :returns: The started turn id, or ``None`` when absent.
     """
-    if reset_effort:
+    if reset_effort or effort is not None:
         from omnigent.harnesses.codex_native.app_server import resolve_codex_effort_for_model
 
-        effort = await resolve_codex_effort_for_model(codex_client, None, model)
+        effort = await resolve_codex_effort_for_model(
+            codex_client, None if reset_effort else effort, model
+        )
     params: _JsonObject = {
         "threadId": child_thread_id,
         "input": [{"type": "text", "text": text}],
@@ -306,11 +308,11 @@ async def open_side_chat_on_client(
         **(settings or {}),
         **{key: value for key, value in overrides.items() if value is not None},
     }
-    if "effort" in overrides and overrides["effort"] is None:
+    if "effort" in settings or "effort" in overrides:
         from omnigent.harnesses.codex_native.app_server import resolve_codex_effort_for_model
 
         settings["effort"] = await resolve_codex_effort_for_model(
-            codex_client, None, settings.get("model")
+            codex_client, overrides.get("effort", settings.get("effort")), settings.get("model")
         )
     child_thread_id = await fork_ephemeral_side_thread(
         codex_client,
@@ -429,7 +431,11 @@ async def register_side_fork_child(
 
 
 def request_side_chat(
-    bridge_dir: Path, question: str, *, settings: Mapping[str, str | None] | None = None
+    bridge_dir: Path,
+    question: str,
+    *,
+    settings: Mapping[str, str | None] | None = None,
+    draft_id: str | None = None,
 ) -> None:
     """
     Record a ``/side`` question for the forwarder to fork.
@@ -437,13 +443,17 @@ def request_side_chat(
     :param bridge_dir: Native Codex bridge directory.
     :param question: The side-chat question.
     :param settings: Optional first-turn model and effort selections.
+    :param draft_id: Web draft to settle only after first-turn acceptance.
     :returns: None.
     """
     request_dir = bridge_dir / _SIDE_REQUEST_DIRNAME
     request_dir.mkdir(parents=True, exist_ok=True)
     path = request_dir / f"{uuid.uuid4().hex}.json"
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"question": question, "settings": settings}), encoding="utf-8")
+    tmp.write_text(
+        json.dumps({"question": question, "settings": settings, "draft_id": draft_id}),
+        encoding="utf-8",
+    )
     tmp.replace(path)  # atomic publish, so the drainer never reads a partial file
 
 
@@ -453,6 +463,7 @@ class SideChatRequest(NamedTuple):
     path: Path
     question: str
     settings: dict[str, str | None] | None = None
+    draft_id: str | None = None
 
 
 def peek_side_chat_requests(bridge_dir: Path) -> list[SideChatRequest]:
@@ -496,7 +507,15 @@ def peek_side_chat_requests(bridge_dir: Path) -> list[SideChatRequest]:
             ):
                 _unlink_quietly(path)
                 continue
-            requests.append(SideChatRequest(path, question, settings))
+            draft_id = payload.get("draft_id")
+            if draft_id is not None and (
+                not isinstance(draft_id, str)
+                or not draft_id.startswith("pending:")
+                or len(draft_id) > 200
+            ):
+                _unlink_quietly(path)
+                continue
+            requests.append(SideChatRequest(path, question, settings, draft_id))
         else:
             _unlink_quietly(path)  # malformed content that can never fork
     return requests

@@ -5499,6 +5499,7 @@ async def test_events_codex_side_chat_preserves_indentation(
     }
     if command:
         payload["side_chat_settings"] = {"model": "gpt-6-sol", "effort": "max"}
+        payload["side_chat_draft_id"] = "pending:test"
     if not command:
         payload["codex_side_thread_id"] = "thread_side"
         payload["model_override"] = "gpt-6-sol"
@@ -5514,13 +5515,14 @@ async def test_events_codex_side_chat_preserves_indentation(
         assert [request.question for request in side_chat.peek_side_chat_requests(bridge_dir)] == [
             question
         ]
+        assert side_chat.peek_side_chat_requests(bridge_dir)[0].draft_id == "pending:test"
         assert side_chat.peek_side_chat_requests(bridge_dir)[0].settings == {
             "model": "gpt-6-sol",
             "effort": "max",
         }
         assert fake_client.requests == []
     else:
-        assert fake_client.requests == [
+        assert [call for call in fake_client.requests if call[0] != "model/list"] == [
             (
                 "turn/start",
                 {

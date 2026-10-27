@@ -6525,6 +6525,7 @@ def create_runner_app(
                     await _codex_native_bridge_dir_for_session(conversation_id),
                     _side_question,
                     settings=body.get("side_chat_settings"),
+                    draft_id=body.get("side_chat_draft_id"),
                 )
                 _logger.info(
                     "Codex /side recorded without starting a turn: conv=%s",

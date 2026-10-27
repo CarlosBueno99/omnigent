@@ -9942,6 +9942,63 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
     });
   });
 
+  describe("side chat first-turn acceptance", () => {
+    it("keeps text and settings through child creation and asynchronous failure, then opens the successful retry", async () => {
+      seedSession("conv_draft_parent", []);
+      await useChatStore.getState().switchTo("conv_draft_parent");
+      const draft = {
+        text: "Explain this",
+        files: [],
+        settings: { modelOverride: "gpt-6-sol", reasoningEffort: "high" },
+        starting: true,
+      };
+      useChatStore.setState({
+        sessionHarness: "codex-native",
+        awaitingSideChatFor: null,
+        sideChatToOpen: null,
+        sideChatComposers: { "pending:test": draft },
+      });
+      await useChatStore.getState().send("/side Explain this", "agent_xyz", undefined, {
+        sideChatDraftId: "pending:test",
+        sideChatSettings: draft.settings,
+      });
+      expect(useChatStore.getState().awaitingSideChatFor).toBeNull();
+      handleSessionEvent({
+        type: "session_created",
+        conversationId: "conv_draft_parent",
+        childSessionId: "failed_child",
+        agentId: "agent_xyz",
+        parentSessionId: "conv_draft_parent",
+      });
+      expect(useChatStore.getState().sideChatToOpen).toBeNull();
+      expect(useChatStore.getState().sideChatComposers["pending:test"]).toEqual(draft);
+      handleSessionEvent({
+        type: "side_chat_result",
+        conversationId: "conv_draft_parent",
+        draftId: "pending:test",
+        childSessionId: null,
+      });
+      expect(useChatStore.getState().sideChatComposers["pending:test"]).toEqual({
+        ...draft,
+        starting: false,
+      });
+      useChatStore
+        .getState()
+        .updateSideChatComposer("pending:test", (current) => ({ ...current, starting: true }));
+      handleSessionEvent({
+        type: "side_chat_result",
+        conversationId: "conv_draft_parent",
+        draftId: "pending:test",
+        childSessionId: "retry_child",
+      });
+      expect(useChatStore.getState().sideChatToOpen).toEqual({
+        childId: "retry_child",
+        parentId: "conv_draft_parent",
+        pendingId: "pending:test",
+      });
+    });
+  });
+
   describe("session.created", () => {
     it("opens the side chat the user asked for as a rail tab", () => {
       // `awaitingSideChatFor` is set when the command is sent; the fork's

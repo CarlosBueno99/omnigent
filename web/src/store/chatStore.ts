@@ -205,6 +205,7 @@ export interface SendOptions {
    */
   pinnedConversationId?: string;
   sideChatSettings?: SideChatModelSettings;
+  sideChatDraftId?: string;
   /**
    * Failure handler that OWNS the send's error UX. When set, `send` reports the
    * failure here instead of its default surfacing (no error block appended, no
@@ -1144,7 +1145,7 @@ export interface AppChatState {
    * navigated to another conversation is NOT dropped into the wrong parent's
    * tabs.
    */
-  sideChatToOpen: { childId: string; parentId: string } | null;
+  sideChatToOpen: { childId: string; parentId: string; pendingId?: string } | null;
   /** Visible, writable side chat that receives selections from its parent. */
   sideChatSelectionTarget: { childId: string; parentId: string } | null;
   /**
@@ -2649,7 +2650,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       }
       return;
     }
-    if (opensSideChat) {
+    if (opensSideChat && !opts?.sideChatDraftId) {
       useChatStore.setState({ awaitingSideChatFor: pinnedId ?? get().conversationId });
     }
     const skipPendingBubble = opensSideChat || compacts;
@@ -2842,6 +2843,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
             role: "user",
             content: serverContent,
             stable_id: stableId,
+            ...(opts?.sideChatDraftId ? { side_chat_draft_id: opts.sideChatDraftId } : {}),
             ...(opts?.sideChatSettings
               ? {
                   side_chat_settings: {
@@ -8644,6 +8646,25 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
         return blocks === null ? {} : { blocks };
       });
       return;
+    case "side_chat_result": {
+      const draft = useChatStore.getState().sideChatComposers[event.draftId];
+      if (!draft?.starting) return;
+      if (event.childSessionId) {
+        useChatStore.setState({
+          sideChatToOpen: {
+            childId: event.childSessionId,
+            parentId: event.conversationId,
+            pendingId: event.draftId,
+          },
+        });
+      } else {
+        useChatStore
+          .getState()
+          .updateSideChatComposer(event.draftId, (current) => ({ ...current, starting: false }));
+        toast.error("Couldn't start the side chat. Your question and settings are ready to retry.");
+      }
+      return;
+    }
     case "session_created":
       // A side chat the user asked for (via `/side`, the `+` tray, or the rail's
       // "+"): open it as a soft tab in the main chat's Workspace rail — the user

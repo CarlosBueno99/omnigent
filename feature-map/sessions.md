@@ -388,7 +388,9 @@ the parent's selection should stay unchanged. Repeat in the mobile drawer.
 If the native session's model list is empty, the picker uses the same host
 catalog as the main composer until the session's list arrives.
 Available choices follow the harness's capabilities; viewers and closed chats
-cannot change them. A failed start keeps the draft and selections for retry.
+cannot change them. A failed start keeps the draft and selections for retry,
+including a native settings-save failure after child creation. Native drafts
+stay pending until their first turn is accepted.
 Native Codex applies draft choices to its first side-thread turn and saved choices
 to later turns. Existing native side chats remain read-only after a page reload.
 

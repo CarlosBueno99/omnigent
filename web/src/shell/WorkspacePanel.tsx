@@ -896,15 +896,9 @@ function WorkspacePanelImpl({
   useEffect(() => {
     activeSideChatRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [sideChats.selected, rightRailTab]);
-  // Pending tabs awaiting a real child id, in submit order. Only Codex uses this
-  // queue — its child arrives asynchronously via session_created with no id to
-  // pair on, so a signal rekeys the OLDEST awaiting tab (FIFO). A single ref
-  // would cross-assign when two launches overlap; the generic path skips the
-  // queue entirely and rekeys its own tab directly (see startPendingSideChat).
-  const awaitingPendingIdsRef = useRef<string[]>([]);
   // A side chat the server just created (Codex's native fork, or the generic
   // fork) announces itself via `sideChatToOpen`. If a pending tab is awaiting,
-  // rekey it in place; otherwise open a fresh tab. AppShell reveals the rail.
+  // rekey it after first-turn acceptance; otherwise open a fresh tab.
   useEffect(() => {
     if (sideChatToOpen === null) return;
     // Only the parent that owns this side chat consumes (and clears) the signal
@@ -920,7 +914,7 @@ function WorkspacePanelImpl({
     } else {
       // Started this session → live (not a dead restored Codex fork).
       sideChatsStartedThisSession.add(childId);
-      const awaiting = awaitingPendingIdsRef.current.shift();
+      const awaiting = sideChatToOpen.pendingId;
       if (awaiting !== undefined) {
         sideChats.rekey(awaiting, childId);
         useChatStore.getState().clearSideChatComposer(awaiting);
@@ -959,25 +953,16 @@ function WorkspacePanelImpl({
     const settings = useChatStore.getState().sideChatComposers[pendingId]?.settings;
     if (usesNativeSideChatFork(sideChatHarness)) {
       if (parentAgentId === null) return Promise.reject(new Error("no agent"));
-      // The child arrives asynchronously via session_created with no id to pair
-      // on, so queue this tab to be rekeyed FIFO. The question goes to the
-      // PARENT as `/side`; the native fork seeds the child's first turn. `send`
-      // resolves after its internal catch, so a failure (e.g. the host is too
-      // old to fork — the server refuses) has set `sendFailed` by the time the
-      // await returns; reject then so the pending pane resets and drop the
-      // queued tab so it never waits for a child that isn't coming.
-      awaitingPendingIdsRef.current.push(pendingId);
+      // Keep the draft until the forwarder acknowledges the first native turn.
       let sendFailed = false;
       return useChatStore
         .getState()
         .send(SIDE_CHAT_COMMAND_PREFIX + text, parentAgentId, undefined, {
           pinnedConversationId: conversationId,
           sideChatSettings: settings,
+          sideChatDraftId: pendingId,
           onError: (message) => {
             sendFailed = true;
-            awaitingPendingIdsRef.current = awaitingPendingIdsRef.current.filter(
-              (id) => id !== pendingId,
-            );
             toast.error(message);
           },
         })

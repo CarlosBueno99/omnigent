@@ -6303,6 +6303,19 @@ def _build_native_terminal_message_event(
         # which always includes it.
         "agent_id": conv.agent_id,
     }
+    draft_id = body.data.get("side_chat_draft_id")
+    if draft_id is not None:
+        from omnigent.harnesses.codex_native.side_chat import is_side_chat_command
+
+        if (
+            harness != "codex-native"
+            or not is_side_chat_command(_extract_user_text_for_routing(body))
+            or not isinstance(draft_id, str)
+            or not draft_id.startswith("pending:")
+            or len(draft_id) > 200
+        ):
+            raise OmnigentError("Invalid side chat draft", code=ErrorCode.INVALID_INPUT)
+        event["side_chat_draft_id"] = draft_id
     side_settings = body.data.get("side_chat_settings")
     if side_settings is not None:
         from omnigent.harnesses.codex_native.side_chat import is_side_chat_command
