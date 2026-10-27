@@ -20,6 +20,7 @@ import re
 import sys
 import sysconfig
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -591,6 +592,29 @@ def test_stdlib_wrapper_missing_a_platform_module_is_still_reported(
     assert broken_stdlib_module(exc) is None
 
     out = _run_crash_flow(monkeypatch, exc)
+
+    assert "ran into an issue" in out
+    assert "Report saved here:" in out
+    assert "Python installation" not in out
+
+
+def test_stdlib_platform_gap_without_import_name_is_still_reported(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing POSIX semaphores are a platform gap, not a damaged standard library."""
+    import multiprocessing  # noqa: F401 — initialize before replacing its extension
+
+    monkeypatch.setitem(sys.modules, "_multiprocessing", ModuleType("_multiprocessing"))
+    spec = importlib.util.spec_from_file_location(
+        "multiprocessing.synchronize",
+        Path(sysconfig.get_paths()["stdlib"]) / "multiprocessing" / "synchronize.py",
+    )
+    assert spec is not None and spec.loader is not None
+    with pytest.raises(ImportError, match="sem_open") as raised:
+        spec.loader.exec_module(importlib.util.module_from_spec(spec))
+    assert raised.value.name is None
+
+    out = _run_crash_flow(monkeypatch, raised.value)
 
     assert "ran into an issue" in out
     assert "Report saved here:" in out

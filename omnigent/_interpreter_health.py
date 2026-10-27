@@ -49,8 +49,8 @@ def broken_stdlib_module(
 
     The innermost module body on the traceback (``tb``, else ``exc.__traceback__``) must be
     a stdlib module; Omnigent or a dependency importing a module this platform lacks is
-    still a bug there. Then: an ``ImportError`` naming another stdlib module (``tty``
-    without ``termios``) is a platform gap, not damage; one naming a non-stdlib module that
+    still a bug there. An ``ImportError`` without a module name or naming another stdlib
+    module (``tty`` without ``termios``) may be a platform gap; one naming a foreign module that
     the stdlib line itself imports is damage whoever raised it, because a healthy stdlib
     never imports such a module; anything else is damage only when every deeper frame is
     stdlib code, so a third-party import hook failing on its own dependency stays a
@@ -71,7 +71,9 @@ def broken_stdlib_module(
         tb = tb.tb_next
     if innermost is None:
         return None
-    if isinstance(exc, ImportError) and exc.name:
+    if isinstance(exc, ImportError):
+        if not exc.name:
+            return None
         top = exc.name.partition(".")[0]
         if top in sys.stdlib_module_names:
             return None
