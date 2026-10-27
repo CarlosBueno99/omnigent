@@ -80,7 +80,8 @@ def test_s9_host_restart_after_offline(
         settled = contract.eventually(
             lambda: (
                 True
-                if not _visible_count(starting_up)
+                if lab.snapshot(driver.session_id).get("status") != "running"
+                and not _visible_count(starting_up)
                 and (_visible_count(resume) or _visible_count(live_terminal))
                 else None
             ),
@@ -92,8 +93,9 @@ def test_s9_host_restart_after_offline(
             bool(settled),
             ""
             if settled
-            else f'still "Starting up…" {_HOST_RETURN_S:.0f}s after the host returned '
-            f"without its runner; status={lab.snapshot(driver.session_id).get('status')}",
+            else f"{_HOST_RETURN_S:.0f}s after the host returned without its runner: "
+            f"status={lab.snapshot(driver.session_id).get('status')}, "
+            f'"Starting up…" shown={bool(_visible_count(starting_up))}',
         )
 
         held_turn_ended = contract.eventually(
