@@ -2,12 +2,114 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from omnigent.harnesses.codex_native import forwarder as fwd
 from tests.harnesses.codex_native.forwarder._support import (
+    _posted_cumulative_tokens,
     _RecordingClient,
+    _Tokens,
+    _usage_event,
 )
+
+# Frame sequences recorded from the official Codex app-server binaries against a
+# mock Responses API. ``None`` marks where the child session is registered.
+_PARENT_FRAMES = [
+    _usage_event("thread_parent", (1000, 0, 100), (1000, 0, 100)),
+    _usage_event("thread_parent", (2500, 1000, 110), (1500, 1000, 10)),
+]
+_PARENT_AFTER_FORK = _usage_event("thread_parent", (4500, 2000, 160), (2000, 1000, 50))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("events", "expected_child_posts"),
+    [
+        pytest.param(
+            [
+                None,
+                *_PARENT_FRAMES,
+                _PARENT_AFTER_FORK,
+                _usage_event("thread_child", (2800, 1000, 140), (300, 0, 30)),
+            ],
+            [(300, 0, 30)],
+            id="codex-0.149-fork-first-frame-adds-own-request",
+        ),
+        pytest.param(
+            [
+                None,
+                *_PARENT_FRAMES,
+                _usage_event("thread_child", (2500, 1000, 110), (1500, 1000, 10)),
+                _PARENT_AFTER_FORK,
+                _usage_event("thread_child", (2800, 1000, 140), (300, 0, 30)),
+            ],
+            [(0, 0, 0), (300, 0, 30)],
+            id="codex-0.149-resumed-fork-repeats-parent-totals",
+        ),
+        pytest.param(
+            [
+                _usage_event("thread_parent", (1000, 0, 100), (1000, 0, 100)),
+                _usage_event("thread_parent", (6000, 4000, 110), (5000, 4000, 10)),
+                _usage_event("thread_child", (6000, 4000, 110), (5000, 4000, 10)),
+                None,
+                _usage_event("thread_child", (7000, 4000, 210), (1000, 0, 100)),
+            ],
+            [(1000, 0, 100)],
+            id="thread-fork-seed-arrives-before-registration",
+        ),
+        pytest.param(
+            [
+                None,
+                *_PARENT_FRAMES,
+                _usage_event("thread_child", (300, 0, 30), (300, 0, 30)),
+                _usage_event("thread_child", (700, 200, 60), (400, 200, 30)),
+            ],
+            [(300, 0, 30), (700, 200, 60)],
+            id="codex-0.153-fresh-child",
+        ),
+    ],
+)
+async def test_child_usage_excludes_totals_inherited_from_forked_thread(
+    tmp_path: Path, events: list[dict | None], expected_child_posts: list[_Tokens]
+) -> None:
+    """A forked Codex child posts only its own usage; the parent's stays unchanged.
+
+    Forked threads start with the source thread's cumulative totals. Posting them
+    as the child's usage double-counts the parent in the session's subtree cost.
+    """
+    client = _RecordingClient()
+    state = fwd._CodexForwarderState(parent_session_id="conv_parent", mcp_startup_settled=True)
+    parent_usage = fwd._SessionUsageCoalescer(client, "conv_parent")
+    tracker = fwd._CodexElicitationTaskTracker()
+    try:
+        for event in events:
+            if event is None:
+                state.note_child_thread("thread_child", "conv_child")
+                continue
+            await fwd._handle_event(
+                client,
+                session_id="conv_parent",
+                bridge_dir=tmp_path,
+                event=event,
+                usage_coalescer=parent_usage,
+                elicitation_tracker=tracker,
+                expected_thread_id="thread_parent",
+                forwarder_state=state,
+            )
+    finally:
+        await tracker.close()
+        await state.close_child_streams()
+
+    assert _posted_cumulative_tokens(client.posts, "conv_child") == expected_child_posts
+    parent_totals = [
+        tuple(event["params"]["tokenUsage"]["total"].values())
+        for event in events
+        if event is not None and event["params"]["threadId"] == "thread_parent"
+    ]
+    assert _posted_cumulative_tokens(client.posts, "conv_parent") == parent_totals
+
 
 # ── sub-agent usage pricing: seed the child coalescer's model ──────────
 

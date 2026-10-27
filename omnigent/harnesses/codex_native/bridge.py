@@ -69,6 +69,10 @@ _STARTUP_TIMEOUT_MAX_BYTES = 256
 # events), read by the executor's first-turn gate and the runner's
 # Stop handler.
 _MCP_STARTUP_FILE = "mcp_startup.json"
+# Usage each forked Codex child thread inherited at its fork, kept across
+# forwarder restarts because resumed threads report the inherited totals again.
+_CHILD_USAGE_BASELINES_FILE = "child_usage_baselines.json"
+_CHILD_USAGE_BASELINES_LOCK_FILE = "child_usage_baselines.lock"
 
 # Startup states mirrored from Codex's ``McpServerStartupState`` enum.
 MCP_STARTUP_STARTING = "starting"
@@ -1218,6 +1222,61 @@ def _write_bridge_record(bridge_dir: Path, filename: str, record: Mapping[str, o
                 os.unlink(tmp_name)
     except OSError:
         return  # best-effort; the cause is already logged
+
+
+def read_child_usage_baselines(bridge_dir: Path) -> dict[str, tuple[int, int, int]]:
+    """
+    Read the usage each forked Codex child thread inherited from its source.
+
+    :param bridge_dir: Native Codex bridge directory.
+    :returns: Inherited ``(input, cached input, output)`` token totals keyed by
+        child thread id, e.g. ``{"thread_child": (5000, 4000, 100)}``. Empty when
+        nothing was recorded or the file is unreadable.
+    """
+    try:
+        raw = json.loads((bridge_dir / _CHILD_USAGE_BASELINES_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    threads = raw.get("threads") if isinstance(raw, dict) else None
+    if not isinstance(threads, dict):
+        return {}
+    baselines: dict[str, tuple[int, int, int]] = {}
+    for thread_id, values in threads.items():
+        if (
+            isinstance(thread_id, str)
+            and thread_id
+            and isinstance(values, list)
+            and len(values) == 3
+            and all(type(value) is int and value >= 0 for value in values)
+        ):
+            baselines[thread_id] = (values[0], values[1], values[2])
+    return baselines
+
+
+def record_child_usage_baseline(
+    bridge_dir: Path, thread_id: str, baseline: tuple[int, int, int]
+) -> None:
+    """
+    Persist the usage one forked Codex child thread inherited (best-effort).
+
+    :param bridge_dir: Native Codex bridge directory.
+    :param thread_id: Codex child thread id, e.g. ``"thread_child"``.
+    :param baseline: Inherited ``(input, cached input, output)`` token totals.
+    :returns: None.
+    """
+    try:
+        with _bridge_state_lock(bridge_dir, _CHILD_USAGE_BASELINES_LOCK_FILE):
+            baselines = read_child_usage_baselines(bridge_dir)
+            baselines[thread_id] = baseline
+            _write_bridge_record(
+                bridge_dir,
+                _CHILD_USAGE_BASELINES_FILE,
+                {"threads": {key: list(value) for key, value in baselines.items()}},
+            )
+    except OSError:
+        _logger.warning(
+            "Could not record inherited Codex child usage in %s", bridge_dir, exc_info=True
+        )
 
 
 def clear_bridge_startup_error(bridge_dir: Path) -> None:
