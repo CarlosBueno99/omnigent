@@ -10,7 +10,6 @@ terminal or Resume. Needs Playwright's Chromium and a built web UI.
 
 from __future__ import annotations
 
-import re
 import time
 from collections.abc import Callable
 
@@ -23,7 +22,7 @@ from tests.e2e.resilience.lab.report import ScenarioReport, report_dir
 from tests.e2e.resilience.scenarios import _contract as contract
 
 _OUTAGE_S = contract.GRACE_S + 30
-_HOST_OFFLINE = re.compile(r"offline", re.IGNORECASE)
+_HOST_OFFLINE = "Host is offline. Waiting for it to reconnect…"
 #: Long enough for the page to see the host return; well under the runner grace.
 _HOST_RETURN_S = 30.0
 
@@ -51,19 +50,20 @@ def test_s9_host_restart_after_offline(
         page.goto(f"{lab.proxies.client.url}/c/{driver.session_id}")  # type: ignore[attr-defined]
         show_view(page, "chat")
 
+        working = page.get_by_test_id("working-indicator")  # type: ignore[attr-defined]
         started = time.time()
         faults = contract.host_offline(lab)
         try:
             time.sleep(contract.GRACE_S)
             said_offline = contract.eventually(
-                lambda: True if _visible_count(page.get_by_text(_HOST_OFFLINE)) else None,  # type: ignore[attr-defined]
+                lambda: True if _visible_count(working.filter(has_text=_HOST_OFFLINE)) else None,
                 timeout=max(1.0, started + _OUTAGE_S - time.time()),
             )
             page.screenshot(path=str(shots / "S9-chat-past-grace.png"))  # type: ignore[attr-defined]
             report.check(
                 "ui_says_host_offline_past_grace",
                 bool(said_offline),
-                "" if said_offline else "the chat view never says the host is offline",
+                "" if said_offline else "the working row never says the host is offline",
             )
             time.sleep(max(0.0, started + _OUTAGE_S - time.time()))
             lab.stop_host()

@@ -1066,6 +1066,8 @@ function WorkspacePanelImpl({
       <SideChatPane
         key={selectedSideChat}
         childId={selectedSideChat}
+        // A side chat shares its source session's runner and host.
+        hostOffline={liveness?.kind === "host_offline"}
         selectionParentId={
           (isMobile ? mobileSideChatsOpen : open && sideChatSelected) ? conversationId : undefined
         }

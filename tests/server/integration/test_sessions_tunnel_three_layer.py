@@ -2464,9 +2464,9 @@ async def test_runner_disconnect_holds_turn_while_host_offline(
     A sleeping laptop takes its runner along and resumes the turn on wake, so
     the turn fails only when the hold expires or the host returns without its
     runner. A host reconnecting here wakes the hold before its next recheck and
-    fails the turn at once unless its hello still lists the runner. An
-    unreadable host row mid-hold keeps holding. A host that stayed online fails
-    the turn at the grace, as before.
+    gives the turn only the short grace unless its hello still lists the
+    runner. An unreadable host row mid-hold keeps holding. A host that stayed
+    online fails the turn at the grace, as before.
     """
     from omnigent.host.frames import HostHelloFrame
     from omnigent.runtime import get_conversation_store
@@ -2482,7 +2482,11 @@ async def test_runner_disconnect_holds_turn_while_host_offline(
     monkeypatch.setattr(
         sessions_module, "HOST_OFFLINE_RECHECK_S", hold if host_reconnects else 0.05
     )
-    monkeypatch.setattr(sessions_module, "HOST_BACK_WITHOUT_RUNNER_S", 0.0)
+    # Each returning-host case fails if the hold picks the other grace.
+    short_grace = {"host_back_without_runner": 60.0, "host_reconnects_without_runner": 2.0}
+    monkeypatch.setattr(
+        sessions_module, "HOST_BACK_WITHOUT_RUNNER_S", short_grace.get(scenario, 0.0)
+    )
     _stub_connect_hook_for_pumpless_ws(ap_app, monkeypatch)
     host_checks: list[str] = []
     # What the host row reads: offline, back online, or unreadable.
@@ -2552,6 +2556,10 @@ async def test_runner_disconnect_holds_turn_while_host_offline(
         if scenario == "host_reconnects_with_runner":
             # Its runner is still alive, so it gets the grace to follow the host.
             await asyncio.sleep(0.1)
+            assert sessions_module._session_status_cache.get(session_id) == "running"
+        if scenario == "host_reconnects_without_runner":
+            # Still held past the full grace: the short one applies.
+            await asyncio.sleep(grace * 3)
             assert sessions_module._session_status_cache.get(session_id) == "running"
 
         if scenario == "unreadable":
