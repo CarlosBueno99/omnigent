@@ -1558,13 +1558,13 @@ def _extract_role_keyed_messages(
 # Per-output budget for replayed tool history: a fresh session gets the gist of
 # each result without one large read crowding out the conversation.
 _REPLAYED_TOOL_OUTPUT_MAX_BYTES = 16 * 1024
-# Total budget across replayed tool calls and outputs, so a long session's first
-# prompt in a fresh session still fits the context window.
+# Total budget across replayed tool calls and outputs, which bounds how much a long
+# session's tool history adds to a fresh session's first prompt.
 _REPLAYED_TOOL_HISTORY_MAX_BYTES = 128 * 1024
 
 
 def _keep_recent_tool_history(messages: list[Message]) -> list[Message]:
-    """Keep the newest tool calls and their outputs, contiguously, within the replay budget."""
+    """Keep the newest tool calls and outputs that fit the budget, skipping any one over it."""
     keys = _tool_history_keys(messages)
     sizes: dict[str, int] = {}
     for key, message in zip(keys, messages, strict=True):
