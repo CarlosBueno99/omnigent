@@ -265,8 +265,18 @@ def attachment_cache_dir(bridge_dir: Path) -> Path:
     The bridge path identifies the session across live turns and resume rebuilds.
     All harnesses share ``~/.omnigent/attachments/`` (or ``OMNIGENT_DATA_DIR``).
     """
+    return _session_cache_dir(bridge_dir, "attachments")
+
+
+def pasted_text_cache_dir(bridge_dir: Path) -> Path:
+    """Return the session's generated-paste cache, separate from uploaded filenames."""
+    return _session_cache_dir(bridge_dir, "pasted-text")
+
+
+def _session_cache_dir(bridge_dir: Path, namespace: str) -> Path:
+    """Locate a session cache in a runtime-owned namespace."""
     key = hashlib.sha256(os.fsencode(bridge_dir.resolve())).hexdigest()[:32]
-    return data_dir().resolve() / "attachments" / key
+    return data_dir().resolve() / namespace / key
 
 
 def materialize_attachment(block: Mapping[str, object], bridge_dir: Path) -> Path | None:
@@ -289,7 +299,7 @@ def materialize_attachment(block: Mapping[str, object], bridge_dir: Path) -> Pat
     if decoded is None:
         return None
     raw_bytes, filename = decoded
-    return _materialize_bytes(raw_bytes, filename, bridge_dir)
+    return _materialize_bytes(raw_bytes, filename, attachment_cache_dir(bridge_dir))
 
 
 def attachment_content_digest(raw_bytes: bytes) -> str:
@@ -299,7 +309,7 @@ def attachment_content_digest(raw_bytes: bytes) -> str:
 
 def materialize_text(text: str, bridge_dir: Path) -> Path | None:
     """
-    Write *text* into the session's attachment cache as a UTF-8 ``.txt`` file.
+    Write *text* into the session's generated-paste cache as a UTF-8 ``.txt`` file.
 
     Takes the same no-follow placement as :func:`materialize_attachment`. The
     name carries a digest of the text, so sending the same text again reuses
@@ -308,7 +318,7 @@ def materialize_text(text: str, bridge_dir: Path) -> Path | None:
     :param text: Text to store, e.g. a message too long to send inline.
     :param bridge_dir: Session bridge path, used to identify its attachment cache.
     :returns: Path to the written file, e.g.
-        ``.../attachments/<key>/pasted_text_1a2b3c4d5e6f.txt``, or ``None`` if
+        ``.../pasted-text/<key>/pasted_text_1a2b3c4d5e6f.txt``, or ``None`` if
         it could not be written.
     """
     try:
@@ -316,11 +326,17 @@ def materialize_text(text: str, bridge_dir: Path) -> Path | None:
     except UnicodeEncodeError:
         return None
     digest = attachment_content_digest(raw_bytes)
-    return _materialize_bytes(raw_bytes, f"pasted_text_{digest}.txt", bridge_dir)
+    return _materialize_bytes(
+        raw_bytes, f"pasted_text_{digest}.txt", pasted_text_cache_dir(bridge_dir)
+    )
 
 
 # What a mirrored user message's event spends outside its text: keys, ids, a bounded source id.
 _MIRRORED_MESSAGE_ENVELOPE_BYTES = 4 * 1024
+
+
+class _SpilledTextTooLarge(ValueError):
+    """A cached paste cannot fit in one mirrored session event."""
 
 
 def restore_spilled_text(text: str, bridge_dir: Path) -> str | None:
@@ -328,8 +344,9 @@ def restore_spilled_text(text: str, bridge_dir: Path) -> str | None:
     Put back the text each :func:`materialize_text` reference in *text* stands for.
 
     A harness echoes a spilled paste as its ``[Attached file: ...]`` line. Only a
-    whole-line reference into this session's cache is replaced, and only when the
-    file still holds text with the digest in its name; anything else stays as is.
+    whole-line reference into this session's generated-paste cache is replaced,
+    and only when the file still holds text with the digest in its name. Uploads
+    and unavailable historical cache entries keep their references.
 
     :param text: Message text as the harness echoed it.
     :param bridge_dir: Session bridge path, used to identify its attachment cache.
@@ -339,7 +356,7 @@ def restore_spilled_text(text: str, bridge_dir: Path) -> str | None:
     """
     if "pasted_text_" not in text:
         return text
-    cache = attachment_cache_dir(bridge_dir)
+    cache = pasted_text_cache_dir(bridge_dir)
     reference = re.compile(
         rf"(?m)^[ \t]*\[Attached file: {re.escape(str(cache))}/"
         r"(?P<name>pasted_text_(?P<digest>[0-9a-f]{12})(?:_(?P=digest))?\.txt)\][ \t]*(?=\r?$)"
@@ -353,7 +370,10 @@ def restore_spilled_text(text: str, bridge_dir: Path) -> str | None:
     for match in reference.finditer(text):
         name = match.group("name")
         if name not in pastes:
-            raw_bytes = _read_cached_file(cache, name)
+            try:
+                raw_bytes = _read_cached_file(cache, name)
+            except _SpilledTextTooLarge:
+                return None
             verified = raw_bytes is not None and (
                 attachment_content_digest(raw_bytes) == match.group("digest")
             )
@@ -381,6 +401,7 @@ def _read_cached_file(cache: Path, name: str) -> bytes | None:
     :param cache: A session's attachment cache directory.
     :param name: Base filename, no directory components.
     :returns: The file's bytes, or ``None`` if it can't be read safely.
+    :raises _SpilledTextTooLarge: When the file exceeds the session event budget.
     """
     try:
         root_fd = os.open(cache.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -397,8 +418,10 @@ def _read_cached_file(cache: Path, name: str) -> bytes | None:
         try:
             info = os.fstat(fd)
             # No restorable paste exceeds one session event, so a larger file is never read.
-            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_SESSION_EVENT_REQUEST_BYTES:
+            if not stat.S_ISREG(info.st_mode):
                 return None
+            if info.st_size > MAX_SESSION_EVENT_REQUEST_BYTES:
+                raise _SpilledTextTooLarge
             return _read_fd(fd, info.st_size)
         finally:
             os.close(fd)
@@ -406,34 +429,33 @@ def _read_cached_file(cache: Path, name: str) -> bytes | None:
         return None
 
 
-def _materialize_bytes(raw_bytes: bytes, filename: str, bridge_dir: Path) -> Path | None:
+def _materialize_bytes(raw_bytes: bytes, filename: str, cache_dir: Path) -> Path | None:
     """
-    Place *raw_bytes* as *filename* in the session's attachment cache.
+    Place *raw_bytes* as *filename* in a session-owned cache.
 
     :param raw_bytes: File content.
     :param filename: Base filename with no directory components.
-    :param bridge_dir: Session bridge path, used to identify its attachment cache.
+    :param cache_dir: Session cache directory for uploads or generated pastes.
     :returns: Path to the file, or ``None`` if it could not be placed safely.
     """
     if filename in (".", "..") or os.sep in filename:
         return None
 
-    attachments_dir = attachment_cache_dir(bridge_dir)
     try:
-        attachments_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        root_fd = os.open(attachments_dir.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        cache_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        root_fd = os.open(cache_dir.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             with contextlib.suppress(FileExistsError):
-                os.mkdir(attachments_dir.name, mode=0o700, dir_fd=root_fd)
+                os.mkdir(cache_dir.name, mode=0o700, dir_fd=root_fd)
             dir_fd = os.open(
-                attachments_dir.name,
+                cache_dir.name,
                 os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
                 dir_fd=root_fd,
             )
         finally:
             os.close(root_fd)
     except OSError:
-        _logger.warning("Refusing to materialize into %s", attachments_dir, exc_info=True)
+        _logger.warning("Refusing to materialize into %s", cache_dir, exc_info=True)
         return None
     try:
         stem, suffix = os.path.splitext(filename)
@@ -441,10 +463,10 @@ def _materialize_bytes(raw_bytes: bytes, filename: str, bridge_dir: Path) -> Pat
         for name in (filename, f"{stem}_{digest}{suffix}"):
             outcome = _place_no_follow(dir_fd, name, raw_bytes)
             if outcome == "symlink":
-                _logger.warning("Refusing to write through symlink %s", attachments_dir / name)
+                _logger.warning("Refusing to write through symlink %s", cache_dir / name)
                 return None
             if outcome == "placed":
-                return attachments_dir / name
+                return cache_dir / name
         _logger.warning("Attachment names for %s already hold other content", filename)
         return None
     except OSError:
@@ -939,7 +961,15 @@ async def resolve_session_item_file_references(
     :returns: The same items with resolvable attachment blocks rewritten
         to carry ``image_url`` / ``file_data`` data URIs.
     """
+    messages: list[dict[str, Any]] = []
     for item in items:
+        if item.get("type") == "compaction":
+            snapshot = item.get("compacted_messages")
+            if isinstance(snapshot, list):
+                messages.extend(message for message in snapshot if isinstance(message, dict))
+        else:
+            messages.append(item)
+    for item in messages:
         content = item.get("content")
         if item.get("type") != "message" or not isinstance(content, list):
             continue

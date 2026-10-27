@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import errno
 import json
 import logging
 from collections.abc import Callable
@@ -34,7 +35,7 @@ from omnigent.inner.executor import (
     InjectionDeliveryAmbiguous,
     TurnComplete,
 )
-from omnigent.inner.native_attachments import attachment_cache_dir
+from omnigent.inner.native_attachments import attachment_cache_dir, pasted_text_cache_dir
 from omnigent.native.input_diagnostics import input_delivery_scope
 
 # A 1x1 transparent PNG, base64-encoded — a real decodable image small
@@ -510,6 +511,32 @@ def test_draining_delivery_reconnects_and_accepts_input_once(
         "synthetic input" not in repr(getattr(record, "attributes", {}))
         for record in caplog.records
     )
+
+
+@pytest.mark.parametrize("live_injection", [False, True], ids=["run-turn", "live-steer"])
+def test_accepted_steer_keeps_unchanged_state_when_disk_is_full(
+    draining_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_injection: bool
+) -> None:
+    _seed_bridge(tmp_path, active_turn_id="turn_steered")
+    before = read_bridge_state(tmp_path)
+    draining_client.delivery_errors = []
+
+    def disk_full(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr("omnigent.harnesses.codex_native.bridge.tempfile.mkstemp", disk_full)
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+    if live_injection:
+        assert asyncio.run(executor.enqueue_session_message("main", "synthetic input"))
+    else:
+        assert [type(event) for event in _collect_turn_events(executor, "synthetic input")] == [
+            TurnComplete
+        ]
+
+    assert draining_client.accepted_inputs == [[{"type": "text", "text": "synthetic input"}]]
+    assert len(draining_client.requests) == 1
+    assert draining_client.requests[0][0] == "turn/steer"
+    assert read_bridge_state(tmp_path) == before
 
 
 @pytest.mark.parametrize("active_turn_id", [None, "turn_existing"], ids=["start", "steer"])
@@ -1634,7 +1661,7 @@ def test_oversized_text_block_spills_to_an_attachment_file(tmp_path: Path) -> No
     assert len(items) == 1
     assert _text_chars(items) < _CODEX_TEXT_LIMIT
     path = _referenced_file(items[0])
-    assert path.parent == attachment_cache_dir(tmp_path)
+    assert path.parent == pasted_text_cache_dir(tmp_path)
     assert path.read_text(encoding="utf-8") == text
 
 
@@ -1768,7 +1795,7 @@ def test_spilled_text_is_reused_when_the_same_message_is_sent_again(tmp_path: Pa
     second = _content_to_input_items(content, tmp_path)
 
     assert first == second
-    assert len(list(attachment_cache_dir(tmp_path).iterdir())) == 1
+    assert len(list(pasted_text_cache_dir(tmp_path).iterdir())) == 1
 
 
 @pytest.mark.parametrize("kind", ["text", "file"])
@@ -1844,8 +1871,10 @@ def test_run_turn_sends_an_oversized_message_as_an_attachment_reference(
     assert _referenced_file(params["input"][0]).read_text(encoding="utf-8") == text
 
 
+@pytest.mark.parametrize("paste_kind", ["envelope", "oversized_file", "utf8", "json_escaping"])
+@pytest.mark.parametrize("active_turn_id", [None, "turn_live"])
 def test_a_paste_too_large_to_mirror_is_refused_before_codex_sees_it(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, paste_kind: str, active_turn_id: str | None
 ) -> None:
     """History holds the paste as sent, so a message that cannot be mirrored is not sent."""
     from omnigent.session_event_batch import MAX_SESSION_EVENT_REQUEST_BYTES
@@ -1857,11 +1886,15 @@ def test_a_paste_too_large_to_mirror_is_refused_before_codex_sees_it(
         "omnigent.harnesses.codex_native.app_server.CodexAppServerClient",
         _FakeCodexNativeClient,
     )
-    _start_state(tmp_path)
+    _seed_bridge(tmp_path, active_turn_id=active_turn_id)
+    sample, repeats = {
+        "envelope": ("z", MAX_SESSION_EVENT_REQUEST_BYTES),
+        "oversized_file": ("z", MAX_SESSION_EVENT_REQUEST_BYTES + 1),
+        "utf8": ("\u00e9", MAX_SESSION_EVENT_REQUEST_BYTES // 2 + 1),
+        "json_escaping": ("\n", MAX_SESSION_EVENT_REQUEST_BYTES // 2),
+    }[paste_kind]
 
-    events = _collect_turn_events(
-        CodexNativeExecutor(bridge_dir=tmp_path), "z" * MAX_SESSION_EVENT_REQUEST_BYTES
-    )
+    events = _collect_turn_events(CodexNativeExecutor(bridge_dir=tmp_path), sample * repeats)
 
     [error] = events
     assert isinstance(error, ExecutorError)

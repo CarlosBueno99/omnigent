@@ -27,6 +27,7 @@ from omnigent.inner.native_attachments import (
     materialize_attachment,
     materialize_text,
     parse_data_uri,
+    pasted_text_cache_dir,
     requires_filesystem,
     resize_notice,
     resolve_file_id_block,
@@ -412,7 +413,7 @@ def test_materialize_text_writes_utf8_under_a_digest_name(tmp_path: Path) -> Non
 
     path = materialize_text(text, tmp_path)
 
-    assert path == attachment_cache_dir(tmp_path) / f"pasted_text_{digest}.txt"
+    assert path == pasted_text_cache_dir(tmp_path) / f"pasted_text_{digest}.txt"
     assert path.read_text(encoding="utf-8") == text
     assert path.stat().st_mode & 0o777 == 0o600
 
@@ -426,26 +427,38 @@ def test_materialize_text_reuses_identical_text(tmp_path: Path) -> None:
     assert first is not None
     assert second == first
     assert third is not None and third != first
-    assert len(list(attachment_cache_dir(tmp_path).iterdir())) == 2
+    assert len(list(pasted_text_cache_dir(tmp_path).iterdir())) == 2
 
 
 def test_materialize_text_leaves_unencodable_text_inline(tmp_path: Path) -> None:
     """A failed encoding cannot replace the original text with a lossy copy."""
     assert materialize_text("before\ud800after", tmp_path) is None
-    assert not attachment_cache_dir(tmp_path).exists()
+    assert not pasted_text_cache_dir(tmp_path).exists()
 
 
-def test_materialize_text_refuses_a_symlinked_destination(tmp_path: Path) -> None:
+@pytest.mark.parametrize("destination", ["file", "session", "namespace"])
+def test_materialize_text_refuses_a_symlinked_destination(
+    tmp_path: Path, destination: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The digest name cannot redirect the write outside the cache."""
-    attachments_dir = attachment_cache_dir(tmp_path)
-    attachments_dir.mkdir(parents=True)
-    outside = tmp_path.parent / f"{tmp_path.name}-outside.txt"
-    outside.write_bytes(b"precious")
+    monkeypatch.setattr(native_attachments, "data_dir", lambda: tmp_path / "data")
+    cache = pasted_text_cache_dir(tmp_path)
+    outside = tmp_path / "outside"
     digest = hashlib.sha256(b"text").hexdigest()[:12]
-    (attachments_dir / f"pasted_text_{digest}.txt").symlink_to(outside)
+    if destination == "file":
+        outside.write_bytes(b"precious")
+        link = cache / f"pasted_text_{digest}.txt"
+    else:
+        outside.mkdir()
+        link = cache if destination == "session" else cache.parent
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(outside, target_is_directory=destination != "file")
 
     assert materialize_text("text", tmp_path) is None
-    assert outside.read_bytes() == b"precious"
+    if destination == "file":
+        assert outside.read_bytes() == b"precious"
+    else:
+        assert list(outside.iterdir()) == []
 
 
 def test_restore_spilled_text_puts_each_paste_back_in_place(tmp_path: Path) -> None:
@@ -466,10 +479,10 @@ def test_restore_spilled_text_puts_each_paste_back_in_place(tmp_path: Path) -> N
 @pytest.mark.parametrize(
     "case", ["other-session", "edited", "missing", "symlink", "inline", "oversized"]
 )
-def test_restore_spilled_text_leaves_unverified_references_alone(
+def test_restore_spilled_text_checks_cache_before_restoring(
     tmp_path: Path, case: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Only this session's cache file, still holding the digested text, is read back."""
+    """Unavailable cache keeps its reference; oversized cache is rejected without reading it."""
     bridge = tmp_path / "bridge"
     path = materialize_text("original paste", bridge)
     assert path is not None
@@ -498,7 +511,7 @@ def test_restore_spilled_text_leaves_unverified_references_alone(
     reference = f"[Attached file: {path}]"
     echoed = f"see {reference} here" if case == "inline" else reference
 
-    assert restore_spilled_text(echoed, bridge) == echoed
+    assert restore_spilled_text(echoed, bridge) == (None if case == "oversized" else echoed)
 
 
 def test_restore_spilled_text_reads_a_repeated_paste_once(
