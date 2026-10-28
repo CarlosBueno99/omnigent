@@ -78,6 +78,7 @@ from omnigent.harnesses.claude_native.submit_verification import (
     capture_submit_boundary,
     has_matching_hook_refusal,
     has_matching_prompt_hook,
+    read_fresh_submit_records,
 )
 from omnigent.harnesses.diagnostics import (
     detect_sign_in_prompt,
@@ -2994,17 +2995,24 @@ def record_hook_event(bridge_dir: Path, payload: _JsonObject) -> None:
         if isinstance(event_name, str) and event_name:
             state["last_hook_event_name"] = event_name
         claude_session_id = payload.get("session_id")
+        transcript_path = payload.get("transcript_path")
+        agent_id = payload.get("agent_id")
+        child_identity = (isinstance(agent_id, str) and bool(agent_id)) or (
+            isinstance(transcript_path, str) and "subagents" in Path(transcript_path).parts
+        )
         pinned = state.get("claude_session_id")
         # Identity pin: only a SessionStart or an event from the already-pinned
         # session may change transcript/session identity; a side-channel event
         # (e.g. a background Task agent's edge) must not re-aim the forwarder.
-        identity_allowed = event_name == "SessionStart" or (
-            isinstance(claude_session_id, str)
-            and claude_session_id != ""
-            and (not isinstance(pinned, str) or not pinned or claude_session_id == pinned)
+        identity_allowed = not child_identity and (
+            event_name == "SessionStart"
+            or (
+                isinstance(claude_session_id, str)
+                and claude_session_id != ""
+                and (not isinstance(pinned, str) or not pinned or claude_session_id == pinned)
+            )
         )
         if identity_allowed:
-            transcript_path = payload.get("transcript_path")
             if isinstance(transcript_path, str) and transcript_path:
                 state["transcript_path"] = transcript_path
             if isinstance(claude_session_id, str) and claude_session_id:
@@ -3817,10 +3825,9 @@ def stop_hook_seen_since(bridge_dir: Path, start_event_count: int) -> bool:
     """
     Return whether Claude reported a stop event after a hook cursor.
 
-    Only counts stop events from the parent Claude process — subagent
-    stop events (carrying an ``agent_id``, or whose ``transcript_path``
-    contains a ``subagents/`` component) are ignored so a finishing
-    subagent does not prematurely signal the parent turn as complete.
+    Only counts stop events from the parent Claude process. A foreign
+    native session, ``agent_id``, or ``subagents/`` transcript identifies
+    a child whose completion must not end the parent's turn.
 
     :param bridge_dir: Bridge directory path.
     :param start_event_count: Hook record count captured before a
@@ -3829,6 +3836,7 @@ def stop_hook_seen_since(bridge_dir: Path, start_event_count: int) -> bool:
         ``StopFailure`` hook has been recorded after the cursor.
     """
     path = bridge_dir / _HOOKS_FILE
+    parent_session_ids = read_seen_claude_session_ids(bridge_dir)
     try:
         with path.open("r", encoding="utf-8") as handle:
             for index, line in enumerate(handle, start=1):
@@ -3840,13 +3848,19 @@ def stop_hook_seen_since(bridge_dir: Path, start_event_count: int) -> bool:
                     continue
                 payload = envelope.get("payload") if isinstance(envelope, dict) else None
                 event_name = payload.get("hook_event_name") if isinstance(payload, dict) else None
-                if event_name in {"Stop", "StopFailure"}:
-                    transcript_path = (
-                        payload.get("transcript_path") if isinstance(payload, dict) else None
-                    )
+                if event_name in {"Stop", "StopFailure"} and isinstance(payload, dict):
+                    native_session_id = payload.get("session_id")
+                    if (
+                        parent_session_ids
+                        and isinstance(native_session_id, str)
+                        and native_session_id
+                        and native_session_id not in parent_session_ids
+                    ):
+                        continue
+                    transcript_path = payload.get("transcript_path")
                     if isinstance(transcript_path, str) and "/subagents/" in transcript_path:
                         continue
-                    if isinstance(payload, dict) and payload.get("agent_id"):
+                    if payload.get("agent_id"):
                         continue
                     return True
     except FileNotFoundError:
@@ -4568,6 +4582,7 @@ def _verify_submit_accepted(
     pane = ""
     deadline = start + _SUBMIT_VERIFY_TIMEOUT_S
     processing = False
+    rotation_pending = False
     while time.monotonic() < deadline:
         time.sleep(_CLAUDE_READY_POLL_INTERVAL_S)
         _check_injection_cancelled()
@@ -4578,13 +4593,40 @@ def _verify_submit_accepted(
         if (
             bridge_dir is not None
             and submit_boundary is not None
-            and not _submit_identity_is_current(bridge_dir, submit_boundary, submit_session_id)
-        ):
-            delivery_diagnostics.record_details(verification="submit_owner_changed")
-            raise RuntimeError(
-                "Claude's session changed while verifying the submitted message. Delivery "
-                "could not be confirmed; inspect the terminal before retrying."
+            and (
+                rotation_pending
+                or not _submit_identity_is_current(bridge_dir, submit_boundary, submit_session_id)
             )
+        ):
+            expected_rotation = (
+                bool(pane.strip())
+                and not _draft_in_input_box(pane, needle)
+                and submitted_text is not None
+                and hook_boundary is not None
+                and _expected_submit_rotation(
+                    bridge_dir, hook_boundary, submitted_text, submit_session_id
+                )
+                and not has_matching_hook_refusal(
+                    submit_boundary,
+                    submitted_text,
+                    normalize_prompt=_unwrap_pasted_content_markers,
+                )
+            )
+            if not expected_rotation:
+                delivery_diagnostics.record_details(verification="submit_owner_changed")
+                # Rotation updates the web binding before recording SessionStart.
+                # Wait for its proof within this budget, without sending keys.
+                if (
+                    submitted_text is not None
+                    and submitted_text.startswith("/")
+                    and _first_slash_command_name(submitted_text) in {"clear", "fork", "branch"}
+                ):
+                    rotation_pending = True
+                    continue
+                raise RuntimeError(
+                    "Claude's session changed while verifying the submitted message. Delivery "
+                    "could not be confirmed; inspect the terminal before retrying."
+                )
         if (
             bridge_dir is not None
             and submit_boundary is not None
@@ -4670,6 +4712,11 @@ def _verify_submit_accepted(
         retries=retries,
         polls=polls,
     )
+    if rotation_pending:
+        raise RuntimeError(
+            "Claude's session changed while verifying the submitted message. Delivery "
+            "could not be confirmed; inspect the terminal before retrying."
+        )
     if processing:
         delivery_diagnostics.record_details(verification="hook_processing_unconfirmed")
         raise RuntimeError(
@@ -4712,6 +4759,64 @@ def _submit_identity_is_current(
     except (OSError, ValueError, RuntimeError):
         return False
     return True
+
+
+def _expected_submit_rotation(
+    bridge_dir: Path,
+    hook_boundary: SubmitBoundary,
+    submitted_text: str,
+    session_id: str | None,
+) -> bool:
+    """Match an intentional rotation to a fresh hook and the resulting bridge identity."""
+    command = _first_slash_command_name(submitted_text)
+    if not submitted_text.startswith("/") or command not in {"clear", "fork", "branch"}:
+        return False
+    native_session_id = read_claude_session_id(bridge_dir)
+    transcript_path = read_transcript_path(bridge_dir)
+    active_session_id = read_active_session_id(bridge_dir)
+    if (
+        not native_session_id
+        or native_session_id == hook_boundary.native_session_id
+        or transcript_path is None
+    ):
+        return False
+    for entry in read_fresh_submit_records(hook_boundary):
+        payload = entry.get("payload")
+        if (
+            not isinstance(payload, dict)
+            or payload.get("hook_event_name") != "SessionStart"
+            or payload.get("session_id") != native_session_id
+            or payload.get("agent_id") not in (None, "")
+            or payload.get("isSidechain") is True
+        ):
+            continue
+        if command == "clear":
+            if payload.get("source") != "clear":
+                continue
+            rotated_to = payload.get("omnigent_clear_rotated_to")
+        else:
+            if (
+                payload.get("source") != "resume"
+                or payload.get("omnigent_fork_detected") is not True
+                or payload.get("omnigent_previous_claude_session_id")
+                != hook_boundary.native_session_id
+                or payload.get("omnigent_claude_session_was_seen") is not False
+            ):
+                continue
+            rotated_to = payload.get("omnigent_fork_rotated_to")
+        path = payload.get("transcript_path")
+        if not isinstance(path, str) or not path:
+            continue
+        try:
+            if Path(path).resolve() != transcript_path.resolve():
+                continue
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if session_id is not None and active_session_id != session_id:
+            if not active_session_id or rotated_to != active_session_id:
+                continue
+        return True
+    return False
 
 
 def _count_unknown_command_rejections(pane: str, needle: str) -> int:
@@ -6160,6 +6265,10 @@ def _restore_occupied_input(
     startup dialogs whose Escape quits Claude Code instead of closing them
     (:func:`_escape_quits_claude`): they are left for the person to answer.
 
+    Isaac's idle-compaction log can overwrite the rendered input box. Redraw
+    it once with Ctrl+L before any edit keys can erase its identifying prefix,
+    then check the actual composer and pending prompts again.
+
     Escape is only sent while the surface is verifiably on screen —
     never blind, because on the bare composer Escape interrupts an
     in-flight turn. A screen with no input box counts only when it
@@ -6193,6 +6302,7 @@ def _restore_occupied_input(
     last_escape: float | None = None
     confirmed = False
     unclearable_seen = False
+    notice_redrawn = False
     while True:
         pane = _capture_pane(socket_path, tmux_target)
         _raise_if_user_prompt_pending(
@@ -6209,6 +6319,17 @@ def _restore_occupied_input(
             return None
         surface = _occupying_surface(pane)
         delivery_diagnostics.record_restore_observation(pane=pane, surface=surface)
+        box = _composer_box(pane)
+        if (
+            not notice_redrawn
+            and box is not None
+            and any("[idle-compact]" in row for row in box.rows)
+        ):
+            _logger.info("claude-native: redrawing an idle-compaction notice over the input box")
+            _run_tmux(socket_path, "send-keys", "-t", tmux_target, "C-l")
+            notice_redrawn = True
+            time.sleep(_CLAUDE_READY_POLL_INTERVAL_S)
+            continue
         if surface is None:
             return None
         now = time.monotonic()
@@ -6410,7 +6531,16 @@ def _composer_frame_rule_indices(lines: list[str]) -> list[int]:
     if len(rules) < 2:
         return rules
     frame_indent = min(len(lines[idx]) - len(lines[idx].lstrip()) for idx in rules[-2:])
-    return [idx for idx in rules if len(lines[idx]) - len(lines[idx].lstrip()) == frame_indent]
+    rules = [idx for idx in rules if len(lines[idx]) - len(lines[idx].lstrip()) == frame_indent]
+    last_prompt = next((line for line in lines[rules[-1] + 1 :] if line.strip()), "")
+    if (
+        last_prompt.strip()[:1] in _COMPOSER_MODE_GLYPHS
+        and len(last_prompt) - len(last_prompt.lstrip()) == frame_indent
+    ):
+        # A lower prompt makes the last rule an opening edge. The older frame
+        # cannot establish that this clipped draft is complete or empty.
+        return [rules[-1]]
+    return rules
 
 
 def _composer_box(pane: str) -> _ComposerBox | None:
@@ -9936,6 +10066,8 @@ def _assistant_transcript_items_from_entry(
         items.
     """
     message = entry["message"]
+    if _is_no_response_placeholder(message):
+        return current_response_id, []
     content = message.get("content") if isinstance(message, dict) else None
     source_key = _transcript_source_key(entry, line_number, record_offset)
     waking = current_response_id is not None and current_response_id == settled_response_id
@@ -10172,6 +10304,27 @@ def _is_api_error_entry(entry: _JsonObject) -> bool:
         return True
     message = entry.get("message")
     return isinstance(message, dict) and message.get("isApiErrorMessage") is True
+
+
+_NO_RESPONSE_PLACEHOLDER_TEXT = "No response requested."
+
+
+def _is_no_response_placeholder(message: object) -> bool:
+    """
+    Return whether an assistant message is Claude Code's no-reply placeholder.
+
+    The CLI writes it when it resumes an interrupted turn or a rate limit ends
+    a turn without a message, and never renders it; this mirrors its own check.
+
+    :param message: The transcript record's ``message`` value.
+    :returns: ``True`` for the synthetic ``No response requested.`` message.
+    """
+    if not isinstance(message, dict) or message.get("model") != "<synthetic>":
+        return False
+    content = message.get("content")
+    if isinstance(content, list) and len(content) == 1 and isinstance(content[0], dict):
+        content = content[0].get("text") if content[0].get("type") == "text" else None
+    return content == _NO_RESPONSE_PLACEHOLDER_TEXT
 
 
 def _assistant_message_item(

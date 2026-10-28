@@ -24,7 +24,12 @@ _CONTENT = "synthetic delayed prompt"
 
 
 def _install_submit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, outcome: str, hook_kind: str = "fresh"
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    outcome: str,
+    hook_kind: str = "fresh",
+    content: str = _CONTENT,
 ) -> SimpleNamespace:
     transcript = tmp_path / "native.jsonl"
     transcript.write_text('{"type":"system","content":"prefix"}\n')
@@ -41,12 +46,12 @@ def _install_submit(
         "hook_event_name": "UserPromptSubmit",
         "session_id": _NATIVE_SESSION,
         "transcript_path": str(transcript),
-        "prompt": _CONTENT,
+        "prompt": content,
     }
     if hook_kind == "different-prompt":
         hook["prompt"] = "another local input"
     elif hook_kind == "same-prefix":
-        hook["prompt"] = _CONTENT + " suffix"
+        hook["prompt"] = content + " suffix"
     elif hook_kind == "wrong-session":
         hook["session_id"] = "other-native"
     elif hook_kind == "wrong-transcript":
@@ -58,7 +63,7 @@ def _install_submit(
     elif hook_kind == "wrong-event":
         hook["hook_event_name"] = "Stop"
     elif hook_kind == "wrapped":
-        hook["prompt"] = f'<pasted_content id="abcd">\n{_CONTENT}\n</pasted_content>'
+        hook["prompt"] = f'<pasted_content id="abcd">\n{content}\n</pasted_content>'
     hook_log = tmp_path / "hooks.jsonl"
     if hook_kind == "stale":
         bridge.record_hook_event(tmp_path, hook)
@@ -91,7 +96,7 @@ def _install_submit(
                     handle.write(
                         json.dumps(
                             _blocked_prompt_entry(
-                                "Synthetic refusal.", _CONTENT, native_session_id=_NATIVE_SESSION
+                                "Synthetic refusal.", content, native_session_id=_NATIVE_SESSION
                             )
                         )
                         + "\n"
@@ -105,7 +110,7 @@ def _install_submit(
         if state.enters:
             state.after_submit.append(args)
         if args[0] == "paste-buffer":
-            state.pane = _composer_pane(_CONTENT)
+            state.pane = _composer_pane(content)
         if args[-1] != "Enter":
             return
         state.enters += 1
@@ -431,3 +436,132 @@ async def test_cancelling_a_processing_turn_drains_its_worker_before_unlocking(
             task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.parametrize("rotate_web", [False, True], ids=["native-only", "web-and-native"])
+@pytest.mark.parametrize(
+    ("command", "evidence"),
+    [
+        ("fork", "valid"),
+        ("branch", "valid"),
+        ("clear", "valid"),
+        ("fork", "ordinary-resume"),
+        ("fork", "wrong-parent"),
+        ("fork", "seen-session"),
+        ("clear", "wrong-source"),
+        ("clear", "child"),
+        ("clear", "stale"),
+        ("clear", "wrong-transcript"),
+        ("clear", "still-draft"),
+        ("clear", "empty-capture"),
+        ("clear", "blocked"),
+        ("clear", "wrong-web"),
+        ("clear", "delayed-hook"),
+    ],
+)
+def test_intentional_rotation_requires_a_fresh_matching_hook_and_cleared_composer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    evidence: str,
+    rotate_web: bool,
+) -> None:
+    content = f"/{command}"
+    state = _install_submit(
+        tmp_path, monkeypatch, outcome="never", hook_kind="none", content=content
+    )
+    capture = bridge._capture_pane
+    payload: JsonObject = {
+        "hook_event_name": "SessionStart",
+        "source": "clear" if command == "clear" else "resume",
+        "session_id": "native-replacement",
+        "transcript_path": str(tmp_path / "replacement.jsonl"),
+    }
+    marker = "omnigent_clear_rotated_to" if command == "clear" else "omnigent_fork_rotated_to"
+    if rotate_web:
+        payload[marker] = "web-replacement"
+    if command != "clear":
+        payload.update(
+            omnigent_previous_claude_session_id=_NATIVE_SESSION,
+            omnigent_claude_session_was_seen=False,
+            omnigent_fork_detected=True,
+        )
+    if evidence == "stale":
+        bridge.record_hook_event(tmp_path, payload)
+        bridge.record_hook_event(
+            tmp_path,
+            {
+                "hook_event_name": "SessionStart",
+                "session_id": _NATIVE_SESSION,
+                "transcript_path": str(state.transcript),
+            },
+        )
+
+    def rotate(*args: str) -> str:
+        if state.enters and not state.completed:
+            if evidence == "delayed-hook" and state.elapsed < 2 and rotate_web:
+                bridge.write_active_session_id(tmp_path, "web-replacement")
+                state.pane = _composer_pane()
+                return state.pane
+            state.completed = True
+            if evidence == "ordinary-resume":
+                payload.pop("omnigent_fork_detected")
+            elif evidence == "wrong-parent":
+                payload["omnigent_previous_claude_session_id"] = "unrelated-native"
+            elif evidence == "seen-session":
+                payload["omnigent_claude_session_was_seen"] = True
+            elif evidence in {"wrong-source", "stale"}:
+                payload["source"] = "startup"
+            elif evidence == "child":
+                payload["agent_id"] = "native-child"
+            elif evidence == "wrong-web":
+                payload[marker] = "unrelated-web"
+            bridge.record_hook_event(tmp_path, payload)
+            if evidence == "child":
+                bridge.record_hook_event(
+                    tmp_path,
+                    {**payload, "agent_id": "", "source": "startup"},
+                )
+            if rotate_web:
+                bridge.write_active_session_id(tmp_path, "web-replacement")
+            if evidence == "wrong-transcript":
+                (tmp_path / "state.json").write_text(
+                    json.dumps(
+                        {
+                            "claude_session_id": "native-replacement",
+                            "transcript_path": str(tmp_path / "unrelated.jsonl"),
+                        }
+                    )
+                )
+            if evidence == "blocked":
+                with state.transcript.open("a") as handle:
+                    handle.write(
+                        json.dumps(
+                            _blocked_prompt_entry(
+                                "Synthetic refusal.", content, native_session_id=_NATIVE_SESSION
+                            )
+                        )
+                        + "\n"
+                    )
+            if evidence != "still-draft":
+                state.pane = _composer_pane()
+        if state.enters and evidence == "empty-capture":
+            return ""
+        return capture(*args)
+
+    monkeypatch.setattr(bridge, "_capture_pane", rotate)
+    accepted = evidence in {"valid", "delayed-hook"} or (
+        evidence == "wrong-web" and not rotate_web
+    )
+    if accepted:
+        bridge.inject_user_message(tmp_path, content=content)
+    else:
+        with pytest.raises(RuntimeError, match="session changed"):
+            bridge.inject_user_message(tmp_path, content=content)
+    assert state.enters == 1
+    assert state.after_submit == []
+    if evidence == "delayed-hook" and rotate_web:
+        assert 2 <= state.elapsed < 3
+    assert bridge.read_active_session_id(tmp_path) == (
+        "web-replacement" if rotate_web else "web-original"
+    )
