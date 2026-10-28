@@ -472,7 +472,7 @@ check_tmux() {
   case "$tmux_platform" in
     Darwin)
       if command -v brew >/dev/null 2>&1; then
-        if [ "$tmux_preexisting" = true ]; then
+        if [ "$tmux_preexisting" = true ] && brew list --formula tmux >/dev/null 2>&1; then
           install_cmd="brew upgrade tmux"
         else
           install_cmd="brew install tmux"
@@ -480,7 +480,9 @@ check_tmux() {
       fi
       ;;
     Linux)
-      install_cmd="$(linux_pkg_install_cmd tmux)"
+      if [ "$tmux_preexisting" = false ]; then
+        install_cmd="$(linux_pkg_install_cmd tmux)"
+      fi
       ;;
   esac
   if [ -n "$install_cmd" ] && prompt_yes_no "$tmux_problem; native terminals need tmux $TMUX_MIN_VERSION or newer. Install/upgrade it now ($install_cmd)?"; then

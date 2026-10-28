@@ -37,16 +37,18 @@ SH = shutil.which("sh") or "/bin/sh"
 
 
 @pytest.mark.posix_only
-@pytest.mark.parametrize("platform", ["Linux", "Darwin"])
 @pytest.mark.parametrize(
-    ("version", "answer", "upgrade_version", "upgrade_status"),
+    ("platform", "version", "answer", "upgrade_version", "upgrade_status"),
     [
-        pytest.param("3.3a", None, "3.3a", 0, id="supported"),
-        pytest.param("3.0", None, "3.3a", 0, id="noninteractive"),
-        pytest.param("3.0", "n", "3.3a", 0, id="declined"),
-        pytest.param("3.0", "y", "3.3a", 0, id="upgraded"),
-        pytest.param("3.0", "y", "3.0", 0, id="package-did-not-upgrade"),
-        pytest.param("3.0", "y", "3.0", 17, id="package-failed"),
+        pytest.param("Linux", "3.3a", None, "3.3a", 0, id="linux-supported"),
+        pytest.param("Linux", "3.0", None, "3.3a", 0, id="linux-noninteractive"),
+        pytest.param("Linux", "3.0", "n", "3.3a", 0, id="linux-manual-remediation"),
+        pytest.param("Darwin", "3.3a", None, "3.3a", 0, id="darwin-supported"),
+        pytest.param("Darwin", "3.0", None, "3.3a", 0, id="darwin-noninteractive"),
+        pytest.param("Darwin", "3.0", "n", "3.3a", 0, id="darwin-declined"),
+        pytest.param("Darwin", "3.0", "y", "3.3a", 0, id="darwin-upgraded"),
+        pytest.param("Darwin", "3.0", "y", "3.0", 0, id="darwin-package-did-not-upgrade"),
+        pytest.param("Darwin", "3.0", "y", "3.0", 17, id="darwin-package-failed"),
     ],
 )
 def test_installer_main_checks_tmux_with_explicit_consent(
@@ -79,6 +81,8 @@ def test_installer_main_checks_tmux_with_explicit_consent(
         "    print(os.environ['TEST_PLATFORM'])\n"
         "elif tool == 'tmux':\n"
         "    print('tmux ' + Path(os.environ['TEST_VERSION']).read_text())\n"
+        "elif tool == 'brew' and args == ['list', '--formula', 'tmux']:\n"
+        "    sys.exit(0)\n"
         "elif tool in ('sudo', 'brew'):\n"
         "    expected = ['apt-get', 'install', '-y', 'tmux'] if tool == 'sudo' "
         "else ['upgrade', 'tmux']\n"
@@ -135,11 +139,16 @@ def test_installer_main_checks_tmux_with_explicit_consent(
             child = pexpect.spawn(SH, command, env=environment, cwd=str(home), encoding="utf-8")
             child.logfile = log
             try:
-                child.expect_exact("[Y/n] ", timeout=30)
-                assert "native terminals need tmux 3.3 or newer" in child.before
-                before_consent = [json.loads(line) for line in calls.read_text().splitlines()]
-                assert not [call for call in before_consent if call[0] in {"sudo", "brew"}]
-                child.sendline(answer)
+                if platform == "Darwin":
+                    child.expect_exact("[Y/n] ", timeout=30)
+                    assert "native terminals need tmux 3.3 or newer" in child.before
+                    before_consent = [json.loads(line) for line in calls.read_text().splitlines()]
+                    assert not [
+                        call
+                        for call in before_consent
+                        if call[0] == "sudo" or (call[0] == "brew" and call[1][0] != "list")
+                    ]
+                    child.sendline(answer)
                 child.expect(pexpect.EOF, timeout=90)
                 child.close()
                 status = child.exitstatus
@@ -149,14 +158,28 @@ def test_installer_main_checks_tmux_with_explicit_consent(
     assert status == 0, output
     assert "Omnigent installed successfully" in output
     invocations = [json.loads(line) for line in calls.read_text().splitlines()]
-    upgrades = [call for call in invocations if call[0] in {"sudo", "brew"}]
+    upgrades = [
+        call
+        for call in invocations
+        if call[0] == "sudo" or (call[0] == "brew" and call[1][0] != "list")
+    ]
     assert len(upgrades) == (1 if answer == "y" else 0)
+    probes = [call for call in invocations if call[0] == "brew" and call[1][0] == "list"]
+    assert probes == (
+        [["brew", ["list", "--formula", "tmux"]]]
+        if platform == "Darwin" and version == "3.0"
+        else []
+    )
     assert sum(call[0] == "uv" and call[1][:2] == ["tool", "install"] for call in invocations) == 1
     supported = version == "3.3a" or (answer == "y" and upgrade_version == "3.3a")
     assert ("tmux 3.3a is supported" in output) is supported
     if not supported:
         assert "tmux 3.3 or newer" in output
         assert "tmux -V" in output
+        if platform == "Linux":
+            assert "Install a supported version with your package manager" in output
+            assert "[Y/n]" not in output
+            assert "sudo apt-get" not in output
     if answer == "y" and not supported:
         assert "tmux 3.3 or newer is still unavailable" in output
     if answer == "y" and upgrade_status:
@@ -446,21 +469,24 @@ def test_check_tmux_validates_existing_version(
         assert not r.stderr
     else:
         assert "native terminals need tmux 3.3 or newer" in r.stderr
-        assert "sudo apt-get install -y tmux" in r.stderr
+        assert "Install a supported version with your package manager" in r.stderr
+        assert "sudo" not in r.stderr
         assert "tmux -V" in r.stderr
         assert "is supported" not in r.stdout
 
 
 @pytest.mark.parametrize(
-    ("platform", "preexisting", "installed_version", "install_status"),
+    ("platform", "preexisting", "brew_owned", "installed_version", "install_status"),
     [
-        ("Darwin", True, "3.3a", 0),
-        ("Darwin", False, "3.3a", 0),
-        ("Linux", True, "3.3a", 0),
-        ("Linux", False, "3.3a", 0),
-        ("Linux", True, "3.0", 0),
-        ("Linux", False, "3.0", 0),
-        ("Linux", True, "3.0", 1),
+        ("Darwin", True, True, "3.3a", 0),
+        ("Darwin", True, False, "3.3a", 0),
+        ("Darwin", False, False, "3.3a", 0),
+        ("Darwin", True, True, "3.0", 0),
+        ("Darwin", True, False, "3.0", 1),
+        ("Linux", True, False, "3.3a", 0),
+        ("Linux", False, False, "3.3a", 0),
+        ("Linux", False, False, "3.0", 0),
+        ("Linux", False, False, "3.0", 1),
     ],
 )
 def test_check_tmux_rechecks_install_or_upgrade(
@@ -468,11 +494,14 @@ def test_check_tmux_rechecks_install_or_upgrade(
     tmp_path: Path,
     platform: str,
     preexisting: bool,
+    brew_owned: bool,
     installed_version: str,
     install_status: int,
 ) -> None:
     """Package-manager success does not guarantee a supported tmux on PATH."""
-    bindir = _bindir(tmp_path, "brew")
+    bindir = _bindir(tmp_path)
+    brew_calls = tmp_path / "brew-calls"
+    brew_calls.touch()
     existing = 'tmux() { echo "tmux $tmux_test_version"; };' if preexisting else ""
     r = run(
         lib,
@@ -480,6 +509,10 @@ def test_check_tmux_rechecks_install_or_upgrade(
         tmux_test_version=3.0
         {existing}
         uname() {{ echo {platform}; }}
+        brew() {{
+            printf '%s\\n' "$*" >> {shlex.quote(str(brew_calls))}
+            return {0 if brew_owned else 1}
+        }}
         linux_pkg_install_cmd() {{ echo 'sudo apt-get install -y tmux'; }}
         prompt_yes_no() {{ echo "offer:$1"; return 0; }}
         run_with_spinner() {{ shift; "$@"; }}
@@ -495,8 +528,21 @@ def test_check_tmux_rechecks_install_or_upgrade(
         env={"PATH": bindir},
     )
     assert r.returncode == 0, r.stderr
+    assert brew_calls.read_text() == (
+        "list --formula tmux\n" if platform == "Darwin" and preexisting else ""
+    )
+    if platform == "Linux" and preexisting:
+        assert "offer:" not in r.stdout
+        assert "install:" not in r.stdout
+        assert "ownership=preexisting" in r.stdout
+        assert "native terminals need tmux 3.3 or newer" in r.stderr
+        assert "Install a supported version with your package manager" in r.stderr
+        assert "tmux -V" in r.stderr
+        assert "sudo" not in r.stderr
+        assert "is supported" not in r.stdout
+        return
     command = (
-        f"brew {'upgrade' if preexisting else 'install'} tmux"
+        f"brew {'upgrade' if preexisting and brew_owned else 'install'} tmux"
         if platform == "Darwin"
         else "sudo apt-get install -y tmux"
     )
