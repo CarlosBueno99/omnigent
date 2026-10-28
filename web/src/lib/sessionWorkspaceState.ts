@@ -45,6 +45,9 @@ export interface SessionWorkspaceState {
   /** Ordered list of open side-chat tabs (child conversation ids). Browser-local
    *  by design: side chats are ephemeral and vanish when the app is closed. */
   openSideChats?: string[];
+  /** Side-chat and sub-agent tabs in display order, present only while a sub-agent
+   *  tab is open. Kept out of `openSideChats` so older clients never load one. */
+  chatTabs?: string[];
   /** The active side-chat tab (null = a file/scope/other view is active). */
   selectedSideChatId?: string | null;
   /** Split panes of the main terminal view; absent while unsplit. */
@@ -137,6 +140,15 @@ function sanitize(entry: unknown): SessionWorkspaceState {
       ),
     ];
   }
+  if (Array.isArray(record.chatTabs)) {
+    state.chatTabs = [
+      ...new Set(
+        record.chatTabs.filter(
+          (value): value is string => typeof value === "string" && value.length > 0,
+        ),
+      ),
+    ];
+  }
   if (record.selectedSideChatId === null || typeof record.selectedSideChatId === "string") {
     state.selectedSideChatId = record.selectedSideChatId;
   }
@@ -205,6 +217,9 @@ export function writeSessionWorkspaceState(
   // Same bound for side-chat tabs (also appended in open order).
   if (next.openSideChats && next.openSideChats.length > MAX_OPEN_FILES) {
     next.openSideChats = next.openSideChats.slice(-MAX_OPEN_FILES);
+  }
+  if (next.chatTabs && next.chatTabs.length > MAX_OPEN_FILES) {
+    next.chatTabs = next.chatTabs.slice(-MAX_OPEN_FILES);
   }
   // Drop any existing entry and re-append so the most-recently-touched session
   // moves to the end; pruning then evicts from the front (oldest-touched).

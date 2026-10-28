@@ -1,6 +1,7 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
+import { subagentTabId } from "@/lib/subagentTabs";
 import { useSideChats } from "./useSideChats";
 
 afterEach(() => {
@@ -103,6 +104,38 @@ describe("side-chat soft tabs", () => {
 
     const other = renderHook(() => useSideChats("session-b"));
     expect(other.result.current.tabs).toEqual([]);
+  });
+
+  it("keeps sub-agent tabs out of the side-chat list older clients read", () => {
+    const subagentTab = subagentTabId("conv_child");
+    const first = renderHook(() => useSideChats("session-a"));
+    act(() => first.result.current.open("conv_a"));
+    act(() => first.result.current.open(subagentTab));
+    act(() => first.result.current.open("conv_b"));
+    expect(readSessionWorkspaceState("session-a")).toEqual({
+      openSideChats: ["conv_a", "conv_b"],
+      chatTabs: ["conv_a", subagentTab, "conv_b"],
+      selectedSideChatId: "conv_b",
+    });
+    first.unmount();
+
+    const restored = renderHook(() => useSideChats("session-a"));
+    expect(restored.result.current.tabs).toEqual(["conv_a", subagentTab, "conv_b"]);
+    act(() => restored.result.current.close(subagentTab));
+    expect(readSessionWorkspaceState("session-a")).toEqual({
+      openSideChats: ["conv_a", "conv_b"],
+      selectedSideChatId: "conv_b",
+    });
+  });
+
+  it("keeps side chats an older client opened or closed since the last write", () => {
+    const subagentTab = subagentTabId("conv_child");
+    writeSessionWorkspaceState("session-a", {
+      openSideChats: ["conv_a", "conv_new"],
+      chatTabs: ["conv_a", subagentTab, "conv_closed"],
+    });
+    const { result } = renderHook(() => useSideChats("session-a"));
+    expect(result.current.tabs).toEqual(["conv_a", subagentTab, "conv_new"]);
   });
 
   it("closes the target tab and selects a neighbor, then clears", () => {

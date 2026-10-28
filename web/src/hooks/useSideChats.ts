@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
 import { newPendingSideChatId } from "@/lib/sideChat";
+import { subagentSessionIdFromTab } from "@/lib/subagentTabs";
 
 interface SideChatTabsState {
   /** Open side-chat child conversation ids, in open order. */
@@ -11,7 +12,12 @@ interface SideChatTabsState {
 
 function readSideChatTabsState(conversationId: string): SideChatTabsState {
   const saved = readSessionWorkspaceState(conversationId);
-  const tabs = saved.openSideChats ?? [];
+  const sideChats = saved.openSideChats ?? [];
+  // An older client may have changed `openSideChats` since `chatTabs` was written.
+  const ordered = (saved.chatTabs ?? []).filter(
+    (id) => subagentSessionIdFromTab(id) !== null || sideChats.includes(id),
+  );
+  const tabs = [...ordered, ...sideChats.filter((id) => !ordered.includes(id))];
   return {
     tabs,
     selected: tabs.includes(saved.selectedSideChatId ?? "") ? saved.selectedSideChatId! : null,
@@ -44,8 +50,10 @@ export function useSideChats(conversationId: string) {
   const update = useCallback(
     (mutate: (current: SideChatTabsState) => SideChatTabsState) => {
       const next = mutate(readSideChatTabsState(conversationId));
+      const sideChats = next.tabs.filter((id) => subagentSessionIdFromTab(id) === null);
       writeSessionWorkspaceState(conversationId, {
-        openSideChats: next.tabs,
+        openSideChats: sideChats,
+        chatTabs: sideChats.length === next.tabs.length ? undefined : next.tabs,
         selectedSideChatId: next.selected,
       });
       setState(next);
