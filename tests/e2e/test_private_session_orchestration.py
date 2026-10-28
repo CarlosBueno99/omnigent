@@ -170,36 +170,9 @@ def test_private_manager_launch_send_read_and_sharing(
                 def configure(marker, responses):
                     required_tool = {
                         "codex-native": "mcp__omnigent",
-                        "claude-sdk": "ToolSearch",
+                        "claude-sdk": "mcp__omnigent__sys_session_message",
                         "openai-agents": "sys_session_message",
                     }[harness]
-                    if harness == "claude-sdk":
-                        names = sorted(
-                            {
-                                call["name"]
-                                for response in responses
-                                for call in response.get("tool_calls", [])
-                            }
-                        )
-                        if names:
-                            # Exercise the CLI's real deferred MCP discovery before calling it.
-                            responses = [
-                                {
-                                    "tool_calls": [
-                                        {
-                                            "name": "ToolSearch",
-                                            "arguments": json.dumps(
-                                                {
-                                                    "query": f"select:{','.join(names)}",
-                                                    "max_results": len(names),
-                                                }
-                                            ),
-                                            "call_id": f"toolu_search_{uuid.uuid4().hex[:12]}",
-                                        }
-                                    ]
-                                },
-                                *responses,
-                            ]
                     configure_mock_llm(
                         mock,
                         responses,
