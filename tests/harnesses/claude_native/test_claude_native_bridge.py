@@ -4885,19 +4885,33 @@ def test_unknown_command_watch_keeps_the_recovered_pane_height(
 
 
 @pytest.mark.parametrize("clipped", [False, True], ids=["normal", "clipped-after-rejection"])
+@pytest.mark.parametrize(
+    "draft_text",
+    ["a new terminal draft", 'Try "fix the failing test"', "Press up to edit queued messages"],
+)
+@pytest.mark.parametrize(
+    "cursor_at_start", [False, True], ids=["cursor-at-end", "cursor-at-start"]
+)
 def test_unknown_command_fallback_preserves_a_new_terminal_draft(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clipped: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clipped: bool,
+    draft_text: str,
+    cursor_at_start: bool,
 ) -> None:
     """The fallback must not clear a terminal edit made after the rejected submit."""
     content = "/not-a-real-skill hello world"
-    draft = ("\n" if clipped else "") + "a new terminal draft"
+    draft = ("\n" if clipped else "") + draft_text
     composer = _EditableComposer("", cursor=0)
     composer.install(monkeypatch)
     sizes: list[str] = []
+    fallback_keys: list[str] = []
     height = "40"
 
     def run_tmux(socket_path: str, *args: str, **kwargs: object) -> None:
         nonlocal height
+        if args[0] == "send-keys" and composer.submitted:
+            fallback_keys.append(args[-1])
         if args[0] == "resize-window":
             height = args[args.index("-y") + 1]
             sizes.append(height)
@@ -4906,6 +4920,8 @@ def test_unknown_command_fallback_preserves_a_new_terminal_draft(
             composer._run_tmux(socket_path, *args)
             if args[-1] == "Enter" and len(composer.submitted) == 1:
                 composer._insert(draft)
+                if cursor_at_start:
+                    composer.cursor = 0
                 composer._visible_rows = 1 if clipped else None
                 height = "7" if clipped else height
 
@@ -4927,6 +4943,7 @@ def test_unknown_command_fallback_preserves_a_new_terminal_draft(
 
     assert composer.text == draft
     assert composer.submitted == [content + "\n"]
+    assert fallback_keys == []
     assert sizes == (["24", "7"] if clipped else [])
 
 

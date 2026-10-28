@@ -4315,19 +4315,14 @@ def inject_user_message(
         bridge_dir=bridge_dir,
         extend_for_slow_boot=not resized,
     )
-    # Escape unsupported slash commands (e.g. ``/help``, ``/exit``) so the
-    # Claude Code TUI treats them as user text instead of invoking a state
-    # that Omnigent cannot drive. Allowed commands (``/clear``,
-    # ``/model``, ``/fork``, skills, etc.) pass through unchanged.
+    # Escape unsupported commands as user text; supported controls and skills
+    # pass through unchanged.
     injected_text = _escape_unsupported_slash_command(content)
     needle = _submit_needle(content)
     socket_path = info["socket_path"]
     tmux_target = info["tmux_target"]
-    # A leading ``/name`` that is neither allowed nor known-dropped passes
-    # through on the assumption it is a skill. Claude Code is the only
-    # authority on that guess: when it does NOT recognize the name it
-    # rejects the whole message ("Unknown command: /<name>") without ever
-    # calling the model, silently swallowing the user's text.
+    # Claude rejects unknown /names without calling the model. Watch for a
+    # fresh rejection before retrying the text with its slash escaped.
     unknown_name = _passthrough_slash_command_name(content)
     rejection_needle: str | None = None
     if unknown_name is not None:
@@ -6690,6 +6685,8 @@ def _clear_composer(socket_path: str, tmux_target: str, *, preserve_draft: bool 
             and not any(row.strip() for row in box.rows[1:])
         )
         if preserve_draft and box is not None:
+            # A hint and a new draft at cursor zero can render identically.
+            # Preserve either rather than treating cursor zero as empty input.
             if box.rows[0].strip() != _CLAUDE_PROMPT_GLYPH or any(
                 row.strip() for row in box.rows[1:]
             ):

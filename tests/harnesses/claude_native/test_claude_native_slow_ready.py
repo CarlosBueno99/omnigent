@@ -24,6 +24,7 @@ import os
 import re
 import signal
 import sys
+import tempfile
 import time
 import tty
 from pathlib import Path
@@ -63,9 +64,9 @@ def render(*_args):
         if startup == "quoted-wrapped-frame":
             screen = "first part of a long title\nlast part ─\n" + screen.split("\n", 1)[1]
         screen = "\n".join(screen.splitlines()[:6 if startup == "quoted-wrapped-frame" else 5])
-    delivered.with_suffix(".state").write_text(
-        json.dumps({"draft": box.draft, "received_bytes": received_bytes})
-    )
+    with tempfile.NamedTemporaryFile(mode="w", dir=delivered.parent, delete=False) as state_file:
+        json.dump({"draft": box.draft, "received_bytes": received_bytes}, state_file)
+    os.replace(state_file.name, delivered.with_suffix(".state"))
     sys.stdout.write("\x1b[H\x1b[2J" + screen.replace("\n", "\r\n"))
     prompt_row = screen.splitlines().index(box.pane().splitlines()[1])
     cursor_row = prompt_row + box.draft[:box.cursor].count("\n")
