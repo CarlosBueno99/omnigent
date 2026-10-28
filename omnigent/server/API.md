@@ -1151,6 +1151,10 @@ that queued input. Clients without a message stable ID are supported through
 the server's exact pending ID and delivery-attempt ID. Failures with uncertain
 acceptance stay pending for transcript reconciliation; they are not resent.
 
+A failed transcript append restores pending inputs with their prior delivery
+uncertainty, including entries that expired while persistence was in flight.
+A later mirror cannot report a possibly recorded input as definitely undelivered.
+
 **Interrupt is dual-path on purpose.** Posting `{"type": "interrupt"}`
 is exposed as an event for API uniformity, but it does NOT enter the
 queue — the route invokes the loop's `cancel_loop` directly so the
