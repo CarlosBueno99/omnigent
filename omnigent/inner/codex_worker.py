@@ -75,10 +75,14 @@ def _contain_host_codex_home_links(policy: SandboxPolicy, codex_home: Path) -> S
     # A sandboxed session may have replaced the host login with a link; never grant its target.
     if host_login.is_symlink() or not host_login.is_file():
         return policy
+    granted = with_additional_write_files(policy, [host_login])
+    # The grant resolves the path again; drop it if the login was swapped for a link meanwhile.
+    if not set(granted.write_files) <= {*policy.write_files, host_login}:
+        return policy
     # Codex refreshes the login in place; link straight to the granted file.
     login.unlink()
     login.symlink_to(host_login)
-    return with_additional_write_files(policy, [host_login])
+    return granted
 
 
 def prepare_codex_catalog_probe(

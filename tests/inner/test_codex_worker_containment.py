@@ -25,7 +25,11 @@ from omnigent.inner.codex_worker import (
 )
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.model_signer import SignerReadiness
-from omnigent.inner.sandbox import SandboxPolicy, with_additional_write_roots
+from omnigent.inner.sandbox import (
+    SandboxPolicy,
+    with_additional_write_files,
+    with_additional_write_roots,
+)
 
 
 class _Pipe:
@@ -218,7 +222,9 @@ def test_worker_grants_only_selected_skills_directory_read_only(
         worker.close()
 
 
-@pytest.mark.parametrize("layout", ["plain", "linked_codex_home", "linked_login"])
+@pytest.mark.parametrize(
+    "layout", ["plain", "linked_codex_home", "linked_login", "replaced_after_check"]
+)
 def test_worker_grants_plain_host_login_and_detaches_host_memories(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, layout: str
 ) -> None:
@@ -252,6 +258,16 @@ def test_worker_grants_plain_host_login_and_detaches_host_memories(
     )
     monkeypatch.setattr("omnigent.inner.codex_worker.get_backend", Mock(return_value=backend))
     monkeypatch.setattr("omnigent.inner.codex_worker.create_exec_launcher", create_launcher)
+    if layout == "replaced_after_check":
+
+        def replace_login_then_grant(policy: SandboxPolicy, files: list[Path]) -> SandboxPolicy:
+            (host_codex / "auth.json").unlink()
+            (host_codex / "auth.json").symlink_to(outside)
+            return with_additional_write_files(policy, files)
+
+        monkeypatch.setattr(
+            "omnigent.inner.codex_worker.with_additional_write_files", replace_login_then_grant
+        )
 
     worker = prepare_codex_worker(
         codex_path=str(codex),
@@ -262,7 +278,7 @@ def test_worker_grants_plain_host_login_and_detaches_host_memories(
     )
     try:
         login = host_codex.resolve() / "auth.json"
-        granted = [] if layout == "linked_login" else [login]
+        granted = [login] if layout in ("plain", "linked_codex_home") else []
         for policy in (
             backend.wrap_launcher_argv.call_args.args[1],
             create_launcher.call_args.args[1],
