@@ -2884,9 +2884,14 @@ function ComposerImpl(
   // for claude-sdk, whose runner sends /compact to the live SDK client to
   // trigger native compaction. Other SDK harnesses don't support it yet.
   const showCompact = isNativeWrapper || sessionHarness === "claude-sdk";
+  const composerServerInfo = useServerInfo();
   // /clear runs the harness's own /clear in the session terminal, which moves
-  // the terminal onto a fresh session the view then follows.
-  const showClear = sessionHarness === "claude-native" || sessionHarness === "codex-native";
+  // the terminal onto a fresh session the view then follows. Older servers
+  // reject the clear control, so a typed /clear stays plaintext there.
+  const showClear =
+    (sessionHarness === "claude-native" || sessionHarness === "codex-native") &&
+    composerServerInfo !== "loading" &&
+    !!composerServerInfo.session_event_types?.includes("clear");
   // /btw is a Claude Code CLI built-in (side chat), so offer it only on
   // claude-native sessions. Selected/typed, it sends as plaintext to the
   // vendor TUI (see submit) — the forwarder relays its answer to the overlay.
@@ -3351,7 +3356,6 @@ function ComposerImpl(
   );
   const skillLabels = useMemo(() => skillDisplayNames(skills, skillPrefix), [skills, skillPrefix]);
   const selectedAgent = agents?.find((agent) => agent.id === boundAgentId);
-  const composerServerInfo = useServerInfo();
   const registryEnabled =
     composerServerInfo !== "loading" && !!composerServerInfo.enabled_connections?.includes("mcp");
   const hasRegistryServers =
@@ -3817,18 +3821,8 @@ function ComposerImpl(
       onStop();
       return;
     }
-    // ArrowUp/Down recall — only when the caret is already at the very
-    // start (ArrowUp) or end (ArrowDown) of the text.  Checking for the
-    // absence of "\n" before/after the cursor is not sufficient: long
-    // single-line text that wraps visually contains no newlines, so that
-    // check always fires and history recall intercepts cursor movement
-    // within the wrapped line.  Gating on position 0 / length ensures the
-    // browser gets to move the caret through wrapped lines first; only the
-    // final ArrowUp-at-start / ArrowDown-at-end triggers recall.
-    // Recall is for UNmodified arrows only. Cmd/Ctrl+↑/↓ (switch session) and
-    // Cmd/Alt+↑/↓ (jump between messages) are global window hotkeys meant to
-    // fire even mid-compose; without this guard the recall below intercepts
-    // them (replacing the draft) and the hotkeys appear broken in the composer.
+    // Recall starts from empty text; boundary checks preserve caret movement
+    // through wrapped recalled entries. Modified arrows belong to global hotkeys.
     if (
       (draft.quotes.length === 0 || recallingRef.current) &&
       (e.key === "ArrowUp" || e.key === "ArrowDown") &&
@@ -3839,7 +3833,7 @@ function ComposerImpl(
       const ta = e.currentTarget;
       if (e.key === "ArrowUp" && ta.selectionStart === 0) {
         // Empty-composer recall takes the last queued row before browsing history.
-        if (fullText.trim() === "" && files.length === 0 && mentionedItems.length === 0) {
+        if (fullText === "" && files.length === 0 && mentionedItems.length === 0) {
           const target = queuedMessages.findLast((m) => m.conversationId === conversationId);
           if (target !== undefined) {
             e.preventDefault();
