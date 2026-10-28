@@ -447,11 +447,7 @@ async def test_archive_idle_closed_child_releases_runner_session(
     expect_stop: bool,
     expect_release: bool,
 ) -> None:
-    """Closing an idle child releases its routed runner session, unless its runner was stopped.
-
-    ``runner_reply`` is the runner's DELETE status; ``None`` means no runner client resolves,
-    as for an unbound session. A missing or failed release never undoes the archive.
-    """
+    """Closing an idle child releases its routed runner session, unless its runner was stopped."""
     session = await create_test_session(client, name="archive-closed-child")
     conv_store = SqlAlchemyConversationStore(db_uri)
     conv_store.set_host_id(session["id"], _HOST_ID, workspace="/tmp/archive-ws")
@@ -484,6 +480,7 @@ async def test_archive_idle_closed_child_releases_runner_session(
     runner_client = httpx.AsyncClient(
         transport=httpx.MockTransport(_runner), base_url="http://runner"
     )
+    # No reply: no runner client resolves, as for an unbound session.
     get_runner_client = AsyncMock(return_value=runner_client if runner_reply else None)
     host_stop = AsyncMock(return_value=stop_acknowledged)
     patch_body: dict[str, object] = {"archived": True}
