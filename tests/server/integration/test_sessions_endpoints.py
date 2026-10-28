@@ -48,6 +48,7 @@ from omnigent.server.routes._sessions.helpers import (
 )
 from omnigent.session_event_batch import MAX_SESSION_EVENT_REQUEST_BYTES
 from omnigent.spec.types import SkillSpec
+from omnigent.stores.conversation_store import RUNNER_LIVENESS_TTL_S
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
 )
@@ -4254,26 +4255,41 @@ async def test_list_sessions_exposes_pending_elicitations_count(
     pending_elicitations.reset_for_tests()
 
 
+@pytest.mark.parametrize(
+    ("runner_stamp_age_s", "expected_count"),
+    [
+        pytest.param(0, 2, id="runner-live-on-another-replica"),
+        pytest.param(None, 0, id="runner-disconnected"),
+        pytest.param(RUNNER_LIVENESS_TTL_S + 1, 0, id="runner-stamp-expired"),
+    ],
+)
 async def test_list_sessions_pending_count_falls_back_to_row_for_bound_session(
     client: httpx.AsyncClient,
     db_uri: str,
+    runner_stamp_age_s: int | None,
+    expected_count: int,
 ) -> None:
     """A runner-bound session surfaces its persisted pending count when the
-    local in-memory index is empty (the cross-replica fallback).
+    local in-memory index is empty, but only while its runner is live.
 
     The tunnel-holding replica writes ``pending_elicitation_count`` to the
     row; a replica that does NOT hold the tunnel has an empty
     ``pending_elicitations`` index for that session and must fall back to
-    the row so a parked approval isn't hidden. ``_build_session_list_item``
-    only consults the row when the session is runner-bound — this pins that
-    fallback fires for a bound session, complementing
+    the row so a parked approval isn't hidden. A runner that is gone left no
+    prompt to list, so its stale row count reads as zero (the rule the WS
+    stream applies) instead of badging an empty inbox. Complements
     ``test_list_sessions_exposes_pending_elicitations_count`` (which covers
     the index-authoritative, unbound path).
 
     :param client: Test HTTP client backed by the real app.
     :param db_uri: The app's DB, opened directly to seed the row the way a
         different replica's live-state write would have.
+    :param runner_stamp_age_s: Age of the ``runner_last_seen`` stamp in
+        seconds, or ``None`` when the disconnect cleared it.
+    :param expected_count: The list row's expected pending count.
     """
+    import time
+
     from omnigent.runtime import pending_elicitations
     from omnigent.stores.conversation_store.sqlalchemy_store import (
         SqlAlchemyConversationStore,
@@ -4290,13 +4306,16 @@ async def test_list_sessions_pending_count_falls_back_to_row_for_bound_session(
     store = SqlAlchemyConversationStore(db_uri)
     assert store.set_runner_id(session_id, "runner_other_replica")
     store.set_pending_elicitation_count(session_id, 2)
+    if runner_stamp_age_s is not None:
+        store.touch_runner_liveness(
+            ["runner_other_replica"], int(time.time()) - runner_stamp_age_s
+        )
 
     resp = await client.get("/v1/sessions")
     assert resp.status_code == 200
     row = next((r for r in resp.json()["data"] if r["id"] == session_id), None)
     assert row is not None
-    # Index empty + row=2 + runner-bound → fallback surfaces the row's count.
-    assert row["pending_elicitations_count"] == 2
+    assert row["pending_elicitations_count"] == expected_count
 
     store.set_pending_elicitation_count(session_id, 0)
 
