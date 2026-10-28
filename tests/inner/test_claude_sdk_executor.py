@@ -6190,6 +6190,26 @@ async def test_fresh_client_replays_history_within_the_turn_models_window(
 
 
 @pytest.mark.asyncio
+async def test_malformed_window_override_replays_within_the_default_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
+
+    monkeypatch.setenv("AP_CONTEXT_WINDOW_OVERRIDE", "200k")
+    fake_sdk = _make_recovery_fake_sdk()
+    executor = ClaudeSDKExecutor(model="claude-sonnet-4-5")
+    messages = [*_long_prior_messages(), {"role": "user", "content": "What next?"}]
+    with patch("omnigent.inner.claude_sdk_executor._ensure_sdk", return_value=fake_sdk):
+        events = [event async for event in executor.run_turn(messages, [], "")]
+
+    assert not [event for event in events if isinstance(event, ExecutorError)]
+    [prompt] = fake_sdk.created_clients[0].prompts
+    assert "Earlier messages omitted" not in prompt
+    assert "turn-0" in prompt
+    assert "What next?" in prompt
+
+
+@pytest.mark.asyncio
 async def test_first_turn_skips_the_context_window_lookup() -> None:
     from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
 

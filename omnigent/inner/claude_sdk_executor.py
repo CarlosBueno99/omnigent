@@ -647,9 +647,14 @@ def _resolve_replay_context_window(
         resolve_effective_context_window,
     )
 
-    window = resolve_effective_context_window(
-        declared_window, model, model_override=model_override
-    )
+    try:
+        window = resolve_effective_context_window(
+            declared_window, model, model_override=model_override
+        )
+    except ValueError:
+        # A malformed AP_CONTEXT_WINDOW_OVERRIDE must not fail every restarted turn.
+        logger.warning("ClaudeSDKExecutor: unreadable context window override", exc_info=True)
+        return DEFAULT_CONTEXT_WINDOW
     return window or DEFAULT_CONTEXT_WINDOW
 
 
