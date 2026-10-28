@@ -224,7 +224,7 @@ function ModelCatalogChoices({
                       event.preventDefault();
                       toggle(creator.id);
                     }}
-                    className="min-h-8 gap-1.5 px-1.5 text-13 font-medium"
+                    className="min-h-8 text-13 font-medium"
                   >
                     <ChevronRightIcon
                       aria-hidden="true"
@@ -234,7 +234,8 @@ function ModelCatalogChoices({
                   </DropdownMenuItem>
                 )}
                 {expandedGroup && (
-                  <div className="pl-5">
+                  // The chevron plus the menu-item gap, so row names line up with the label.
+                  <div className="pl-5.5">
                     <ConfigChoices choices={items} />
                   </div>
                 )}

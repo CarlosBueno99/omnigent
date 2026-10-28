@@ -159,6 +159,18 @@ def test_long_catalog_groups_by_creator_and_searches_by_keyboard(
     )
     kimi = menu.locator('[data-model-id="omnigent/databricks-kimi-k2-7-code"]')
     expect(kimi).to_have_count(0)
+    # Row names start where their group label does, past the chevron.
+    label_left, row_left = menu.evaluate(
+        """menu => [
+            menu.querySelector('[aria-expanded="true"] span'),
+            menu.querySelector('[role="group"] [role="menuitemcheckbox"]'),
+        ].map(element => {
+            const range = document.createRange();
+            range.selectNodeContents(element);
+            return range.getBoundingClientRect().left;
+        })"""
+    )
+    assert abs(label_left - row_left) < 0.5, (label_left, row_left)
 
     # The menu keeps its height cap, and search stays reachable after scrolling.
     scrolled = menu.evaluate(
