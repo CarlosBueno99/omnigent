@@ -6765,7 +6765,8 @@ def _clear_composer(socket_path: str, tmux_target: str, *, preserve_draft: bool 
     or one the pane cut off (a draft taller than the pane, or a sliver-height
     pane with no room for the closing rule),
     may still hold lines the capture did not show, so it is cleared again,
-    up to :data:`_COMPOSER_CLEAR_MAX_ROUNDS` rounds. A box still in that
+    up to :data:`_COMPOSER_CLEAR_MAX_ROUNDS` rounds. Probe removal gets
+    its own bounded acknowledgment window after the clear is verified. A box still in that
     state afterwards is refused rather than pasted into: an exhausted budget
     is no evidence the box is empty, and a paste beside leftover text would
     submit the person's draft along with the injected input. An unavailable
@@ -6785,7 +6786,8 @@ def _clear_composer(socket_path: str, tmux_target: str, *, preserve_draft: bool 
     if not preserve_draft:
         _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Space")
     removing_probe = False
-    for round_no in range(_COMPOSER_CLEAR_MAX_ROUNDS + 1):
+    round_no = 0
+    while True:
         pane = _capture_pane(socket_path, tmux_target)
         _raise_if_composer_frame_ambiguous(pane)
         box = _composer_box(pane)
@@ -6807,14 +6809,22 @@ def _clear_composer(socket_path: str, tmux_target: str, *, preserve_draft: bool 
                 )
             if cleared:
                 return
+        cursor_offset = None
+        if removing_probe or (cleared and round_no > 0):
+            cursor_offset = _composer_cursor_offset(socket_path, tmux_target, pane)
         if removing_probe:
-            if _composer_cursor_offset(socket_path, tmux_target, pane) == 0:
+            if cursor_offset == 0:
                 return
         elif cleared and round_no > 0:
-            if _composer_cursor_offset(socket_path, tmux_target, pane) == 1:
+            if cursor_offset == 1:
                 _run_tmux(socket_path, "send-keys", "-t", tmux_target, "BSpace")
                 removing_probe = True
+                round_no = 0
         if round_no == _COMPOSER_CLEAR_MAX_ROUNDS:
+            delivery_diagnostics.record_details(
+                composer_probe_removal_started=removing_probe,
+                composer_cursor_offset=cursor_offset,
+            )
             delivery_diagnostics.record_composer_not_cleared(
                 pane=pane,
                 rows=None if box is None else box.rows,
@@ -6830,6 +6840,7 @@ def _clear_composer(socket_path: str, tmux_target: str, *, preserve_draft: bool 
                 socket_path, tmux_target, rows=len(box.rows), probe_empty=True
             )
         time.sleep(_CLAUDE_READY_POLL_INTERVAL_S)
+        round_no += 1
 
 
 def _composer_cursor_offset(socket_path: str, tmux_target: str, pane: str) -> int | None:

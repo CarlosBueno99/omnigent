@@ -12348,14 +12348,16 @@ def test_delivery_verifies_clear_keys_emptied_the_composer(
 
 
 @pytest.mark.parametrize("slash", [False, True], ids=["web-message", "slash-command"])
-@pytest.mark.parametrize("removal", ["handled", "delayed", "ignored", "unavailable"])
+@pytest.mark.parametrize("probe_round", [1, 3], ids=["early-probe", "last-round-probe"])
+@pytest.mark.parametrize("removal", ["handled", "delayed", "late", "ignored", "unavailable"])
 def test_delivery_waits_for_probe_removal_acknowledgment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slash: bool, removal: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slash: bool, probe_round: int, removal: str
 ) -> None:
     """An unacknowledged Backspace must not turn a slash command into model input."""
     composer = _EditableComposer("old terminal draft", cursor=4)
     composer.install(monkeypatch)
     operations: list[tuple[str, ...]] = []
+    probe_polls = 0
     removal_polls = 0
     backspace: tuple[str, ...] | None = None
 
@@ -12369,13 +12371,18 @@ def test_delivery_waits_for_probe_removal_acknowledgment(
         composer._run_tmux(socket_path, *args)
 
     def cursor_offset(socket_path: str, tmux_target: str, pane: str) -> int | None:
-        nonlocal removal_polls
+        nonlocal probe_polls, removal_polls
         if backspace is not None:
             removal_polls += 1
             if removal == "unavailable":
                 return None
-            if removal == "delayed" and removal_polls == 2:
+            delay = {"delayed": 2, "late": 3}.get(removal)
+            if delay is not None and removal_polls == delay:
                 composer._run_tmux(socket_path, *backspace)
+        else:
+            probe_polls += 1
+            if probe_polls < probe_round:
+                return None
         return composer._cursor_offset(socket_path, tmux_target, pane)
 
     monkeypatch.setattr(claude_native_bridge, "_run_tmux", run_tmux)
@@ -12391,10 +12398,10 @@ def test_delivery_waits_for_probe_removal_acknowledgment(
         else:
             inject_user_message(bridge_dir, content="hello from the web")
 
-    if removal in {"handled", "delayed"}:
+    if removal in {"handled", "delayed", "late"}:
         inject()
         assert composer.submitted == ["/effort high" if slash else "hello from the web\n"]
-        assert removal_polls == (2 if removal == "delayed" else 1)
+        assert removal_polls == {"handled": 1, "delayed": 2, "late": 3}[removal]
     else:
         with pytest.raises(
             claude_native_bridge.ClaudeComposerNotCleared, match="nothing was sent"
