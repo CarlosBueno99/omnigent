@@ -4725,6 +4725,7 @@ def _run_unknown_command_injection(
     reject_name: str | None,
     clipped_after_rejection: bool = False,
     initially_clipped: bool = False,
+    stale_rejection_name: str | None = None,
 ) -> list[bytes]:
     """
     Drive ``inject_user_message`` against a fake TUI, optionally rejecting.
@@ -4740,6 +4741,7 @@ def _run_unknown_command_injection(
     :param reject_name: Command name the fake TUI rejects, or ``None``.
     :param clipped_after_rejection: Hide the closing rule until the pane expands.
     :param initially_clipped: Start with a pane too short to show a rejection above the box.
+    :param stale_rejection_name: Older rejection hidden above the box in a clipped pane.
     :returns: The byte payloads delivered via ``load-buffer``, in order.
     """
     bridge_dir = tmp_path / "bridge"
@@ -4756,6 +4758,9 @@ def _run_unknown_command_injection(
     )
 
     loaded_payloads: list[bytes] = []
+    stale_rejection = (
+        f"● Unknown command: /{stale_rejection_name}\n" if stale_rejection_name is not None else ""
+    )
     tui: dict[str, Any] = {
         "pane": _composer_pane(),
         "submits": 0,
@@ -4779,7 +4784,7 @@ def _run_unknown_command_injection(
                     + "──────\n❯ \n",
                     stderr="",
                 )
-            return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
+            return SimpleNamespace(returncode=0, stdout=stale_rejection + tui["pane"], stderr="")
         if "display-message" in cmd:
             return SimpleNamespace(returncode=0, stdout="120 7 latest\n", stderr="")
         if "resize-window" in cmd:
@@ -4934,9 +4939,15 @@ def test_plain_text_skips_the_rejection_watch(
     assert len(payloads) == 1
 
 
+@pytest.mark.parametrize(
+    "initially_clipped", [False, True], ids=["visible", "hidden-until-resize"]
+)
+@pytest.mark.parametrize("reject_again", [False, True], ids=["accepted", "fresh-rejection"])
 def test_stale_rejection_in_scrollback_does_not_trigger_redelivery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    initially_clipped: bool,
+    reject_again: bool,
 ) -> None:
     """
     A rejection of the same name already in scrollback is not "fresh".
@@ -4946,46 +4957,18 @@ def test_stale_rejection_in_scrollback_does_not_trigger_redelivery(
     accepted skill re-sent after an earlier typo must not be re-delivered
     escaped (which would duplicate the message).
     """
-    bridge_dir = tmp_path / "bridge"
-    write_tmux_target(
-        bridge_dir,
-        socket_path=Path("/tmp/example/tmux.sock"),
-        tmux_target="claude:0.0",
+    loaded_payloads = _run_unknown_command_injection(
+        tmp_path,
+        monkeypatch,
+        content="/my-skill retry after typo fix",
+        reject_name="my-skill" if reject_again else None,
+        initially_clipped=initially_clipped,
+        stale_rejection_name="my-skill",
     )
-    monkeypatch.setattr(
-        "omnigent.harnesses.claude_native.bridge._UNKNOWN_COMMAND_WATCH_TIMEOUT_S", 0.5
-    )
-    stale = "● Unknown command: /my-skill\n"
-
-    loaded_payloads: list[bytes] = []
-    tui = {"pane": stale + _composer_pane()}
-
-    def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
-        """
-        Serve a pane whose scrollback already carries the rejection.
-
-        :param cmd: Argv list passed to subprocess.run.
-        :param kwargs: Subprocess kwargs (ignored).
-        :returns: Fake CompletedProcess with rc=0.
-        """
-        del kwargs
-        if "capture-pane" in cmd:
-            return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
-        if "load-buffer" in cmd:
-            loaded_payloads.append(Path(cmd[-1]).read_bytes())
-        if "paste-buffer" in cmd:
-            tui["pane"] = stale + _composer_pane("[Pasted text #1 +2 lines]")
-        if cmd[-1] == "Enter":
-            # Accepted this time: the stale rejection stays, no new one.
-            tui["pane"] = stale + _composer_pane()
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr("subprocess.run", _fake_run)
-    inject_user_message(bridge_dir, content="/my-skill retry after typo fix")
-    assert len(loaded_payloads) == 1, (
-        f"A stale rejection must not trigger escaped re-delivery; "
-        f"got {len(loaded_payloads)} paste(s)."
-    )
+    assert loaded_payloads[0] == b"/my-skill retry after typo fix\r"
+    assert len(loaded_payloads) == (2 if reject_again else 1)
+    if reject_again:
+        assert loaded_payloads[1] == b" /my-skill retry after typo fix\r"
 
 
 def test_rejection_line_matching_ignores_message_echo() -> None:
