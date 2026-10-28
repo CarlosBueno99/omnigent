@@ -4256,20 +4256,25 @@ async def test_list_sessions_exposes_pending_elicitations_count(
 
 
 @pytest.mark.parametrize(
-    ("prompt_holder", "runner_stamp_age_s", "expected_count"),
+    ("prompt_holder", "runner_stamp_age_s", "tunnel_on_this_replica", "expected_count"),
     [
-        pytest.param("row", 0, 2, id="row-runner-live-on-another-replica"),
-        pytest.param("row", None, 0, id="row-runner-disconnected"),
-        pytest.param("row", RUNNER_LIVENESS_TTL_S + 1, 0, id="row-runner-stamp-expired"),
-        pytest.param("index", None, 0, id="index-runner-disconnected"),
+        pytest.param("row", 0, False, 2, id="row-runner-live-on-another-replica"),
+        pytest.param("row", None, False, 0, id="row-runner-disconnected"),
+        pytest.param("row", RUNNER_LIVENESS_TTL_S + 1, False, 0, id="row-runner-stamp-expired"),
+        pytest.param(
+            "row", RUNNER_LIVENESS_TTL_S + 1, True, 2, id="row-runner-tunnel-here-stamp-expired"
+        ),
+        pytest.param("index", None, False, 0, id="index-runner-disconnected"),
     ],
 )
 async def test_list_sessions_pending_count_for_bound_session_follows_runner_liveness(
+    app: Any,
     client: httpx.AsyncClient,
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
     prompt_holder: str,
     runner_stamp_age_s: int | None,
+    tunnel_on_this_replica: bool,
     expected_count: int,
 ) -> None:
     """A runner-bound session surfaces its pending count only while its
@@ -4284,14 +4289,18 @@ async def test_list_sessions_pending_count_for_bound_session_follows_runner_live
     ``test_list_sessions_exposes_pending_elicitations_count`` (which covers
     the index-authoritative, unbound path).
 
+    :param app: The app whose tunnel registry the liveness lookup consults.
     :param client: Test HTTP client backed by the real app.
     :param db_uri: The app's DB, opened directly to seed the row the way a
         different replica's live-state write would have.
-    :param monkeypatch: Drops the row-mirror write for the ``"index"`` case.
+    :param monkeypatch: Drops the row-mirror write for the ``"index"`` case and
+        fakes a tunnel on this replica.
     :param prompt_holder: ``"row"`` to seed the persisted count, or
         ``"index"`` to seed only this replica's in-memory index.
     :param runner_stamp_age_s: Age of the ``runner_last_seen`` stamp in
         seconds, or ``None`` when the disconnect cleared it.
+    :param tunnel_on_this_replica: Whether this replica's tunnel registry
+        still holds the runner, which outranks a stale stamp.
     :param expected_count: The list row's expected pending count.
     """
     import time
@@ -4309,7 +4318,8 @@ async def test_list_sessions_pending_count_for_bound_session_follows_runner_live
     # THIS replica's index stays empty, so a correct read falls back to the row.
     pending_elicitations.reset_for_tests()
     store = SqlAlchemyConversationStore(db_uri)
-    assert store.set_runner_id(session_id, "runner_other_replica")
+    runner_id = "runner_bound"
+    assert store.set_runner_id(session_id, runner_id)
     if prompt_holder == "row":
         store.set_pending_elicitation_count(session_id, 2)
     else:
@@ -4320,8 +4330,12 @@ async def test_list_sessions_pending_count_for_bound_session_follows_runner_live
             {"type": "response.elicitation_request", "elicitation_id": "elicit_offline"},
         )
     if runner_stamp_age_s is not None:
-        store.touch_runner_liveness(
-            ["runner_other_replica"], int(time.time()) - runner_stamp_age_s
+        store.touch_runner_liveness([runner_id], int(time.time()) - runner_stamp_age_s)
+    if tunnel_on_this_replica:
+        registry = app.state.tunnel_registry
+        real_get = registry.get
+        monkeypatch.setattr(
+            registry, "get", lambda rid: object() if rid == runner_id else real_get(rid)
         )
 
     resp = await client.get("/v1/sessions")
