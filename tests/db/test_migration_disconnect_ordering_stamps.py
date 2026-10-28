@@ -13,6 +13,7 @@ import pytest
 import sqlalchemy as sa
 from alembic import command
 
+from omnigent.db.db_models import OmnigentBase
 from omnigent.db.utils import _build_alembic_config
 
 # Revision ids bounding the migration under test.
@@ -166,6 +167,23 @@ def test_runner_connection_fence_schema_replays_and_retains_tombstones(
         _migrate(uri, engine, starting_revision)
         _migrate(uri, engine, "head")
         table = sa.Table("runner_connections", sa.MetaData(), autoload_with=engine)
+        # Fresh bootstrap and interrupted-bootstrap validation use ORM metadata.
+        model_table = OmnigentBase.metadata.tables["runner_connections"]
+        assert {
+            column.name: (
+                column.type.compile(dialect=engine.dialect),
+                column.nullable,
+                column.primary_key,
+            )
+            for column in model_table.columns
+        } == {
+            column.name: (
+                column.type.compile(dialect=engine.dialect),
+                column.nullable,
+                column.primary_key,
+            )
+            for column in table.columns
+        }
         assert set(table.primary_key.columns.keys()) == {"workspace_id", "runner_id"}
         epoch = bytes.fromhex("0123456789abcdef0123456789abcdef")
         with engine.begin() as conn:
