@@ -2090,6 +2090,10 @@ async def test_watch_runner_reports_unexpected_exit(
     expected = {"connected": True, "not_connected": False}.get(marker_state)
     assert report.had_connected is expected
     assert maintenance_reasons == ["runner_exited"]
+    status = await host._handle_runner_status(
+        HostRunnerStatusFrame("after-exit", report.runner_id)
+    )
+    assert status.status == "dead"
 
 
 @pytest.mark.parametrize("connected", [False, True])
@@ -2318,6 +2322,10 @@ async def test_watch_runner_silent_on_clean_exit(
     assert tunnel.sent == []
     assert host._unreported_exits == {}
     assert maintenance_reasons == ["runner_exited"]
+    status = await host._handle_runner_status(
+        HostRunnerStatusFrame("after-idle-exit", token_bound_runner_id("tok_clean"))
+    )
+    assert status.status == "dead"
 
 
 async def test_watch_runner_reports_clean_exit_before_connect(
@@ -3791,6 +3799,8 @@ async def test_handle_stop_terminates_process(tmp_path: Path) -> None:
     assert proc.poll() is not None, "Runner process should be terminated after stop"
     # Runner should be removed from tracking.
     assert "runner_aaa" not in host._runners
+    status = await host._handle_runner_status(HostRunnerStatusFrame("after-stop", "runner_aaa"))
+    assert status.status == "dead"
 
 
 async def test_handle_stop_unknown_runner() -> None:
@@ -3902,10 +3912,7 @@ async def test_handle_runner_status_unknown_for_untracked_runner() -> None:
     Verify ``_handle_runner_status`` reports ``unknown`` for a runner
     this host has no record of.
 
-    Covers a runner that was stopped (``_handle_stop`` popped it) and a
-    fresh post-restart host that never spawned it — the exact
-    host-restart case that used to strand the server on a full connect
-    grace. Both must read ``unknown`` so the server relaunches at once.
+    A fresh host cannot infer process death from an absent handle.
     """
     host = _make_host_process()
     result = await host._handle_runner_status(
@@ -3951,6 +3958,7 @@ def test_alive_runner_ids_cleans_dead(tmp_path: Path) -> None:
     assert "runner_alive" in alive_ids
     assert "runner_dead" not in alive_ids, "Dead runner should be cleaned up"
     assert "runner_dead" not in host._runners, "Dead runner should be removed from tracking dict"
+    assert "runner_dead" in host._exited_runner_ids
     assert maintenance_reasons == ["runner_exited_during_reconnect"]
 
     alive_proc.terminate()

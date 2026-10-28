@@ -1,7 +1,7 @@
 """Tests for the daemon-routed remote-claude launch helpers.
 
 Covers the client side of HOST_BY_DEFAULT: acquiring a daemon-spawned
-runner (reuse-online / launch / clear-stale) and the
+runner (reuse-online / launch / recover-dead) and the
 ``_prepare_claude_terminal_via_daemon`` orchestration that persists the
 user's pass-through args on the session so the runner applies them. See
 designs/NATIVE_RUNNER_SERVER_LAUNCH.md.
@@ -95,7 +95,7 @@ async def test_launch_or_reuse_daemon_runner_launches_when_unbound() -> None:
         """Route the launch-path requests."""
         path = request.url.path
         if request.method == "GET" and path == "/v1/sessions/conv_a":
-            return httpx.Response(200, json={})
+            return httpx.Response(200, json={"runner_id": None})
         if request.method == "POST" and path == "/v1/hosts/host_1/runners":
             launched["body"] = json.loads(request.content)
             return httpx.Response(200, json={"runner_id": "runner_new", "status": "launching"})
@@ -109,31 +109,31 @@ async def test_launch_or_reuse_daemon_runner_launches_when_unbound() -> None:
         )
 
     assert runner_id == "runner_new"
-    assert launched["body"] == {"session_id": "conv_a", "workspace": "/work"}
+    assert launched["body"] == {
+        "session_id": "conv_a",
+        "workspace": "/work",
+        "reuse_existing": True,
+    }
 
 
-async def test_launch_or_reuse_daemon_runner_clears_stale_binding() -> None:
-    """
-    A bound-but-offline runner is cleared before launching a fresh one.
-
-    The launch endpoint binds atomically only when ``runner_id IS
-    NULL``; without clearing the dead binding first it would 400. The
-    clear must therefore precede the launch.
-    """
+async def test_launch_or_reuse_daemon_runner_delegates_recovery_without_clearing() -> None:
+    """The server must establish process death before replacing an absent runner."""
     events: list[tuple[str, object]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         """Route the stale-binding-path requests, recording order."""
         path = request.url.path
         if request.method == "GET" and path == "/v1/sessions/conv_a":
-            return httpx.Response(200, json={"runner_id": "runner_dead"})
+            return httpx.Response(
+                200, json={"runner_id": "runner_dead", "host_id": "host_1", "workspace": "/w"}
+            )
         if request.method == "GET" and path == "/v1/runners/runner_dead/status":
             return httpx.Response(200, json={"runner_id": "runner_dead", "online": False})
         if request.method == "PATCH" and path == "/v1/sessions/conv_a":
             events.append(("patch", json.loads(request.content)))
             return httpx.Response(200, json={})
         if request.method == "POST" and path == "/v1/hosts/host_1/runners":
-            events.append(("launch", None))
+            events.append(("launch", json.loads(request.content)))
             return httpx.Response(200, json={"runner_id": "runner_fresh"})
         return httpx.Response(404, json={})
 
@@ -145,10 +145,9 @@ async def test_launch_or_reuse_daemon_runner_clears_stale_binding() -> None:
         )
 
     assert runner_id == "runner_fresh"
-    # The stale binding was cleared (runner_id="") strictly before the
-    # launch — the ordering the atomic NULL-bind requires.
-    assert ("patch", {"runner_id": ""}) in events
-    assert events.index(("patch", {"runner_id": ""})) < events.index(("launch", None))
+    assert events == [
+        ("launch", {"session_id": "conv_a", "workspace": "/w", "reuse_existing": True})
+    ]
 
 
 async def test_launch_or_reuse_daemon_runner_fresh_skips_session_get() -> None:

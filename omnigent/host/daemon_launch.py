@@ -105,17 +105,26 @@ def open_daemon_client(
     """
     from omnigent_client._http import is_loopback_url
 
-    from omnigent.cli_auth import databricks_request_headers
+    from omnigent.cli_auth import OMNIGENT_SLICE_KEY_HEADER, databricks_request_headers
 
     pinned = {**headers, **databricks_request_headers(base_url, host_id=host_id)}
+
+    async def pin_request(request: httpx.Request) -> None:
+        # Auth refresh may inject this machine's key; the selected host wins.
+        key = client.headers.get(OMNIGENT_SLICE_KEY_HEADER)
+        if key is not None:
+            request.headers[OMNIGENT_SLICE_KEY_HEADER] = key
+
     # A proxy cannot reach a loopback server, so local targets bypass it.
-    return httpx.AsyncClient(
+    client = httpx.AsyncClient(
         base_url=base_url,
         headers=pinned,
         auth=auth,
         timeout=timeout,
         trust_env=not is_loopback_url(base_url),
+        event_hooks={"request": [pin_request]},
     )
+    return client
 
 
 async def wait_for_host_online(
@@ -243,10 +252,9 @@ async def launch_or_reuse_daemon_runner(
     """
     Ensure the session is bound to a daemon-spawned runner; return its id.
 
-    Reuses the session's currently-bound runner when it is still online
-    (resume into a live session). Otherwise clears any stale binding and
-    asks the server to launch a fresh runner on the host via
-    ``POST /v1/hosts/{host_id}/runners`` (which atomically binds it).
+    Reuses the session's runner on its owning host. An absent tunnel is
+    not evidence that the process died: only the owning server and host
+    may replace it through ``POST /v1/hosts/{host_id}/runners``.
 
     :param client: HTTP client pointed at the Omnigent server.
     :param host_id: This machine's host id, e.g. ``"host_abc123"``.
@@ -261,21 +269,40 @@ async def launch_or_reuse_daemon_runner(
     :returns: The bound runner id, e.g. ``"runner_abc123"``.
     :raises click.ClickException: If the launch request fails.
     """
+    from omnigent.cli_auth import databricks_request_headers
+    from omnigent.session_host import set_session_host
+
     if fresh:
         existing = None
     else:
         snap = await client.get(f"/v1/sessions/{url_component(session_id)}")
-        existing = _json_body(snap).get("runner_id") if snap.status_code == 200 else None
+        snapshot = _json_body(snap)
+        if snap.status_code != 200 or "runner_id" not in snapshot:
+            raise click.ClickException(
+                f"Could not read the runner binding for session {session_id!r} "
+                f"({snap.status_code}): {error_text(snap)}"
+            )
+        existing = snapshot.get("runner_id")
+        owner_host = snapshot.get("host_id")
+        if isinstance(owner_host, str) and owner_host:
+            host_id = owner_host
+            owner_workspace = snapshot.get("workspace")
+            if not isinstance(owner_workspace, str) or not owner_workspace:
+                raise click.ClickException("The session host has no saved workspace.")
+            workspace = owner_workspace
+            # Pin all subsequent status and terminal requests to the owner.
+            client.headers.update(
+                databricks_request_headers(str(client.base_url), host_id=host_id)
+            )
+        elif existing:
+            # A legacy runner without a host cannot be safely recovered here.
+            if await runner_is_online(client, str(existing)):
+                return str(existing)
+            raise click.ClickException("The session runner is unreachable and has no owning host.")
+    set_session_host(session_id, host_id)
     if isinstance(existing, str) and existing:
         if await runner_is_online(client, existing):
             return existing
-        # Stale binding (offline runner): clear it so the launch
-        # endpoint's atomic ``UPDATE ... WHERE runner_id IS NULL`` can
-        # bind the freshly-spawned runner. "" is the clear sentinel.
-        await client.patch(
-            f"/v1/sessions/{url_component(session_id)}",
-            json={"runner_id": ""},
-        )
     # The host tunnel can be briefly absent from the server's in-memory
     # registry while it (re)connects — e.g. just after `omnigent host`
     # restarts, after a server restart/redeploy, or under a flapping tunnel.
@@ -290,7 +317,7 @@ async def launch_or_reuse_daemon_runner(
             await asyncio.sleep(_RETRY_DELAYS_S[attempt - 1])
         resp = await client.post(
             f"/v1/hosts/{url_component(host_id)}/runners",
-            json={"session_id": session_id, "workspace": workspace},
+            json={"session_id": session_id, "workspace": workspace, "reuse_existing": True},
             timeout=60.0,
         )
         if resp.status_code < 400:

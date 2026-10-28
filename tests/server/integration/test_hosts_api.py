@@ -7,6 +7,7 @@ import contextlib
 import time
 from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from asgiref.testing import ApplicationCommunicator
@@ -41,6 +42,166 @@ from tests.budgets import budget
 from tests.server.helpers import websocket_scope as _websocket_scope
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.mark.parametrize("verdict", ["alive", "sign_in_pending", "unknown", None])
+async def test_attach_preserves_runner_without_confirmed_process_death(
+    host_api_app, monkeypatch: pytest.MonkeyPatch, verdict: str | None
+) -> None:
+    """A local tunnel miss must not become a replacement, even after a timeout."""
+    from omnigent.server.routes import sessions
+
+    app, registry, _, store = host_api_app
+    comm = await _connect_host(app, registry)
+    conv = store.create_conversation(agent_id=None, runner_id="original")
+    store.set_host_id(conv.id, _HOST_ID, workspace="/saved/work")
+    query = AsyncMock(return_value=verdict)
+    if verdict in {"alive", "sign_in_pending"}:
+        from omnigent.server.host_registry import RunnerExitReports
+
+        app.state.runner_exit_reports = RunnerExitReports()
+        app.state.runner_exit_reports.record("original", "old exit report", owner=None)
+    launch = AsyncMock()
+    monkeypatch.setattr(sessions, "_query_host_runner_status", query)
+    monkeypatch.setattr(sessions, "_launch_runner_on_host", launch)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/v1/hosts/{_HOST_ID}/runners",
+                json={"session_id": conv.id, "workspace": "/caller/work", "reuse_existing": True},
+            )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["runner_id"] == "original"
+        query.assert_awaited_once()
+        launch.assert_not_awaited()
+        current = store.get_conversation(conv.id)
+        assert (current.runner_id, current.host_id, current.workspace) == (
+            "original",
+            _HOST_ID,
+            "/saved/work",
+        )
+    finally:
+        comm.stop()
+
+
+@pytest.mark.parametrize("reported_exit", [False, True])
+@pytest.mark.parametrize(
+    "race", [None, "during_status", "during_replace", "clear", "clear_during_replace"]
+)
+async def test_attach_recovers_dead_runner_without_overwriting_a_concurrent_binding(
+    host_api_app, monkeypatch: pytest.MonkeyPatch, race: str | None, reported_exit: bool
+) -> None:
+    """Recovery retains the old identity and CAS loses to a concurrent binding."""
+    from omnigent.host.frames import HostLaunchRunnerFrame, decode_host_frame
+    from omnigent.server.routes import sessions
+    from omnigent.server.routes._sessions import helpers
+
+    app, registry, _, store = host_api_app
+    comm = await _connect_host(app, registry)
+    conv = store.create_conversation(agent_id=None, runner_id="original")
+    store.set_host_id(conv.id, _HOST_ID, workspace="/saved/work")
+    replace = store.replace_runner_id
+    if reported_exit:
+        from omnigent.server.host_registry import RunnerExitReports
+
+        app.state.runner_exit_reports = RunnerExitReports()
+        app.state.runner_exit_reports.record("original", "runner exited", owner=None)
+
+    async def status(*args):
+        if race == "during_status":
+            replace(conv.id, "winner")
+        elif race == "clear":
+            store.clear_runner_id(conv.id)
+        return "unknown" if reported_exit else "dead"
+
+    def raced_replace(session_id, runner_id, **kwargs):
+        if race == "clear_during_replace":
+            store.clear_runner_id(session_id)
+        else:
+            replace(session_id, "winner")
+        return replace(session_id, runner_id, **kwargs)
+
+    monkeypatch.setattr(sessions, "_query_host_runner_status", status)
+    stop = Mock()
+    monkeypatch.setattr(helpers, "_spawn_superseded_runner_stop", stop)
+    if race in {"during_replace", "clear_during_replace"}:
+        monkeypatch.setattr(store, "replace_runner_id", raced_replace)
+
+    frames = []
+
+    async def respond():
+        while True:
+            output = await comm.receive_output(timeout=budget(_LAUNCH_FRAME_TIMEOUT_S))
+            if output["type"] != "websocket.send":
+                continue
+            frame = decode_host_frame(output["text"])
+            if isinstance(frame, HostLaunchRunnerFrame):
+                frames.append(frame)
+                await comm.send_input(
+                    {
+                        "type": "websocket.receive",
+                        "text": encode_host_frame(
+                            HostLaunchRunnerResultFrame(
+                                request_id=frame.request_id, status="launched"
+                            )
+                        ),
+                    }
+                )
+                return
+
+    responder = asyncio.create_task(respond()) if race is None else None
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/v1/hosts/{_HOST_ID}/runners",
+                json={"session_id": conv.id, "workspace": "/caller/work", "reuse_existing": True},
+            )
+        if race in {"clear", "clear_during_replace"}:
+            assert resp.status_code == 502
+            assert store.get_conversation(conv.id).runner_id is None
+            stop.assert_not_called()
+        elif race:
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["runner_id"] == "winner"
+            assert store.get_conversation(conv.id).runner_id == "winner"
+            stop.assert_not_called()
+        else:
+            assert resp.status_code == 200, resp.text
+            await responder
+            assert len(frames) == 1
+            assert frames[0].superseded_runner_ids == ("original",)
+            assert frames[0].workspace == "/saved/work"
+            assert store.get_conversation(conv.id).runner_id == resp.json()["runner_id"]
+            stop.assert_called_once_with(conv.id, _HOST_ID, "original", registry)
+    finally:
+        if responder is not None:
+            responder.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await responder
+        comm.stop()
+
+
+async def test_attach_on_wrong_replica_cannot_change_binding(host_api_app, db_uri: str) -> None:
+    """Shared DB metadata does not authorize a replica without the owning host."""
+    app, registry, _, store = host_api_app
+    comm = await _connect_host(app, registry)
+    conv = store.create_conversation(agent_id=None, runner_id="original")
+    store.set_host_id(conv.id, _HOST_ID, workspace="/saved/work")
+    other, _, _, other_store = _build_host_api_app(db_uri)
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=other), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                f"/v1/hosts/{_HOST_ID}/runners",
+                json={"session_id": conv.id, "workspace": "/caller/work", "reuse_existing": True},
+            )
+        assert resp.status_code in (400, 409), resp.text
+        assert other_store.get_conversation(conv.id).runner_id == "original"
+        assert store.get_conversation(conv.id).workspace == "/saved/work"
+    finally:
+        comm.stop()
+
 
 _HOST_ID = "33296f9b15e02671c34e013dd711407e"
 # Binding persistence can exceed two seconds under parallel CI load.

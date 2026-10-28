@@ -6344,7 +6344,12 @@ async def _launch_runner_on_host_impl(
                 error_code="session_not_found",
                 error="session was deleted while its relaunch was in flight",
             )
-        if fresh.runner_id and fresh.runner_id != conv.runner_id:
+        if fresh.runner_id != conv.runner_id or fresh.host_id != conv.host_id:
+            if not fresh.runner_id:
+                return _HostLaunchAttempt(
+                    runner_id="",
+                    error="session binding was cleared while its relaunch was in flight",
+                )
             last = _relaunch_last_attempt.get(conv.id)
             if last is not None and last.runner_id == fresh.runner_id:
                 return last
@@ -6381,7 +6386,14 @@ async def _launch_runner_on_host_locked(
         conversation_store.replace_runner_id,
         conv.id,
         new_runner_id,
+        expected_runner_id=superseded_runner_id,
     )
+    if bound_conv.runner_id != new_runner_id:
+        # Another replica changed the binding while the host answered.
+        return _HostLaunchAttempt(
+            runner_id=bound_conv.runner_id or "",
+            error=None if bound_conv.runner_id else "session binding was cleared during relaunch",
+        )
     if bound_conv.runner_last_seen is not None:
         # The new token has not reached the host, so this stamp can only
         # belong to the previous runner. Clear it before launching.

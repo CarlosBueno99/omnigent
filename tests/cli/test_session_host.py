@@ -11,6 +11,43 @@ from omnigent.cli_auth import OMNIGENT_SLICE_KEY_HEADER
 from omnigent.session_host import get_session_host, route_session_request, set_session_host
 
 
+@pytest.mark.asyncio
+async def test_native_clients_keep_attachment_owner_after_prepare(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """New HTTP clients and WS reconnects preserve the discovered owner."""
+    from omnigent.cli_auth import open_server_client
+    from omnigent.harnesses.claude_native.main import _websocket_connect
+
+    monkeypatch.setenv("OMNIGENT_HOST_SLICE_KEY_ENABLED", "1")
+    mount = "http://127.0.0.1/api/2.0/omnigent"
+    set_session_host("attached_native", "owner")
+    headers = {OMNIGENT_SLICE_KEY_HEADER: "caller", "Authorization": "Bearer test"}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.headers[OMNIGENT_SLICE_KEY_HEADER] == "owner"
+        assert request.headers["Authorization"] == "Bearer test"
+        return httpx.Response(200, json={})
+
+    def connect(url, **kwargs):
+        assert kwargs["additional_headers"][OMNIGENT_SLICE_KEY_HEADER] == "owner"
+        assert kwargs["additional_headers"]["Authorization"] == "Bearer test"
+
+    monkeypatch.setattr("websockets.connect", connect)
+    try:
+        async with open_server_client(
+            mount, headers=headers, host_id="caller", transport=httpx.MockTransport(handle)
+        ) as client:
+            await client.get("/v1/sessions/attached_native/resources")
+        _websocket_connect(
+            mount.replace("http:", "ws:") + "/v1/sessions/attached_native/resources/t/attach",
+            headers=headers,
+        )
+        assert headers[OMNIGENT_SLICE_KEY_HEADER] == "caller"
+    finally:
+        set_session_host("attached_native", None)
+
+
 def test_set_session_host_clears_on_empty() -> None:
     """A ``None``/empty host clears any stale mapping."""
     set_session_host("conv_1", "host_abc")

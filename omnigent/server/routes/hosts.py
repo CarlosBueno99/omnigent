@@ -737,11 +737,14 @@ class LaunchRunnerRequest(BaseModel):
         as the session's ``git_branch`` for display and opt-in cleanup.
         ``None`` binds ``workspace`` directly. ``host_id`` is always
         present (it is in the path), so no host check is needed here.
+    :param reuse_existing: Reuse a bound runner on this host, recovering it
+        only when the host confirms its process has died.
     """
 
     session_id: str
     workspace: str
     git: SessionGitOptions | None = None
+    reuse_existing: bool = False
 
 
 async def _resolve_agent_spec_cwd(
@@ -1096,6 +1099,32 @@ def create_hosts_router(
             permission_store=permission_store,
         )
         conn = target.conn
+        if body.reuse_existing and target.conv.runner_id is not None:
+            from omnigent.server.routes.sessions import (
+                _launch_runner_on_host,
+                _query_host_runner_status,
+            )
+
+            if target.conv.host_id != host_id or body.git is not None:
+                raise HTTPException(status_code=409, detail="session already belongs to a runner")
+            existing = target.conv.runner_id
+            registry = getattr(request.app.state, "tunnel_registry", None)
+            if registry is not None and registry.get(existing) is not None:
+                return {"runner_id": existing, "status": "reusing"}
+            status = await _query_host_runner_status(conn, host_registry, existing)
+            reports = getattr(request.app.state, "runner_exit_reports", None)
+            reported_exit = (
+                reports is not None and reports.get_visible(existing, user_id) is not None
+            )
+            if status in {"alive", "sign_in_pending"} or (status != "dead" and not reported_exit):
+                # Missing tunnels and unknown processes are not proof of death.
+                return {"runner_id": existing, "status": "reusing"}
+            attempt = await _launch_runner_on_host(
+                target.conv, conversation_store, host_registry, conn
+            )
+            if attempt.error:
+                raise HTTPException(status_code=502, detail=attempt.error)
+            return {"runner_id": attempt.runner_id, "status": "launching"}
         if agent_store is not None and agent_cache is not None:
             from omnigent.server.mcp_compatibility import require_session_registry_mcp_support
 

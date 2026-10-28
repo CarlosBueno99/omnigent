@@ -23,7 +23,7 @@ import sys
 import threading
 import time
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -1301,6 +1301,7 @@ class HostProcess:
             self._interactive_shells = ["bash"]
         self._harness_tmp_parent = resolve_harness_tmp_parent()
         self._runners: dict[str, _RunnerHandle] = {}
+        self._exited_runner_ids: deque[str] = deque(maxlen=512)
         from omnigent.host.skills import HostSkillDiscovery
 
         self._skill_discovery = HostSkillDiscovery(self._fetch_skill_bundle)
@@ -1585,6 +1586,7 @@ class HostProcess:
         dead = [rid for rid, handle in self._runners.items() if handle.proc.poll() is not None]
         for rid in dead:
             self._runners.pop(rid)
+            self._exited_runner_ids.append(rid)
         if dead:
             self._trigger_maintenance("runner_exited_during_reconnect")
         return list(self._runners.keys())
@@ -2445,6 +2447,8 @@ class HostProcess:
         # zygote-forked one — run them off the loop so a wedged zygote can't
         # freeze the daemon's control handler.
         await self._stop_runner_and_trigger(handle.proc, "runner_stopped")
+        if await asyncio.to_thread(handle.proc.poll) is not None:
+            self._exited_runner_ids.append(frame.runner_id)
         _logger.info("Stopped runner %s", frame.runner_id)
         _print_host_status(
             f"  ↓ Runner stopped: {frame.runner_id}",
@@ -2561,10 +2565,9 @@ class HostProcess:
         as unknown would cause the server to replace it. Unrelated runners'
         status queries remain independent.
 
-        A tracked running process is ``alive`` (booting or serving), an
-        exited process is ``dead``, and an untracked runner with no pending
-        launch is ``unknown``. The server can recover promptly in the latter
-        two cases.
+        A running process is ``alive`` (booting or serving), a recently
+        observed exit is ``dead``, and an untracked runner with no pending
+        launch or retained exit evidence is ``unknown``.
 
         :param frame: The status query frame.
         :returns: Liveness, or ``sign_in_pending`` for an exact bounded startup wait.
@@ -2574,7 +2577,7 @@ class HostProcess:
             await asyncio.shield(asyncio.gather(*pending, return_exceptions=True))
         handle = self._runners.get(frame.runner_id)
         if handle is None:
-            status = "unknown"
+            status = "dead" if frame.runner_id in self._exited_runner_ids else "unknown"
         else:
             # poll() is a lock-free waitpid for a direct-Popen runner, but a
             # blocking control-socket round-trip (bounded only by the 30s
@@ -2630,6 +2633,7 @@ class HostProcess:
             # an intentional termination, not a crash to report.
             return
         self._runners.pop(runner_id)
+        self._exited_runner_ids.append(runner_id)
         self._trigger_maintenance("runner_exited")
         had_connected = None
         if handle.connect_marker is not None:

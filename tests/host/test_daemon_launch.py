@@ -18,11 +18,80 @@ import pytest
 from omnigent.cli_auth import OMNIGENT_SLICE_KEY_HEADER
 from omnigent.host import daemon_launch
 from omnigent.host.daemon_launch import (
+    launch_or_reuse_daemon_runner,
     open_daemon_client,
     runner_is_online,
     wait_for_host_online,
     wait_for_runner_online,
 )
+
+
+@pytest.mark.parametrize("online", [True, False])
+async def test_attachment_uses_session_owner_for_status_and_terminal_requests(
+    monkeypatch: pytest.MonkeyPatch, online: bool
+) -> None:
+    """An attaching machine must not probe or replace a different host's runner."""
+    from omnigent.session_host import get_session_host, set_session_host
+
+    monkeypatch.setenv("OMNIGENT_HOST_SLICE_KEY_ENABLED", "1")
+    seen = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        if request.url.path == "/v1/sessions/attached":
+            assert request.headers[OMNIGENT_SLICE_KEY_HEADER] == "caller"
+            return httpx.Response(
+                200, json={"runner_id": "original", "host_id": "owner", "workspace": "/owner/work"}
+            )
+        assert request.headers[OMNIGENT_SLICE_KEY_HEADER] == "owner"
+        if request.url.path == "/v1/runners/original/status":
+            return httpx.Response(200, json={"online": online})
+        if request.url.path == "/v1/hosts/owner/runners":
+            import json
+
+            assert json.loads(request.content) == {
+                "session_id": "attached",
+                "workspace": "/owner/work",
+                "reuse_existing": True,
+            }
+            return httpx.Response(200, json={"runner_id": "original"})
+        assert request.url.path == "/v1/sessions/attached/resources"
+        return httpx.Response(200, json={"data": []})
+
+    try:
+        async with httpx.AsyncClient(
+            base_url="http://test",
+            headers={OMNIGENT_SLICE_KEY_HEADER: "caller"},
+            transport=httpx.MockTransport(handle),
+        ) as client:
+            assert (
+                await launch_or_reuse_daemon_runner(
+                    client, host_id="caller", session_id="attached", workspace="/caller/work"
+                )
+                == "original"
+            )
+            await client.get("/v1/sessions/attached/resources")
+        assert get_session_host("attached") == "owner"
+        assert all(method != "PATCH" for method, _ in seen)
+    finally:
+        set_session_host("attached", None)
+
+
+@pytest.mark.parametrize("status,body", [(500, {}), (200, {}), (200, "<html>fallback</html>")])
+async def test_attachment_does_not_launch_when_session_snapshot_is_unknown(status, body) -> None:
+    """A failed/malformed session lookup cannot authorize a launch."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET" and request.url.path == "/v1/sessions/missing"
+        return httpx.Response(status, json=body)
+
+    async with httpx.AsyncClient(
+        base_url="http://test", transport=httpx.MockTransport(handle)
+    ) as client:
+        with pytest.raises(click.ClickException, match="Could not read the runner binding"):
+            await launch_or_reuse_daemon_runner(
+                client, host_id="caller", session_id="missing", workspace="/work"
+            )
 
 
 @pytest.fixture(autouse=True)
@@ -344,8 +413,8 @@ async def test_runner_is_online_false_on_html_fallback_body() -> None:
     """``runner_is_online`` reports False (not a crash) on a 200 HTML body.
 
     The single-shot reuse check must treat a non-JSON 200 as "not online"
-    so ``launch_or_reuse_daemon_runner`` falls back to launching a fresh
-    runner instead of dying on ``resp.json()``.
+    so the caller can ask the owning host for liveness instead of
+    dying on ``resp.json()``. False is not proof of process death.
     """
     handler = _AlwaysHtml()
     async with httpx.AsyncClient(
@@ -383,6 +452,31 @@ async def test_open_daemon_client_pins_slice_key_on_workspace_mount() -> None:
     ) as client:
         assert client.headers.get(OMNIGENT_SLICE_KEY_HEADER) == "host_abc123"
         assert client.headers.get("Authorization") == "Bearer t"
+
+
+async def test_daemon_owner_pin_survives_auth_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Auth's caller-host default cannot reroute the selected owner's status polls."""
+    from omnigent.chat import _DatabricksTokenAuth
+
+    monkeypatch.setenv("OMNIGENT_HOST_SLICE_KEY_ENABLED", "1")
+    monkeypatch.setenv("OMNIGENT_RUNNER_SLICE_KEY", "caller")
+    monkeypatch.setenv("OMNIGENT_REMOTE_AUTH_TOKEN", "test")
+    seen = []
+
+    async def handle(_transport, request):
+        seen.append(request.headers[OMNIGENT_SLICE_KEY_HEADER])
+        assert request.headers["Authorization"] == "Bearer test"
+        return httpx.Response(200, json={"online": True})
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle)
+    url = "http://127.0.0.1"
+    async with open_daemon_client(
+        url, {}, "caller", auth=_DatabricksTokenAuth(server_url=url, session_id=None)
+    ) as client:
+        await client.get("/v1/runners/original/status")
+        client.headers[OMNIGENT_SLICE_KEY_HEADER] = "owner"
+        await client.get("/v1/runners/original/status")
+    assert seen == ["caller", "owner"]
 
 
 async def test_open_daemon_client_no_slice_key_off_workspace() -> None:
