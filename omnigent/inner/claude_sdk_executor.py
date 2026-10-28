@@ -2819,13 +2819,7 @@ class ClaudeSDKExecutor(Executor):
         # to a ``databricks-*`` model: the Omnigent producer always resolves a
         # concrete model (spec > provider default > catalog default) before
         # spawning, so no ``databricks-*`` default is injected there.
-        model = cfg.model or self._model_override
-        if model is None and self._gateway_uses_databricks_profile:
-            if self._resolved_default_model is None:
-                self._resolved_default_model = await run_sync_on_thread(
-                    _resolve_databricks_claude_model, self._databricks_profile
-                )
-            model = self._resolved_default_model
+        model = cfg.model or await self._spec_or_default_model()
 
         # Build env: Databricks gateway settings derived from profile-backed
         # creds. CLAUDECODE removal happens around the subprocess spawn in
@@ -3673,6 +3667,21 @@ class ClaudeSDKExecutor(Executor):
         logger.info("ClaudeSDKExecutor: turn complete")
         yield TurnComplete(response=response_text, usage=turn_usage)
 
+    async def _spec_or_default_model(self) -> str | None:
+        """
+        Return the spec model, or the workspace default for an unpinned
+        Databricks-profile session, resolved once per executor.
+
+        :returns: The model id, or ``None`` to let the SDK pick its default.
+        """
+        if self._model_override is None and self._gateway_uses_databricks_profile:
+            if self._resolved_default_model is None:
+                self._resolved_default_model = await run_sync_on_thread(
+                    _resolve_databricks_claude_model, self._databricks_profile
+                )
+            return self._resolved_default_model
+        return self._model_override
+
     async def _fresh_session_prompt(
         self, messages: list[Message], cfg: ExecutorConfig
     ) -> str | list[_JsonObject]:
@@ -3688,11 +3697,12 @@ class ClaudeSDKExecutor(Executor):
         """
         budget = None
         if _has_replayable_history(messages):
+            base_model = self._model_override if cfg.model else await self._spec_or_default_model()
             # Off-loop: the window lookup may fetch the model catalog.
             window = await run_sync_on_thread(
                 _resolve_replay_context_window,
                 self._context_window,
-                self._model_override,
+                base_model,
                 cfg.model,
             )
             budget = int(window * _REPLAYED_HISTORY_WINDOW_SHARE)

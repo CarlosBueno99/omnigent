@@ -6217,6 +6217,41 @@ async def test_fresh_client_replays_history_within_the_turn_models_window(
 
 
 @pytest.mark.asyncio
+async def test_unpinned_databricks_session_replays_within_its_default_models_window() -> None:
+    from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
+    from omnigent.inner.databricks_executor import DatabricksCredentials
+
+    with patch(
+        "omnigent.inner.databricks_executor._read_databrickscfg",
+        return_value=DatabricksCredentials(
+            host="https://example.cloud.databricks.com", token="dapi_test_token"
+        ),
+    ):
+        executor = ClaudeSDKExecutor(gateway=True)
+    fake_sdk = _make_recovery_fake_sdk()
+    messages = [*_long_prior_messages(), {"role": "user", "content": "What next?"}]
+    with (
+        patch("omnigent.inner.claude_sdk_executor._ensure_sdk", return_value=fake_sdk),
+        patch(
+            "omnigent.inner.claude_sdk_executor._resolve_databricks_claude_model",
+            return_value="system.ai.claude-opus-5",
+        ) as resolve_default,
+        patch(
+            "omnigent.llms.context_window.get_model_context_window", return_value=4_200
+        ) as catalog_lookup,
+    ):
+        events = [event async for event in executor.run_turn(messages, [], "")]
+
+    assert not [event for event in events if isinstance(event, ExecutorError)]
+    [prompt] = fake_sdk.created_clients[0].prompts
+    assert "[Earlier messages omitted to fit the model's context window: 2.]" in prompt
+    assert "turn-1" not in prompt
+    assert "turn-2" in prompt
+    catalog_lookup.assert_called_once_with("system.ai.claude-opus-5")
+    resolve_default.assert_called_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("override", ["200k", "-10"])
 async def test_invalid_window_override_replays_within_the_default_window(
     monkeypatch: pytest.MonkeyPatch, override: str
