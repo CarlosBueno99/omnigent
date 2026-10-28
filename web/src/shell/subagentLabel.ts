@@ -49,7 +49,7 @@ export function childPrimaryLabel(child: ChildSessionInfo): string {
 /**
  * Resolve the sub-agent instance label for the composer's "Chatting with
  * sub-agent …" tray, mirroring the Agents rail's child-row label
- * (``childPrimaryLabel`` in ``SubagentsPanel``).
+ * (``childPrimaryLabel`` above).
  *
  * The spawn tool seeds a sub-agent's title as ``"{tool}:{name}"`` (e.g.
  * ``"claude_code:check-account-eligibility"``), so the human instance name

@@ -165,6 +165,10 @@ afterEach(() => {
   localStorage.clear();
 });
 
+function CurrentPath() {
+  return <output data-testid="current-path">{useLocation().pathname}</output>;
+}
+
 describe("SubagentsPanel", () => {
   it("always renders a 'main' row linking to the root session", () => {
     // No children at all — the panel still shows the main link so
@@ -502,9 +506,6 @@ describe("SubagentsPanel", () => {
     writeOpenSubagentsInPanel(enabled);
     mockChildTree({ conv_parent: [childInfo({ id: "conv_child_a", title: "researcher:auth" })] });
     const opener = vi.fn(() => true);
-    function CurrentPath() {
-      return <output data-testid="current-path">{useLocation().pathname}</output>;
-    }
     render(
       <MemoryRouter initialEntries={["/c/conv_parent"]}>
         <SubagentPanelOpenerContext.Provider value={opener}>

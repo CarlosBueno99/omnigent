@@ -54,9 +54,17 @@ def _child_busy(base_url: str, parent_id: str, child_id: str) -> bool:
     return any(child.get("id") == child_id and child.get("busy") for child in children)
 
 
-def _release_gate(mock_url: str) -> None:
+def _gate_pending(mock_url: str) -> bool:
+    response = httpx.get(f"{mock_url}/gate/pending", timeout=5.0)
+    response.raise_for_status()
+    return bool(response.json().get("pending"))
+
+
+def _release_gate(mock_url: str) -> bool:
+    """Release the parked model call; False means nothing was waiting."""
     response = httpx.post(f"{mock_url}/gate/release", timeout=5.0)
     response.raise_for_status()
+    return bool(response.json().get("released"))
 
 
 def _hold_for_recording(page: Page, milliseconds: int) -> None:
@@ -118,6 +126,8 @@ def busy_subagent(
         with httpx.Client(base_url=base_url) as client:
             send_user_text(client, session_id=child_id, text=f"audit-{nonce}: check token refresh")
         poll_until(lambda: _child_busy(base_url, parent_id, child_id), timeout_s=60)
+        # Busy flips before the runner sends its model call; wait for it to park.
+        poll_until(lambda: _gate_pending(mock_llm_server_url), timeout_s=60)
         yield BusySubagent(base_url, parent_id, child_id, mock_llm_server_url, nonce)
     finally:
         # A turn left parked on the gate would wedge the shared runner.
@@ -191,7 +201,7 @@ def test_composer_indicator_opens_subagent_tab_beside_parent(
     expect(page.get_by_text(_PARENT_REPLY, exact=True)).to_be_visible()
     _hold_for_recording(page, 1000)
 
-    _release_gate(sub.mock_url)
+    assert _release_gate(sub.mock_url), "no model call was waiting on the gate"
     expect(pane.get_by_text(_CHILD_REPLY, exact=True)).to_be_visible(timeout=60_000)
     _hold_for_recording(page, 1000)
 

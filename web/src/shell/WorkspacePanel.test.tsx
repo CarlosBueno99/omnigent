@@ -97,10 +97,12 @@ vi.mock("@/components/chat/SideChatPane", () => ({
     childId,
     readOnly,
     fullSession,
+    onStart,
   }: {
     childId: string;
     readOnly?: boolean;
     fullSession?: boolean;
+    onStart?: (text: string) => Promise<void>;
   }) => (
     <div
       data-testid="side-chat-pane-stub"
@@ -108,6 +110,11 @@ vi.mock("@/components/chat/SideChatPane", () => ({
       data-full-session={String(fullSession ?? false)}
     >
       {childId}
+      {childId.startsWith("pending:") && onStart && (
+        <button type="button" onClick={() => void onStart("question")}>
+          Start side chat
+        </button>
+      )}
     </div>
   ),
 }));
@@ -1461,7 +1468,7 @@ describe("WorkspacePanel sub-agent tabs", () => {
 
   it("shows the sub-agent's whole session with a full-screen link", () => {
     writeSessionWorkspaceState("conv_ws", {
-      openSideChats: ["conv_side", SUBAGENT_TAB],
+      openSideChats: [SUBAGENT_TAB, "conv_side"],
       selectedSideChatId: SUBAGENT_TAB,
     });
     renderWorkspace({ rightRailTab: "sidechat", queryClient: clientWithSubagent() });
@@ -1484,6 +1491,42 @@ describe("WorkspacePanel sub-agent tabs", () => {
       "href",
       "/c/conv_child",
     );
+  });
+
+  it("leaves a pending native side chat waiting for its own fork", async () => {
+    const before = useChatStore.getState();
+    const send = vi.fn(() => Promise.resolve());
+    useChatStore.setState({ sessionHarness: "codex-native", boundAgentId: "agent_x", send });
+    try {
+      writeSessionWorkspaceState("conv_ws", {
+        openSideChats: ["pending:one"],
+        selectedSideChatId: "pending:one",
+      });
+      renderWorkspace({ rightRailTab: "sidechat", queryClient: clientWithSubagent() });
+      const rail = screen.getByRole("complementary", { name: "Workspace" });
+      fireEvent.click(screen.getByRole("button", { name: "Start side chat" }));
+      await waitFor(() => expect(send).toHaveBeenCalled());
+
+      act(() => {
+        useChatStore.setState({ sideChatToOpen: { childId: SUBAGENT_TAB, parentId: "conv_ws" } });
+      });
+      expect(within(rail).getByRole("tab", { name: "Research agent" })).toBeInTheDocument();
+      expect(within(rail).getByRole("tab", { name: "Side chat 1" })).toBeInTheDocument();
+
+      // The fork that arrives next still replaces the pending tab, not the sub-agent's.
+      act(() => {
+        useChatStore.setState({ sideChatToOpen: { childId: "conv_fork", parentId: "conv_ws" } });
+      });
+      expect(within(rail).getByRole("tab", { name: "Research agent" })).toBeInTheDocument();
+      fireEvent.click(within(rail).getByRole("tab", { name: "Side chat 1" }));
+      expect(screen.getByTestId("side-chat-pane-stub")).toHaveTextContent("conv_fork");
+    } finally {
+      useChatStore.setState({
+        sessionHarness: before.sessionHarness,
+        boundAgentId: before.boundAgentId,
+        send: before.send,
+      });
+    }
   });
 
   it("shows the transcript read-only without edit access", () => {
