@@ -52,6 +52,7 @@ from omnigent._platform import resolve_cli_binary
 from omnigent.acp_cli_harnesses import ACP_CLI_HARNESSES
 from omnigent.cli_invocation import cli_invocation
 from omnigent.harness_install_spec import HarnessInstallSpec, SetupStep
+from omnigent.harness_startup_config import resolve_harness_path
 from omnigent.harnesses.opencode_native.client import (
     OPENCODE_MAX_VERSION_EXCLUSIVE,
     OPENCODE_MIN_VERSION,
@@ -913,17 +914,26 @@ def harness_install_spec(key: str) -> HarnessInstallSpec | None:
     return _all_harness_install().get(key)
 
 
+# Map install-family keys to launch-path override IDs. Agy has no override.
+_PATH_OVERRIDE_IDS: dict[str, str | None] = {
+    ANTHROPIC_FAMILY: "claude",
+    OPENAI_FAMILY: "codex",
+    GEMINI_FAMILY: None,
+}
+
+
 def harness_cli_binary(key: str) -> str | None:
-    """Resolve the CLI selected for an install key, including Pi's path override."""
+    """Resolve the executable selected by the harness launch configuration."""
     spec = harness_install_spec(key)
     if spec is None:
         return None
-    command = spec.binary
-    if key == PI_KEY:
-        from omnigent.harness_startup_config import resolve_harness_path
-
-        command = resolve_harness_path("pi") or command
-    return resolve_cli_binary(command)
+    override_id = _PATH_OVERRIDE_IDS.get(key, key)
+    override = resolve_harness_path(override_id) if override_id else None
+    resolved = resolve_cli_binary(override or spec.binary)
+    if resolved is None and override and key in (ANTHROPIC_FAMILY, OPENAI_FAMILY):
+        # Claude and Codex launchers fall back when an override is invalid.
+        return resolve_cli_binary(spec.binary)
+    return resolved
 
 
 def harness_cli_version_satisfies(key: str) -> bool:
@@ -950,7 +960,8 @@ def harness_cli_version_satisfies(key: str) -> bool:
 def harness_cli_installed(key: str, timeout: float = _DEFAULT_CLI_PROBE_TIMEOUT_S) -> bool:
     """Return whether the harness's CLI is present and meets its version range.
 
-    "Installed" now means the CLI binary (:func:`resolve_cli_binary`) is
+    "Installed" now means the CLI binary (:func:`harness_cli_binary`
+    — the configured override path, then the ``PATH``/fallback-dir ladder) is
     resolvable **and**, when the harness declares ``min_version`` /
     ``max_version_exclusive`` in its install spec, the binary's
     ``--version`` output satisfies that range. This prevents an outdated
@@ -1156,13 +1167,8 @@ def try_install_harness_cli(key: str) -> HarnessInstallResult:
     # harness_install_command would have raised for a spec-less key, so spec is
     # non-None past this point.
     assert spec is not None
-    # Resolve the freshly-installed binary via the SAME ladder readiness uses
-    # (:func:`resolve_cli_binary` — ``PATH`` plus the nvm/npm-global/homebrew
-    # fallback dirs), so the install verdict and the readiness badge can never
-    # disagree. A bare ``shutil.which`` here would report "not found" for a
-    # binary the host daemon's frozen ``PATH`` omits but readiness still resolves
-    # via the ladder — the spurious "failed" toast next to a green "ready" tick.
-    resolved = resolve_cli_binary(spec.binary)
+    # Use the same resolution as readiness so setup and the host agree.
+    resolved = harness_cli_binary(key)
     if resolved is not None:
         # Put the resolving dir on ``PATH`` for this process so the setup
         # wizard's *later* steps — harness_login / harness_cli_logged_in /

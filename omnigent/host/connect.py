@@ -821,8 +821,12 @@ _RUNNER_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "OMNIGENT_HOST_SANDBOX_BACKEND",
         # Executable selection must survive CLI -> daemon -> runner. The
         # passthrough list is only applied at the second boundary.
+        "OMNIGENT_CLAUDE_PATH",
         "OMNIGENT_CODEX_PATH",
         "OMNIGENT_PI_PATH",
+        "OMNIGENT_KIMI_PATH",
+        "HARNESS_KIMI_PATH",
+        "OMNIGENT_OPENCODE_PATH",
         # Credential-env denylists must survive both daemon and runner hops.
         # This carries variable names only; their values still follow normal forwarding.
         "OMNIGENT_PI_ENV_UNSET",
