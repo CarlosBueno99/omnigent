@@ -20,21 +20,22 @@ _RESOLVE_CONFIG = """
 import json, sys
 from pathlib import Path
 from omnigent.inner.codex_executor import _databricks_codex_config_overrides
-from omnigent.onboarding.ucode_state import read_ucode_state
-agent = read_ucode_state(sys.argv[1]).agent('codex')
+from omnigent.harnesses.codex_native.databricks import codex_gateway
+base_url, command, cadence, auth = codex_gateway(sys.argv[1], sys.argv[2])
 overrides = _databricks_codex_config_overrides(
-    model='mock-model', base_url=agent.base_url, auth_command=agent.auth_command,
-    auth_refresh_interval_ms=agent.auth_refresh_interval_ms, auth_config=agent.auth)
+    model='mock-model', base_url=base_url, auth_command=command,
+    auth_refresh_interval_ms=cadence, auth_config=auth)
 Path(sys.argv[3]).write_text(json.dumps(overrides))
 """
 
 
 @pytest.mark.posix_only
 @pytest.mark.timeout(180)
+@pytest.mark.parametrize("fallback", ["installed", "uvx"])
 @pytest.mark.parametrize("launcher_name", ["ucode", "ug"])
 @pytest.mark.parametrize("auth_form", ["direct", "shell"])
 def test_structured_auth_survives_ucode_archive_eviction(
-    tmp_path: Path, launcher_name: str, auth_form: str
+    tmp_path: Path, launcher_name: str, auth_form: str, fallback: str
 ) -> None:
     """A fresh launch uses the archive; a later launch preserves auth arguments."""
     codex = shutil.which("codex")
@@ -44,7 +45,7 @@ def test_structured_auth_survives_ucode_archive_eviction(
     tools = tmp_path / "installed tools"
     helper_log = tmp_path / "helper.jsonl"
     archived = home / ".cache" / "uv" / "archive-v0" / "first" / "bin" / launcher_name
-    installed = tools / launcher_name
+    installed = tools / (launcher_name if fallback == "installed" else "uvx")
     environment = token_helper_environment(
         home=home,
         tools=tools,
@@ -129,8 +130,12 @@ def test_structured_auth_survives_ucode_archive_eviction(
             assert set(gateway.auth_headers_seen) == {f"Bearer {FRESH_TOKEN}"}
             invocations = [json.loads(line) for line in helper_log.read_text().splitlines()]
             (tmp_path / f"{phase}-helper.json").write_text(json.dumps(invocations))
-            expected = str(archived if phase == "fresh" else installed)
-            assert invocations and all(call == [expected, *arguments] for call in invocations)
+            expected = [str(archived if phase == "fresh" else installed)]
+            if phase == "evicted" and fallback == "uvx":
+                from omnigent.onboarding.ucode_setup import _UCODE_UVX_SOURCE
+
+                expected.extend(["--from", _UCODE_UVX_SOURCE, "ucode"])
+            assert invocations and all(call == [*expected, *arguments] for call in invocations)
             assert state_file.read_bytes() == original_state
     finally:
         gateway.shutdown()

@@ -142,13 +142,16 @@ def codex_gateway(
         workspace_state = None
     agent = workspace_state.agent("codex") if workspace_state is not None else None
     if agent is not None and agent.base_url and agent.auth_command:
-        from omnigent.onboarding.ucode_setup import refresh_ucode_auth_command
+        from omnigent.onboarding.ucode_setup import (
+            refresh_ucode_auth_command,
+            refresh_ucode_auth_config,
+        )
 
         return (
             agent.base_url,
             refresh_ucode_auth_command(agent.auth_command),
             agent.auth_refresh_interval_ms,
-            agent.auth,
+            refresh_ucode_auth_config(agent.auth),
         )
     return (
         _databricks_codex_base_url(host),

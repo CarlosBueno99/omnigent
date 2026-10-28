@@ -19,6 +19,7 @@ from omnigent.onboarding.ucode_setup import (
     find_ucode_command,
     model_gateway_workspace_urls,
     refresh_ucode_auth_command,
+    refresh_ucode_auth_config,
     ucode_workspace_exists,
 )
 
@@ -77,6 +78,9 @@ def test_find_ucode_command_raises_when_no_runner_exists() -> None:
         "malformed",
         "subcommand",
         "quoting",
+        "custom-option",
+        "other-launcher",
+        "shell-variable",
     ],
 )
 def test_ucode_auth_repair_preserves_other_commands(
@@ -101,6 +105,12 @@ def test_ucode_auth_repair_preserves_other_commands(
         command = shlex.join([str(binary), "configure"])
     elif case == "quoting":
         command = f'"{binary}" auth-token'
+    elif case == "custom-option":
+        command = shlex.join([str(binary), "auth-token", "--custom-option", "value"])
+    elif case == "other-launcher":
+        command = shlex.join([str(binary.with_name("other")), "auth-token"])
+    elif case == "shell-variable":
+        command = f"{binary} auth-token --profile $PROFILE"
 
     def helper_prefix() -> list[str]:
         if case != "no-helper":
@@ -109,6 +119,12 @@ def test_ucode_auth_repair_preserves_other_commands(
 
     monkeypatch.setattr("omnigent.onboarding.ucode_setup.find_ucode_command", helper_prefix)
     assert refresh_ucode_auth_command(command) == command
+    shell_auth = {"command": "/bin/sh", "args": ["-c", command], "timeout_ms": 180000}
+    assert refresh_ucode_auth_config(shell_auth) == shell_auth
+    if case not in {"shell", "empty", "malformed", "quoting", "shell-variable"}:
+        argv = shlex.split(command)
+        direct_auth = {"command": argv[0], "args": argv[1:], "refresh_interval_ms": 60000}
+        assert refresh_ucode_auth_config(direct_auth) == direct_auth
 
 
 def test_build_ucode_configure_command_uses_workspaces() -> None:

@@ -323,14 +323,23 @@ def test_build_codex_native_server_preserves_structured_ucode_auth(
 
 
 @pytest.mark.skipif(os.name != "posix", reason="uv POSIX archive layout and shell helper")
+@pytest.mark.parametrize("fallback", ["installed", "uvx"])
+@pytest.mark.parametrize("launcher_name", ["ucode", "ug"])
 @pytest.mark.parametrize("auth_form", ["direct", "shell"])
 def test_build_codex_native_server_repairs_archived_ucode_auth(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, auth_form: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    auth_form: str,
+    launcher_name: str,
+    fallback: str,
 ) -> None:
     """Codex's emitted auth helper works after the generated uv archive is removed."""
-    archived = tmp_path / "archive-v0" / "removed" / "bin" / "ucode"
-    launcher = tmp_path / "ucode"
-    launcher.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+    archived = tmp_path / "archive-v0" / "removed" / "bin" / launcher_name
+    launcher = tmp_path / (launcher_name if fallback == "installed" else "uvx")
+    launcher.write_text(
+        f"#!{sys.executable}\n# from ucode.cli import main\n"
+        "import sys\nprint('\\n'.join(sys.argv[1:]))\n"
+    )
     launcher.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path))
     args = [
@@ -354,10 +363,17 @@ def test_build_codex_native_server_repairs_archived_ucode_auth(
         {"base_url": _UCODE_BASE_URL, "auth_command": command, "auth": auth},
     )
     emitted_auth = tomllib.loads(overrides)["model_providers"]["omnigent_databricks"]["auth"]
+    from omnigent.onboarding.ucode_setup import _UCODE_UVX_SOURCE
+
+    prefix = [str(launcher)]
+    if fallback == "uvx":
+        prefix.extend(["--from", _UCODE_UVX_SOURCE, "ucode"])
     assert emitted_auth == {
         **auth,
         "command": str(launcher) if auth_form == "direct" else "/bin/sh",
-        "args": args if auth_form == "direct" else ["-c", shlex.join([str(launcher), *args])],
+        "args": [*prefix[1:], *args]
+        if auth_form == "direct"
+        else ["-c", shlex.join([*prefix, *args])],
     }
     result = subprocess.run(
         [emitted_auth["command"], *emitted_auth["args"]],
@@ -366,7 +382,7 @@ def test_build_codex_native_server_repairs_archived_ucode_auth(
         timeout=5,
         check=True,
     )
-    assert result.stdout.splitlines() == args
+    assert result.stdout.splitlines() == [*prefix[1:], *args]
 
 
 def test_build_codex_native_server_preserves_legacy_auth_timeout(
