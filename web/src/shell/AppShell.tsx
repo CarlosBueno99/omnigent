@@ -1928,11 +1928,15 @@ function AppShellImpl() {
   // With the "open sub-agents in the Workspace panel" setting on, sub-agent
   // links in this chat open a rail tab instead of replacing the chat. The root
   // and other ancestors stay full-page links, so a tab only holds work below.
+  // Without a mounted WorkspacePanel to take the request, the link navigates.
   const parentSessionId = activeSession?.parentSessionId;
+  const workspacePanelMounted = hasRailContent || selectedFilePath !== null;
   const openSubagentInPanel = useCallback(
     (childSessionId: string) => {
       if (
         !conversationId ||
+        pendingConversation ||
+        !workspacePanelMounted ||
         childSessionId === conversationId ||
         childSessionId === rootSessionId ||
         isCachedAncestor(queryClient, parentSessionId, childSessionId)
@@ -1944,7 +1948,14 @@ function AppShellImpl() {
       });
       return true;
     },
-    [conversationId, rootSessionId, parentSessionId, queryClient],
+    [
+      conversationId,
+      pendingConversation,
+      workspacePanelMounted,
+      rootSessionId,
+      parentSessionId,
+      queryClient,
+    ],
   );
   // Sub-agent tabs opened on desktop must stay reachable from a phone's
   // drawer even when this harness can't start side chats.
@@ -2637,7 +2648,7 @@ function AppShellImpl() {
               rectangle (e.g. a no-filesystem agent with no terminals).
               Sits inside the group so the header overlay spans it; the
               push panels below sit outside the group. */}
-                  {conversationId && (hasRailContent || selectedFilePath !== null) && (
+                  {conversationId && workspacePanelMounted && (
                     <WorkspacePanel
                       conversationId={conversationId}
                       pending={pendingConversation}
