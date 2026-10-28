@@ -5361,8 +5361,10 @@ def create_runner_app(
 
         if harness_name == "codex-native":
             backend = _native_runtime._AUTO_CODEX_APP_SERVERS.get(conv)
-            if backend is not None and (
-                backend.proc is None or backend.proc.returncode is not None
+            if (
+                backend is not None
+                and backend.proc is not None
+                and backend.proc.returncode is not None
             ):
                 from omnigent.harnesses.codex_native.bridge import read_bridge_state
 

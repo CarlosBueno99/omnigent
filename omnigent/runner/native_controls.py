@@ -344,7 +344,10 @@ async def retire_stopped_codex_backend(
 ) -> bool:
     """Retire a stopped launch only while its backend, bridge, and terminal remain owned."""
     from omnigent.entities.session_resources import terminal_resource_id
-    from omnigent.harnesses.codex_native.bridge import read_bridge_state
+    from omnigent.harnesses.codex_native.bridge import (
+        read_bridge_state,
+        record_app_server_stopped,
+    )
     from omnigent.runner.native.orchestration import (
         _AUTO_CODEX_APP_SERVERS,
         teardown_codex_native_app_server,
@@ -366,8 +369,10 @@ async def retire_stopped_codex_backend(
         backend = _AUTO_CODEX_APP_SERVERS.get(conv_id)
         if backend is None or backend is not failed_backend:
             return False
-        if backend.bridge_dir != bridge_dir or (
-            backend.proc is not None and backend.proc.returncode is None
+        if (
+            backend.bridge_dir != bridge_dir
+            or backend.proc is None
+            or backend.proc.returncode is None
         ):
             return False
         _logger.info(
@@ -375,6 +380,8 @@ async def retire_stopped_codex_backend(
             conv_id,
             extra={"session_id": conv_id},
         )
+        # Teardown can unregister the backend before cancellation interrupts its close.
+        record_app_server_stopped(bridge_dir)
         await teardown_codex_native_app_server(conv_id)
         try:
             await registry.close(conv_id, "codex", "main")

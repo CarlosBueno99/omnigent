@@ -1075,8 +1075,10 @@ async def test_ensure_terminal_route_recreates_dead_registered_pane(
         ("failed_startup", True),
         ("dead_backend", True),
         ("dead_backend_close_failed", True),
+        ("dead_backend_retirement_cancelled", True),
         ("unowned_dead_backend", False),
         ("starting", False),
+        ("starting_no_process", False),
         ("ready", False),
         ("detached", False),
         ("rotated", False),
@@ -1094,6 +1096,7 @@ async def test_message_recovers_a_live_codex_pane_with_no_backend(
 ) -> None:
     """An API message checks the backend even when the auxiliary TUI is alive."""
     from omnigent.runner.native import orchestration
+    from omnigent.runner.native_controls import retire_stopped_codex_backend
 
     session_id = uuid.uuid4().hex
     rotating = backend_state.startswith("rotated")
@@ -1107,6 +1110,7 @@ async def test_message_recovers_a_live_codex_pane_with_no_backend(
             "detached",
             "dead_backend",
             "dead_backend_close_failed",
+            "dead_backend_retirement_cancelled",
             "unowned_dead_backend",
             "rotated",
             "foreign_bridge",
@@ -1131,15 +1135,19 @@ async def test_message_recovers_a_live_codex_pane_with_no_backend(
         backend_state
         in (
             "starting",
+            "starting_no_process",
             "ready",
             "dead_backend",
             "dead_backend_close_failed",
+            "dead_backend_retirement_cancelled",
             "unowned_dead_backend",
         )
         or rotating
     ):
         backend = SimpleNamespace(
-            proc=SimpleNamespace(returncode=1 if "dead_backend" in backend_state else None),
+            proc=None
+            if backend_state == "starting_no_process"
+            else SimpleNamespace(returncode=1 if "dead_backend" in backend_state else None),
             bridge_dir=bridge_dir,
             close=AsyncMock(),
         )
@@ -1210,6 +1218,42 @@ async def test_message_recovers_a_live_codex_pane_with_no_backend(
 
         monkeypatch.setattr(resource_routes, "_ensure_native_terminal", concurrent_ensure)
     async with _runner_client(app) as client:
+        if backend_state == "starting_no_process":
+            assert not await retire_stopped_codex_backend(
+                session_id,
+                codex_native_bridge.read_bridge_state(bridge_dir),
+                bridge_dir,
+                backend,
+                resource_registry=resources,
+                ensure_locks={},
+            )
+        if backend_state == "dead_backend_retirement_cancelled":
+            close_started = asyncio.Event()
+
+            async def interrupted_close() -> None:
+                assert source_session_id not in orchestration._AUTO_CODEX_APP_SERVERS
+                close_started.set()
+                await asyncio.Event().wait()
+
+            backend.close.side_effect = interrupted_close
+            retirement = asyncio.create_task(
+                retire_stopped_codex_backend(
+                    session_id,
+                    codex_native_bridge.read_bridge_state(bridge_dir),
+                    bridge_dir,
+                    backend,
+                    resource_registry=resources,
+                    ensure_locks={},
+                )
+            )
+            try:
+                await asyncio.wait_for(close_started.wait(), timeout=5.0)
+            finally:
+                retirement.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await retirement
+            assert registry.get(session_id, "codex", "main") is instance
+            close.assert_not_awaited()
         message_task = None
         if rotating:
             transfer_task = asyncio.create_task(
