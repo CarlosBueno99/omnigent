@@ -417,9 +417,9 @@ def _read_cached_file(cache: Path, name: str) -> bytes | None:
             os.close(dir_fd)
         try:
             info = os.fstat(fd)
-            # No restorable paste exceeds one session event, so a larger file is never read.
             if not stat.S_ISREG(info.st_mode):
                 return None
+            # No restorable paste exceeds one session event, so a larger file is never read.
             if info.st_size > MAX_SESSION_EVENT_REQUEST_BYTES:
                 raise _SpilledTextTooLarge
             return _read_fd(fd, info.st_size)

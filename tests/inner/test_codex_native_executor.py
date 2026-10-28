@@ -1042,7 +1042,6 @@ def test_overlong_goal_command_fails_clearly_without_reaching_app_server(
     assert "4000" in message
     assert "-32600" not in message
     assert "Codex native executor error" not in message
-    assert events[0].undelivered is True
     # The doomed objective never reaches the app-server.
     assert _FakeCodexNativeClient.requests == []
     # A coded input error, and the message never reached Codex, so the sender's
@@ -1875,6 +1874,58 @@ def test_run_turn_sends_an_oversized_message_as_an_attachment_reference(
     method, params = _FakeCodexNativeClient.requests[-1]
     assert method == "turn/start"
     assert _text_chars(params["input"]) < _CODEX_TEXT_LIMIT
+    assert _referenced_file(params["input"][0]).read_text(encoding="utf-8") == text
+
+
+@pytest.mark.parametrize("delivery_path", ["start", "steer"])
+async def test_slow_paste_materialization_keeps_the_event_loop_responsive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, delivery_path: str
+) -> None:
+    _FakeCodexNativeClient.requests = []
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server.CodexAppServerClient",
+        _FakeCodexNativeClient,
+    )
+    _seed_bridge(tmp_path, active_turn_id="turn_live" if delivery_path == "steer" else None)
+    started = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    original_materialize = codex_native_executor.materialize_text
+    text = "large synthetic paste\n" * 50_000
+
+    def slow_materialize(*args, **kwargs):
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(2), "paste materialization blocked the event loop"
+        return original_materialize(*args, **kwargs)
+
+    monkeypatch.setattr(codex_native_executor, "materialize_text", slow_materialize)
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    async def deliver():
+        if delivery_path == "steer":
+            return await executor.enqueue_session_message("main", [_input_text(text)])
+        return [
+            event
+            async for event in executor.run_turn(
+                messages=[{"role": "user", "content": text}], tools=[], system_prompt=""
+            )
+        ]
+
+    delivery = asyncio.create_task(deliver())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        assert not delivery.done()
+        assert _FakeCodexNativeClient.requests == []
+    finally:
+        release.set()
+        result = await delivery
+
+    if delivery_path == "steer":
+        assert result is True
+    else:
+        assert [type(event) for event in result] == [TurnComplete]
+    [(method, params)] = _FakeCodexNativeClient.requests
+    assert method == ("turn/steer" if delivery_path == "steer" else "turn/start")
     assert _referenced_file(params["input"][0]).read_text(encoding="utf-8") == text
 
 

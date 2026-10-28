@@ -669,8 +669,8 @@ class CodexNativeExecutor(Executor):
         :returns: ``True`` when Codex accepted the steering message.
         """
         del session_key
-        input_items = _content_to_input_items(
-            content, self._bridge_dir, session_id=self._request_session_id
+        input_items = await asyncio.to_thread(
+            _content_to_input_items, content, self._bridge_dir, session_id=self._request_session_id
         )
         if not input_items:
             return False
@@ -838,8 +838,11 @@ class CodexNativeExecutor(Executor):
         input_items: list[dict[str, object]] = (
             [{"type": "text", "text": goal_objective}]
             if goal_objective is not None
-            else _content_to_input_items(
-                latest_user_content, self._bridge_dir, session_id=self._request_session_id
+            else await asyncio.to_thread(
+                _content_to_input_items,
+                latest_user_content,
+                self._bridge_dir,
+                session_id=self._request_session_id,
             )
         )
         if not input_items:
