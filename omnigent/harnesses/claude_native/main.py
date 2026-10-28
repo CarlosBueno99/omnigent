@@ -123,8 +123,10 @@ from omnigent.host.daemon_launch import (
     wait_for_host_online,
     wait_for_runner_online,
 )
+from omnigent.inner import _proc
 from omnigent.inner._subprocess_lifecycle import (
     await_cleanup_task,
+    close_subprocess_transport,
     terminate_direct_subprocess,
 )
 from omnigent.models import model_catalog
@@ -230,14 +232,13 @@ _CLAUDE_NONESSENTIAL_TRAFFIC_ENV = "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
 #: same rows page fine at smaller sizes.
 _CLAUDE_RESUME_ITEMS_PAGE_LIMIT = 1000
 _CLAUDE_RESUME_ITEMS_PAGE_LIMIT_FLOOR = 100
-_CLAUDE_MODEL_PROBE_TIMEOUT_S = 20.0
+# Configured launchers may bootstrap credentials and settings before Claude starts.
+_CLAUDE_MODEL_PROBE_TIMEOUT_S = 60.0
 #: Wall-clock cap for the per-alias resolution fan-out as a whole; aliases
 #: still unresolved when it expires keep their bare rows (the cache's
-#: revalidation retries them later). Startup dominates each run and
-#: stretches with box load (measured 0.7s–17s for the same command), so the
-#: concurrency covers a whole alias set in one wave and the budget fits one
-#: slow wave.
-_CLAUDE_ALIAS_RESOLUTION_BUDGET_S = 30.0
+#: revalidation retries them later). Allow one full probe wave, including
+#: configured-launcher bootstrap, while concurrency bounds process fan-out.
+_CLAUDE_ALIAS_RESOLUTION_BUDGET_S = _CLAUDE_MODEL_PROBE_TIMEOUT_S
 _CLAUDE_ALIAS_RESOLUTION_CONCURRENCY = 12
 _CLAUDE_CODE_ENABLE_TOOL_SEARCH_ENV = "ENABLE_TOOL_SEARCH"
 _CLAUDE_CODE_CUSTOM_HEADERS_ENV = "ANTHROPIC_CUSTOM_HEADERS"
@@ -256,6 +257,9 @@ _CLAUDE_CODE_DISABLE_AGENT_VIEW_ENV = "CLAUDE_CODE_DISABLE_AGENT_VIEW"
 # only in the pane, so a web-driven session shows an unanswerable prompt —
 # often with nobody attached to the terminal at all.
 _CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY_ENV = "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"
+# Gateway catalogs can reject Claude's canonical refusal fallback.
+# Keep the original model and refusal instead of switching to an unservable id.
+_CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK_ENV = "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK"
 # Claude Code env vars that pin each model-tier alias to a provider-specific
 # model ID.  When set, the /model picker shows these IDs as options rather
 # than normalising to canonical Anthropic names (which the Databricks gateway
@@ -468,16 +472,23 @@ def _serves_canonical_anthropic_ids(claude_config: ClaudeNativeUcodeConfig) -> b
     return host == "anthropic.com" or host.endswith(".anthropic.com")
 
 
-def _ambient_env_is_non_anthropic_gateway() -> bool:
+def _ambient_env_is_non_anthropic_gateway(configured_base_url: str | None = None) -> bool:
     """Whether managed settings or the process env route through a gateway.
 
     Used as the ``claude_config is None`` counterpart to
     :func:`_serves_canonical_anthropic_ids`: when managed settings (e.g. Isaac)
     set ``ANTHROPIC_BASE_URL`` to a Databricks gateway, the catalog and its
     fingerprint must treat the env as a non-canonical endpoint.
+
+    :param configured_base_url: Optional launch override for the ambient URL;
+        managed settings still take precedence.
     """
     managed_base_url, _ = managed_claude_gateway_signal()
-    base_url = managed_base_url or os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV, "")
+    base_url = managed_base_url or (
+        configured_base_url
+        if configured_base_url is not None
+        else os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV, "")
+    )
     if not base_url:
         return False
     host = (urlparse(base_url).hostname or "").lower()
@@ -921,25 +932,23 @@ def _parse_claude_current_model(stdout: str) -> dict[str, str]:
     return resolved
 
 
-def _claude_model_probe_invocation(
+def _claude_model_probe_launch(
     claude_config: ClaudeNativeUcodeConfig | None,
     extra_args: Sequence[str] = (),
     *,
     stream_input: bool = False,
-) -> tuple[str, list[str], dict[str, str]]:
+) -> tuple[str, list[str]]:
     """
-    Assemble one headless ``/model`` probe invocation.
-
-    Shared by the alias-enumeration run and the per-alias resolution runs
-    so the two cannot drift: same launch resolution, session env, speed
-    env, and env-unset list.
+    Resolve probe command and arguments without constructing the launch environment.
 
     :param claude_config: The resolved native launch config, or ``None``.
     :param extra_args: Appended CLI args (e.g. ``--model <alias>``).
     :param stream_input: Send control requests and /model over stdin.
-    :returns: ``(command, launch_args, env)`` ready to exec.
+    :returns: ``(command, launch_args)`` shared by discovery and its cache key.
     """
     from omnigent.claude_launcher import resolve_claude_launch
+    from omnigent.config import load_effective_config
+    from omnigent.harness_startup_config import resolve_harness_args, resolve_harness_command
 
     args = ["-p"]
     if stream_input:
@@ -962,7 +971,22 @@ def _claude_model_probe_invocation(
     )
     if claude_config is not None and claude_config.api_key_helper:
         args.extend(("--settings", json.dumps({"apiKeyHelper": claude_config.api_key_helper})))
-    command, launch_args = resolve_claude_launch("claude", args)
+    cfg = load_effective_config()
+    command = resolve_harness_command("claude-native", default="claude", cfg=cfg)
+    launch_args = resolve_harness_args("claude-native", tuple(args), cfg=cfg)
+    return resolve_claude_launch(command, launch_args)
+
+
+def _claude_model_probe_invocation(
+    claude_config: ClaudeNativeUcodeConfig | None,
+    extra_args: Sequence[str] = (),
+    *,
+    stream_input: bool = False,
+) -> tuple[str, list[str], dict[str, str]]:
+    """Assemble a headless probe with the terminal's launch and auth environment."""
+    command, launch_args = _claude_model_probe_launch(
+        claude_config, extra_args, stream_input=stream_input
+    )
     env = dict(os.environ)
     env.update(build_native_claude_terminal_env(claude_config))
     env.update(
@@ -1004,29 +1028,31 @@ async def _resolve_claude_model_alias(
     )
     try:
         process = await asyncio.create_subprocess_exec(
-            command,
-            *launch_args,
+            *_proc.pipe_supervised_command(command, *launch_args),
             cwd=str(Path.home()),
             env=env,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **_proc.spawn_kwargs(),
         )
     except OSError:
         _logger.debug("Claude alias resolution could not launch for %r", alias, exc_info=True)
         return {}
+    _proc.remember_process_group(process)
     try:
         async with asyncio.timeout(_CLAUDE_MODEL_PROBE_TIMEOUT_S):
             stdout, _stderr = await process.communicate()
     except (TimeoutError, asyncio.CancelledError) as exc:
-        if process.returncode is None:
-            process.kill()
+        _proc.kill_tree(process)
         with contextlib.suppress(Exception):
-            await process.wait()
+            await asyncio.wait_for(process.wait(), timeout=1.0)
         if isinstance(exc, asyncio.CancelledError):
             raise
         _logger.debug("Claude alias resolution timed out for %r", alias)
         return {}
+    finally:
+        close_subprocess_transport(process)
     if process.returncode != 0:
         _logger.debug("Claude alias resolution exited %s for %r", process.returncode, alias)
         return {}
@@ -1175,29 +1201,31 @@ async def _run_claude_model_probe(
     )
     try:
         process = await asyncio.create_subprocess_exec(
-            command,
-            *launch_args,
+            *_proc.pipe_supervised_command(command, *launch_args),
             cwd=str(Path.home()),
             env=env,
             stdin=asyncio.subprocess.PIPE if stream_input else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **_proc.spawn_kwargs(),
         )
     except OSError:
         _logger.warning("Claude model probe could not launch the claude CLI", exc_info=True)
         return None
+    _proc.remember_process_group(process)
     try:
         async with asyncio.timeout(_CLAUDE_MODEL_PROBE_TIMEOUT_S):
             stdout, stderr = await process.communicate(probe_input)
     except (TimeoutError, asyncio.CancelledError) as exc:
-        if process.returncode is None:
-            process.kill()
+        _proc.kill_tree(process)
         with contextlib.suppress(Exception):
-            await process.wait()
+            await asyncio.wait_for(process.wait(), timeout=1.0)
         if isinstance(exc, asyncio.CancelledError):
             raise
         _logger.warning("Claude model probe timed out")
         return None
+    finally:
+        close_subprocess_transport(process)
     text = stdout.decode(errors="replace")
     if process.returncode != 0:
         _logger.warning(
@@ -1310,16 +1338,15 @@ def claude_catalog_fingerprint(claude_config: ClaudeNativeUcodeConfig | None) ->
     The Claude Code executable is part of the key. The catalog holds that
     binary's own answer, so an upgraded CLI must re-probe instead of
     serving model names the previous release printed. The binary is
-    resolved the same way the probe launches it.
+    resolved the same way the probe launches it, including wrapper arguments.
 
     :param claude_config: The resolved launch config, or ``None``.
     :returns: A stable fingerprint string.
     """
-    from omnigent.claude_launcher import resolve_claude_launch
     from omnigent.models.model_catalog_store import binary_identity, fingerprint_of
     from omnigent.onboarding.ambient import claude_managed_model_picker
 
-    command, _ = resolve_claude_launch("claude", [])
+    command, launch_args = _claude_model_probe_launch(claude_config, stream_input=True)
     ambient_gateway = None
     if claude_config is None:
         managed_base_url, _ = managed_claude_gateway_signal()
@@ -1331,7 +1358,10 @@ def claude_catalog_fingerprint(claude_config: ClaudeNativeUcodeConfig | None) ->
         claude_config.api_key_helper if claude_config is not None else None,
         claude_config.model if claude_config is not None else None,
         sorted(claude_config.routable_models) if claude_config is not None else None,
+        command,
+        launch_args,
         binary_identity(command),
+        binary_identity("claude"),
         ambient_gateway,
         claude_managed_model_picker() if claude_config is None else None,
     )
@@ -1544,7 +1574,9 @@ def build_native_claude_terminal_env(
     terminal stays pinned to the session the Omnigent UI is showing, and
     disables the in-TUI feedback surveys, which a web-driven session
     cannot see or answer (see
-    :data:`_CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY_ENV`).
+    :data:`_CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY_ENV`). Custom Anthropic
+    endpoints keep the selected model when it refuses, since their catalogs
+    may not serve Claude Code's canonical refusal-fallback target.
 
     :param claude_config: Optional provider/ucode launch config, e.g.
         one carrying ``{"ANTHROPIC_BASE_URL": "https://example.com"}``.
@@ -1562,6 +1594,11 @@ def build_native_claude_terminal_env(
         terminal_env[_CLAUDE_CODE_ENABLE_TOOL_SEARCH_ENV] = "true"
         terminal_env[_CLAUDE_CODE_DISABLE_AGENT_VIEW_ENV] = "1"
         terminal_env[_CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY_ENV] = "1"
+    configured_base_url = (
+        claude_config.env.get(_UCODE_CLAUDE_BASE_URL_ENV) if claude_config is not None else None
+    )
+    if _ambient_env_is_non_anthropic_gateway(configured_base_url):
+        terminal_env[_CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK_ENV] = "1"
     # A raw credential can override the helper or open Claude's API-key menu.
     for name in native_claude_auth_env_unset(claude_config):
         if name in terminal_env:
