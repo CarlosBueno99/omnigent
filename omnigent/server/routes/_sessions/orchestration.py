@@ -1027,7 +1027,7 @@ async def _archive_stop(
         # An idle closed session gets no stop, and a shared runner stays up, so
         # release the session's own harness resources; the transcript is kept.
         try:
-            runner_client = await _get_runner_client(session_id, runner_router)
+            runner_client = await _get_runner_client(session_id, runner_router, conversation=conv)
             if runner_client is not None:
                 cleanup_resp = await runner_client.delete(
                     f"/v1/sessions/{session_id}", timeout=60.0

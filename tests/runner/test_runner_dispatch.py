@@ -7467,6 +7467,13 @@ async def test_session_peek_maps_access_errors(status: int, expected_error: str)
             "",
             id="untitled",
         ),
+        pytest.param(
+            {"title": "L" * 200, "agent_name": "codex-native-ui"},
+            "L" * 181 + ":closed:conv_target",
+            "codex-native-ui",
+            "L" * 200,
+            id="max-length-title",
+        ),
     ],
 )
 async def test_session_close_patches_tombstoned_title(
@@ -7483,7 +7490,8 @@ async def test_session_close_patches_tombstoned_title(
     fresh child. The ``omnigent.closed=true`` label is the
     behavioral marker that direct write paths and clients consume.
     A ``sys_session_create`` child keeps its verbatim title (or none),
-    and its agent comes from the snapshot's ``agent_name``.
+    trimmed so the tombstone fits the title limit, and its agent comes
+    from the snapshot's ``agent_name``.
 
     The caller (``conv_caller``) and target (``conv_target``) share the
     same ``root_conversation_id`` and the target is a sub-agent, so the

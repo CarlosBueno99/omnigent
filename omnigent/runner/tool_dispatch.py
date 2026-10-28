@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 import httpx
 
 from omnigent.debug_logging import runner_primary_session_id
+from omnigent.entities.conversation import USER_SESSION_TITLE_MAX_CHARS
 from omnigent.harness_aliases import (
     canonicalize_harness,
     is_native_harness,
@@ -6654,7 +6655,9 @@ async def _session_close_via_rest(
     }
     tombstone = f"{parsed.agent}:{parsed.title}" if parsed.agent is not None else title
     if tombstone:
-        patch_body["title"] = f"{tombstone}{_CLOSED_TITLE_INFIX}{target_id}"
+        # Trim the kept text so the unique suffix fits the title length limit.
+        suffix = f"{_CLOSED_TITLE_INFIX}{target_id}"
+        patch_body["title"] = tombstone[: USER_SESSION_TITLE_MAX_CHARS - len(suffix)] + suffix
     try:
         patch = await server_client.patch(
             f"{_session_url(target_id)}",
