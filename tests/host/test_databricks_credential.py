@@ -541,7 +541,6 @@ async def test_broker_cancels_retry_and_closes_worker_from_an_active_loop(
 
 @pytest.mark.parametrize("reader", ["fetch", "cli"])
 def test_broker_deadline_closes_a_slow_response(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     _credential_env: dict[str, str],
     reader: str,
@@ -550,12 +549,13 @@ def test_broker_deadline_closes_a_slow_response(
     disconnected = threading.Event()
     stopped = threading.Event()
     received: list[str] = []
-    deadline = dc._TIMEOUT_S if reader == "cli" else 0.5
+    deadline = dc._TIMEOUT_S
+    assert deadline == 15.0
 
     class BrokerHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             received.append(self.path)
-            body = b" " * (1500 if reader == "cli" else 400) + b'{"connected":false}'
+            body = b" " * 1500 + b'{"connected":false}'
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -563,7 +563,7 @@ def test_broker_deadline_closes_a_slow_response(
                 for offset in range(0, len(body), 10):
                     self.wfile.write(body[offset : offset + 10])
                     self.wfile.flush()
-                    if stopped.wait(0.2 if reader == "cli" else 0.05):
+                    if stopped.wait(0.2):
                         break
             except (BrokenPipeError, ConnectionResetError):
                 disconnected.set()
@@ -571,8 +571,6 @@ def test_broker_deadline_closes_a_slow_response(
         def log_message(self, _format: str, *_args: object) -> None:
             pass
 
-    if reader == "fetch":
-        monkeypatch.setattr(dc, "_TIMEOUT_S", deadline)
     server = ThreadingHTTPServer(("127.0.0.1", 0), BrokerHandler)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
