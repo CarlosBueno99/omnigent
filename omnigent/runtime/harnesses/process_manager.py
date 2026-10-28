@@ -697,6 +697,9 @@ class HarnessProcessManager:
         conversation_id: str,
         harness: str,
         env: dict[str, str] | None = None,
+        *,
+        replace_existing: bool = True,
+        validate: Callable[[], None] | None = None,
     ) -> httpx.AsyncClient:
         """
         Return the per-conversation httpx client, spawning lazily.
@@ -734,6 +737,10 @@ class HarnessProcessManager:
             into the subprocess without polluting AP's own
             ``os.environ`` (which would race across concurrent
             conversations with different specs).
+        :param replace_existing: False preserves a live process and its environment,
+            rejecting a different harness instead of replacing it.
+        :param validate: Synchronous ownership check under the spawn lock, before
+            acquisition and before publishing a newly spawned process. May raise.
         :returns: The cached or freshly-constructed
             :class:`httpx.AsyncClient` bound to the
             per-conversation Unix socket.
@@ -773,7 +780,17 @@ class HarnessProcessManager:
                     f"harness for conversation {conversation_id!r} was released "
                     "while get_client waited"
                 )
+            if validate is not None:
+                validate()
             entry = self._entries.get(conversation_id)
+            if not replace_existing and entry is not None and entry.process.returncode is None:
+                if harness != "any" and entry.harness != harness:
+                    raise RuntimeError(
+                        f"cannot replace live harness {entry.harness!r} with {harness!r} "
+                        f"for conversation {conversation_id!r}"
+                    )
+                entry.last_used_at = time.monotonic()
+                return entry.client
             # "any" control callers may hold an established connection past the
             # unlink; don't kill the turn they're interrupting. Concrete-harness
             # (new-turn) callers reconnect via the pathname and own recovery.
@@ -906,12 +923,17 @@ class HarnessProcessManager:
                 # walk would miss. Release bumps generation only while holding
                 # this spawn lock, so a concurrent release cannot invalidate
                 # mid-spawn — it runs after we drop the lock.
-                if self._shutting_down:
+                try:
+                    if self._shutting_down:
+                        raise RuntimeError(
+                            "HarnessProcessManager shut down during spawn for "
+                            f"conversation {conversation_id!r}"
+                        )
+                    if validate is not None:
+                        validate()
+                except BaseException:
                     await self._close_entry(entry)
-                    raise RuntimeError(
-                        "HarnessProcessManager shut down during spawn for "
-                        f"conversation {conversation_id!r}"
-                    )
+                    raise
                 self._entries[conversation_id] = entry
             # Use ``time.monotonic()`` directly rather than
             # ``asyncio.get_running_loop().time()`` so the value is

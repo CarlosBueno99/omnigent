@@ -4857,7 +4857,11 @@ async def _launch_codex_native_tui(
             if previous_proxy is not None:
                 await previous_proxy.close()
             input_binding = CodexTerminalInputBinding(
-                harness_manager, terminal_registry, session_id, codex_ws_url
+                harness_manager,
+                terminal_registry,
+                session_id,
+                codex_ws_url,
+                bridge_dir=bridge_dir,
             )
             terminal_proxy = CodexTerminalProxy(codex_ws_url, input_binding.register)
             codex_ws_url = await terminal_proxy.start()

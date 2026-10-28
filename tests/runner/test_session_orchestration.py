@@ -1,5 +1,6 @@
 """Tool wire contracts, native discovery, and uncertain delivery handling."""
 
+import asyncio
 import json
 from unittest.mock import Mock
 from uuid import uuid4
@@ -131,7 +132,7 @@ async def test_create_placement(placement, monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["same_host", "managed", "message"])
+@pytest.mark.parametrize("operation", ["same_host", "managed", "message", "subagent"])
 @pytest.mark.parametrize("status", [404, 405])
 async def test_requester_mutations_do_not_fall_back_on_unsupported_server(operation, status):
     requests = []
@@ -146,6 +147,10 @@ async def test_requester_mutations_do_not_fall_back_on_unsupported_server(operat
     def unsupported(request):
         if request.url.path == "/v1/info":
             return httpx.Response(200, json={})
+        if request.method == "GET" and request.url.path == "/v1/sessions/manager":
+            return httpx.Response(200, json={"agent_id": "parent"})
+        if request.method == "GET" and request.url.path == "/v1/sessions/manager/child_sessions":
+            return httpx.Response(200, json={"data": []})
         requests.append(request)
         assert request.method == "POST"
         if request.url.path == expected_path:
@@ -160,27 +165,45 @@ async def test_requester_mutations_do_not_fall_back_on_unsupported_server(operat
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(unsupported), base_url="http://server"
     ) as client:
-        result = json.loads(
-            await execute_tool(
-                tool_name="sys_session_message"
+        output = await execute_tool(
+            tool_name="sys_session_message"
+            if operation == "message"
+            else "sys_session_send"
+            if operation == "subagent"
+            else "sys_session_create",
+            arguments=json.dumps(
+                {"session_id": target, "message": "Start"}
                 if operation == "message"
-                else "sys_session_create",
-                arguments=json.dumps(
-                    {"session_id": target, "message": "Start"}
-                    if operation == "message"
-                    else {"agent_id": "worker", "placement": operation, "message": "Start"}
-                ),
-                server_client=client,
-                conversation_id="manager",
-                requester=requester,
+                else {"agent": "worker", "title": "probe", "args": "Start"}
+                if operation == "subagent"
+                else {"agent_id": "worker", "placement": operation, "message": "Start"}
+            ),
+            server_client=client,
+            conversation_id="manager",
+            requester=requester,
+            session_inbox=asyncio.Queue(),
+            agent_spec=AgentSpec(
+                spec_version=1, spawn=True, sub_agents=[AgentSpec(spec_version=1, name="worker")]
             )
+            if operation == "subagent"
+            else None,
         )
-    if operation == "message":
-        assert result["error"] == "Session message refused"
+    if operation == "subagent":
+        assert output == (
+            f"Error: failed to create child session: {status} "
+            '{"detail":"Unsupported requester route"}'
+        )
     else:
-        assert "unavailable on this server" in result["error"]
+        result = json.loads(output)
+        if operation == "message":
+            assert result["error"] == "Session message refused"
+        else:
+            assert "unavailable on this server" in result["error"]
     assert [r.url.path for r in requests] == [expected_path]
-    assert requests[0].headers[ORCHESTRATION_SOURCE_HEADER] == "manager"
+    if operation == "subagent":
+        assert json.loads(requests[0].content)["parent_session_id"] == "manager"
+    else:
+        assert requests[0].headers[ORCHESTRATION_SOURCE_HEADER] == "manager"
     assert ToolRequester.model_validate_json(requests[0].headers[REQUESTER_HEADER]) == requester
 
 

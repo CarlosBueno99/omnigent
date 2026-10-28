@@ -555,6 +555,11 @@ async def terminal_input_binding(tmp_path: Path) -> AsyncIterator[SimpleNamespac
     terminal.writer_evidence = TerminalWriterEvidence("incarnation", complete_observation=True)
     registry = TerminalRegistry()
     registry._by_conversation[SESSION] = {("codex", "main"): terminal}
+    bridge_dir = tmp_path / "recovered-native-bridge"
+    spawn_env = {
+        "HARNESS_CODEX_NATIVE_BRIDGE_DIR": str(bridge_dir),
+        "HARNESS_CODEX_NATIVE_REQUEST_SESSION_ID": SESSION,
+    }
 
     async def capture(request: httpx.Request) -> None:
         requests.append(request)
@@ -567,13 +572,14 @@ async def terminal_input_binding(tmp_path: Path) -> AsyncIterator[SimpleNamespac
     ) as client:
         manager = SimpleNamespace(get_client=AsyncMock(return_value=client))
         binding = CodexTerminalInputBinding(
-            manager, registry, SESSION, "ws://provider.test/app-server"
+            manager, registry, SESSION, "ws://provider.test/app-server", bridge_dir=bridge_dir
         )
         binding.bind(terminal)
         yield SimpleNamespace(
             binding=binding,
             client=client,
             manager=manager,
+            spawn_env=spawn_env,
             registry=registry,
             terminal=terminal,
             harness=harness,
@@ -600,7 +606,13 @@ async def test_terminal_input_registration_and_refusal_ipc(
     )
     h.terminal.writer_evidence.record(writer)
     registration = await h.binding.register("thread", expected_turn_id)
-    h.manager.get_client.assert_awaited_once_with(SESSION, "any")
+    h.manager.get_client.assert_awaited_once_with(
+        SESSION,
+        "codex-native",
+        env=h.spawn_env,
+        replace_existing=False,
+        validate=h.binding._check_incarnation,
+    )
     assert registration.client_id == f"{1:032x}"
     [body] = h.registrations
     assert body.requester.user_id == expected_user
@@ -638,7 +650,7 @@ async def test_terminal_input_replacement_during_registration_is_refused(
 
     if pause_at == "client":
 
-        async def acquire_client(*args):
+        async def acquire_client(*args, **kwargs):
             await wait_for_replacement()
             return h.client
 
@@ -674,6 +686,11 @@ async def test_terminal_input_replacement_during_registration_is_refused(
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+    if pause_at == "client":
+        assert h.requests == []
+        assert h.registrations == h.refused == []
+        return
 
     count = 2 if pause_at == "unknown-registration" else 1
     assert h.refused == [f"{index:032x}" for index in range(1, count + 1)]
@@ -748,7 +765,7 @@ async def test_terminal_input_writer_revision_reregisters_unknown(
 
     if pause_at == "client":
 
-        async def acquire_client(*args):
+        async def acquire_client(*args, **kwargs):
             await change_writer()
             return h.client
 
@@ -780,14 +797,50 @@ async def test_terminal_input_writer_revision_reregisters_unknown(
     assert h.refused == [f"{1:032x}", f"{2:032x}"]
 
 
-async def test_terminal_input_without_live_harness_cannot_register(terminal_input_binding) -> None:
+@pytest.mark.parametrize("provisioning", ["recovered", "missing", "failed"])
+async def test_terminal_input_recovers_idle_harness_or_refuses_failed_provisioning(
+    terminal_input_binding, provisioning
+) -> None:
     h = terminal_input_binding
-    h.manager.get_client.side_effect = NoLiveHarnessError("no live harness")
-    with pytest.raises(NoLiveHarnessError):
-        await h.binding.register("thread", None)
-    h.manager.get_client.assert_awaited_once_with(SESSION, "any")
-    assert h.requests == []
-    assert h.registrations == h.refused == []
+
+    async def provision(session_id, harness, *, env, replace_existing, validate):
+        # Recovery starts without a live harness; lookup-only acquisition cannot help.
+        assert (session_id, harness, env) == (SESSION, "codex-native", h.spawn_env)
+        assert replace_existing is False
+        assert validate == h.binding._check_incarnation
+        assert h.requests == []
+        if provisioning == "missing":
+            raise NoLiveHarnessError("no live harness")
+        if provisioning == "failed":
+            raise RuntimeError("harness provisioning failed")
+        return h.client
+
+    h.manager.get_client.side_effect = provision
+    if provisioning == "recovered":
+        registration = await h.binding.register("thread", None)
+        [body] = h.registrations
+        # Starting a harness must not authenticate unobserved terminal input.
+        assert body.requester.user_id is None
+        assert body.requester.account_generation is None
+        assert body.thread_id == "thread"
+        assert body.expected_turn_id is None
+        assert body.provider_url == "ws://provider.test/app-server"
+        await registration.refuse()
+        assert h.refused == [registration.client_id]
+    else:
+        error = NoLiveHarnessError if provisioning == "missing" else RuntimeError
+        message = "no live harness" if provisioning == "missing" else "harness provisioning failed"
+        with pytest.raises(error, match=message):
+            await h.binding.register("thread", None)
+        assert h.requests == []
+        assert h.registrations == h.refused == []
+    h.manager.get_client.assert_awaited_once_with(
+        SESSION,
+        "codex-native",
+        env=h.spawn_env,
+        replace_existing=False,
+        validate=h.binding._check_incarnation,
+    )
 
 
 # ── /v1/summarize ──────────────────────────────────────────────────────────

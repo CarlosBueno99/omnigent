@@ -95,6 +95,11 @@ the header states are covered by `web/src/shell/ChatHeader.test.tsx`.
   at `a61b68089` with a scripted provider, no external network and no host mounts.
   A workstation skip is not Claude process validation; the SDK proof does not
   cover native Claude terminals or provider-created helpers.
+  After a runner restart, repeat typed input in the existing Codex session.
+  `tests/e2e/test_codex_native_supported_efforts_e2e.py::test_codex_resume_clamps_persisted_effort`
+  and `tests/e2e/test_codex_native_supported_efforts_e2e.py::test_terminal_only_work_survives_runner_inactivity`
+  cover resumed typing, preserved thread/model settings, and active terminal work
+  surviving the runner's idle timer. Initial-launch success does not cover recovery.
   It also checks that unconfigured managed creation gives a clear
   refusal without creating a session. Codex and tmux are required for the native row.
   All three harnesses also exercise a server restart with the explicit kill switch:

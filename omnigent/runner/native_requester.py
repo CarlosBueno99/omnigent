@@ -7,12 +7,18 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from omnigent.harnesses.codex_native.bridge import (
+    CODEX_NATIVE_BRIDGE_DIR_ENV_VAR,
+    build_codex_native_spawn_env,
+)
 from omnigent.harnesses.codex_native.execution import CodexExecutionIdentity
 from omnigent.harnesses.codex_native.terminal_proxy import RegisteredTerminalInput
 from omnigent.runtime.harnesses.process_manager import HarnessProcessManager, NoLiveHarnessError
 from omnigent.runtime.requester import ExecutionRequester, InputRequester, ToolRequester
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from omnigent.inner.terminal import TerminalInstance
     from omnigent.terminals.registry import TerminalRegistry
     from omnigent.terminals.writer import TerminalWriterEvidence
@@ -29,11 +35,15 @@ class CodexTerminalInputBinding:
         registry: TerminalRegistry,
         session_id: str,
         provider_url: str,
+        *,
+        bridge_dir: Path,
     ) -> None:
         self._manager = manager
         self._registry = registry
         self._session_id = session_id
         self._provider_url = provider_url
+        self._spawn_env = build_codex_native_spawn_env(session_id)
+        self._spawn_env[CODEX_NATIVE_BRIDGE_DIR_ENV_VAR] = str(bridge_dir)
         self._terminal: TerminalInstance | None = None
         self._evidence: TerminalWriterEvidence | None = None
 
@@ -63,7 +73,15 @@ class CodexTerminalInputBinding:
             account_generation=snapshot.writer.account_generation,
         )
         try:
-            client = await self._manager.get_client(self._session_id, "any")
+            # A new terminal submission can restart a harness retired while idle.
+            client = await self._manager.get_client(
+                self._session_id,
+                "codex-native",
+                env=self._spawn_env,
+                replace_existing=False,
+                validate=self._check_incarnation,
+            )
+            self._check_incarnation()
 
             async def register_origin(requester: InputRequester) -> RegisteredTerminalInput:
                 response = await client.post(
