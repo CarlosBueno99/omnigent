@@ -292,7 +292,7 @@ from omnigent.server.schemas import (
 from omnigent.server.session_live_state import last_liveness_stamp
 from omnigent.server.session_metadata_logging import log_session_metadata
 from omnigent.server.session_orchestration import require_orchestration_source
-from omnigent.server.startup_inputs import StartupDispatch, StartupInputContext
+from omnigent.server.startup_inputs import StartupDispatch, StartupInputContext, StartupInterrupt
 from omnigent.server.subagent_activity import (
     native_subagent_terminal_status,
     record_subagent_activity,
@@ -1693,9 +1693,12 @@ def register_events_routes(
             await _require_access(
                 user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
             )
-        if body.type in (_INTERRUPT_TYPE, _STOP_SESSION_TYPE):
-            startup = getattr(request.app.state, "startup_inputs", None)
-            if startup is not None:
+        startup_interrupt: StartupInterrupt | None = None
+        startup = getattr(request.app.state, "startup_inputs", None)
+        if startup is not None:
+            if body.type == _INTERRUPT_TYPE:
+                startup_interrupt = await startup.prepare_interrupt(session_id)
+            elif body.type == _STOP_SESSION_TYPE:
                 await startup.cancel(session_id)
         stop_codex_side_chat = (
             body.type == _STOP_SESSION_TYPE
@@ -1755,10 +1758,17 @@ def register_events_routes(
                 # Read before the forward so a message sent after Stop stays live;
                 # marked only if the interrupt lands, else the turn may still run them.
                 queued_pending_ids = pending_inputs.pending_ids(session_id)
-            runner_client = await _get_runner_client(
-                target_session_id,
-                runner_router,
-            )
+                if startup_interrupt is not None and startup_interrupt.cancelled_before_delivery:
+                    _interrupt_fenced_sessions.discard(session_id)
+                    return {"queued": False}
+            try:
+                runner_client = await _get_runner_client(
+                    target_session_id,
+                    runner_router,
+                )
+            except Exception:
+                _interrupt_fenced_sessions.discard(session_id)
+                raise
             interrupt_delivered = False
             if runner_client is not None:
                 try:
@@ -1767,13 +1777,16 @@ def register_events_routes(
                         json=interrupt_payload,
                         timeout=5.0,
                     )
-                    interrupt_delivered = interrupt_resp.status_code < 400
+                    interrupt_delivered = 200 <= interrupt_resp.status_code < 300
                 except (httpx.HTTPError, ConnectionError):
                     # WSTunnelTransport raises bare ConnectionError on tunnel close.
                     _logger.exception(
                         "Interrupt forward failed for %r",
                         session_id,
                     )
+                except Exception:
+                    _interrupt_fenced_sessions.discard(session_id)
+                    raise
             if not interrupt_delivered:
                 if codex_child:
                     raise OmnigentError(
@@ -1783,7 +1796,35 @@ def register_events_routes(
                 # The turn keeps running and nothing else lifts the fence —
                 # remove it so the turn's remaining output isn't dropped.
                 _interrupt_fenced_sessions.discard(session_id)
+                if (
+                    runner_client is not None
+                    or conv.runner_id is not None
+                    or (startup_interrupt is not None and startup_interrupt.items)
+                    or _session_status_cache.get(session_id, conv.live_status)
+                    in ("running", "waiting")
+                ):
+                    raise OmnigentError(
+                        "Couldn't confirm the interrupt with the runner. "
+                        "Try again when the host is connected.",
+                        code=ErrorCode.RUNNER_UNAVAILABLE,
+                    )
             elif not codex_child:
+                try:
+                    startup_confirmed = (
+                        startup is None
+                        or startup_interrupt is None
+                        or await startup.confirm_interrupt(session_id, startup_interrupt)
+                    )
+                except Exception:
+                    _interrupt_fenced_sessions.discard(session_id)
+                    raise
+                if not startup_confirmed:
+                    _interrupt_fenced_sessions.discard(session_id)
+                    raise OmnigentError(
+                        "The runner received the interrupt, but a startup input may still be "
+                        "submitting. Check the terminal before trying again.",
+                        code=ErrorCode.RUNNER_UNAVAILABLE,
+                    )
                 pending_inputs.mark_interrupted(session_id, queued_pending_ids)
             if stop_codex_side_chat:
                 await asyncio.to_thread(

@@ -6327,6 +6327,8 @@ async def test_post_interrupt_without_data_field_is_accepted(
     clients got ``422 missing body.data`` and sub-agent cancellation
     was broken in production — this pins the default.
     """
+    from omnigent.server.routes.sessions import _interrupt_fenced_sessions
+
     published: list[tuple[str, dict[str, Any]]] = []
 
     _capture_published(monkeypatch, published)
@@ -6341,6 +6343,7 @@ async def test_post_interrupt_without_data_field_is_accepted(
     # layer; a 422 here means the pydantic default regressed and every
     # deployed bare-control client breaks again.
     assert resp.status_code == 202, resp.text
+    assert session["id"] not in _interrupt_fenced_sessions
     assert resp.json() == {"queued": False}
     # The interrupt actually took effect (not just validated): the
     # route published the cancellation signal for the web turn.
@@ -9913,9 +9916,12 @@ async def test_interrupt_on_claude_native_session_skips_idle_publish_on_runner_f
     """
     from omnigent.runtime import session_stream
 
+    interrupt_requests: list[httpx.Request] = []
+
     def _handler(request: httpx.Request) -> httpx.Response:
         """Return 503 — the bridge-not-ready shape from the runner."""
-        del request
+        if request.method == "POST" and request.url.path.endswith("/events"):
+            interrupt_requests.append(request)
         return httpx.Response(503, json={"error": "claude_native_interrupt_failed"})
 
     published: list[dict[str, Any]] = []
@@ -9928,7 +9934,8 @@ async def test_interrupt_on_claude_native_session_skips_idle_publish_on_runner_f
 
     monkeypatch.setattr(session_stream, "publish", _capture_publish)
 
-    async with _runtime_runner(_handler):
+    async with _runtime_runner(_handler) as fake_runner:
+        _route_to_runner(monkeypatch, fake_runner)
         agent = await create_test_agent(client)
         session = await _create_session(
             client,
@@ -9943,7 +9950,9 @@ async def test_interrupt_on_claude_native_session_skips_idle_publish_on_runner_f
             f"/v1/sessions/{session['id']}/events",
             json={"type": "interrupt", "data": {}},
         )
-        assert resp.status_code == 202, resp.text
+        assert resp.status_code == 503, resp.text
+        assert len(interrupt_requests) == 1
+        assert json.loads(interrupt_requests[0].content) == {"type": "interrupt"}
 
     # interrupted still fires (the UI marks the bubble cancelled);
     # idle does not (the Escape didn't land).
@@ -10416,12 +10425,18 @@ async def test_retry_session_keeps_error_actionable_when_runner_is_unavailable(
         "bare_connection_error",
         # Runner reachable but the cancel didn't land (claude-native 503 leg).
         "runner_503",
+        "runner_redirect",
         # No runner client resolves at all: nothing was forwarded anywhere.
         "no_runner_client",
+        "unbound_running",
+        "unbound_waiting",
+        "runner_lookup_error",
+        "runner_unexpected_error",
     ],
 )
 async def test_interrupt_forward_failure_lifts_stop_fence(
     client: httpx.AsyncClient,
+    db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
     failure_mode: str,
 ) -> None:
@@ -10446,7 +10461,9 @@ async def test_interrupt_forward_failure_lifts_stop_fence(
             if failure_mode == "bare_connection_error":
                 # What WSTunnelTransport raises when the tunnel closes mid-request.
                 raise ConnectionError("tunnel closed mid-request")
-            return httpx.Response(503, json={"error": "claude_native_interrupt_failed"})
+            if failure_mode == "runner_unexpected_error":
+                raise RuntimeError("interrupt store unavailable")
+            return httpx.Response(302 if failure_mode == "runner_redirect" else 503)
         return httpx.Response(204)
 
     fake_runner = httpx.AsyncClient(
@@ -10462,8 +10479,14 @@ async def test_interrupt_forward_failure_lifts_stop_fence(
     ) -> httpx.AsyncClient | None:
         """Resolve every session to the failing fake runner (or to none)."""
         assert conversation is None or conversation.id == session_id
+        if failure_mode == "runner_lookup_error" and session_id in _interrupt_fenced_sessions:
+            raise RuntimeError("interrupt store unavailable")
         del session_id, runner_router
-        return None if failure_mode == "no_runner_client" else fake_runner
+        return (
+            None
+            if failure_mode in ("no_runner_client", "unbound_running", "unbound_waiting")
+            else fake_runner
+        )
 
     monkeypatch.setattr(sessions_module, "_get_runner_client", _fake_get_runner_client)
     session_id: str | None = None
@@ -10471,14 +10494,26 @@ async def test_interrupt_forward_failure_lifts_stop_fence(
         agent = await create_test_agent(client)
         session = await _create_session(client, agent["id"])
         session_id = session["id"]
+        if failure_mode == "no_runner_client":
+            assert SqlAlchemyConversationStore(db_uri).set_runner_id(session_id, "offline-runner")
+        elif failure_mode.startswith("unbound_"):
+            SqlAlchemyConversationStore(db_uri).set_session_live_status(
+                session_id, failure_mode.removeprefix("unbound_")
+            )
 
-        resp = await client.post(
-            f"/v1/sessions/{session_id}/events",
-            json={"type": "interrupt", "data": {}},
-        )
-        # Interrupt is best-effort and still ACKs (the UI already marked the
-        # bubble interrupted); the fence removal below is the fix under test.
-        assert resp.status_code == 202, resp.text
+        if failure_mode in ("runner_lookup_error", "runner_unexpected_error"):
+            with pytest.raises(RuntimeError, match="interrupt store unavailable"):
+                await client.post(
+                    f"/v1/sessions/{session_id}/events",
+                    json={"type": "interrupt", "data": {}},
+                )
+        else:
+            resp = await client.post(
+                f"/v1/sessions/{session_id}/events",
+                json={"type": "interrupt", "data": {}},
+            )
+            assert resp.status_code == 503, resp.text
+            assert resp.json()["error"]["code"] == "runner_unavailable"
         assert session_id not in _interrupt_fenced_sessions, (
             "a failed interrupt forward must remove the fence it installed — "
             "leaving it set drops the rest of the still-running turn"
@@ -10765,12 +10800,14 @@ async def test_interrupt_forward_success_marks_queued_native_messages_interrupte
         "bare_connection_error",
         # Runner reachable but the cancel didn't land.
         "runner_503",
+        "runner_redirect",
         # No runner client resolves at all: nothing was forwarded anywhere.
         "no_runner_client",
     ],
 )
 async def test_interrupt_forward_failure_keeps_queued_native_messages_pending(
     client: httpx.AsyncClient,
+    db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
     failure_mode: str,
 ) -> None:
@@ -10792,7 +10829,7 @@ async def test_interrupt_forward_failure_keeps_queued_native_messages_pending(
             raise httpx.ConnectError("runner unreachable")
         if failure_mode == "bare_connection_error":
             raise ConnectionError("tunnel closed mid-request")
-        return httpx.Response(503, json={"error": "claude_native_interrupt_failed"})
+        return httpx.Response(302 if failure_mode == "runner_redirect" else 503)
 
     fake_runner = httpx.AsyncClient(
         transport=httpx.MockTransport(_handler),
@@ -10816,6 +10853,8 @@ async def test_interrupt_forward_failure_keeps_queued_native_messages_pending(
         agent = await create_test_agent(client)
         session = await _create_session(client, agent["id"])
         session_id = session["id"]
+        if failure_mode == "no_runner_client":
+            assert SqlAlchemyConversationStore(db_uri).set_runner_id(session_id, "offline-runner")
         queued = pending_inputs.record(session_id, [{"type": "input_text", "text": "still live"}])
 
         resp = await client.post(
@@ -10823,7 +10862,8 @@ async def test_interrupt_forward_failure_keeps_queued_native_messages_pending(
             json={"type": "interrupt", "data": {}},
         )
 
-        assert resp.status_code == 202, resp.text
+        assert resp.status_code == 503, resp.text
+        assert resp.json()["error"]["code"] == "runner_unavailable"
         assert [e["pending_id"] for e in pending_inputs.snapshot_for(session_id)] == [queued]
         assert pending_inputs.has_pending(session_id)
     finally:
@@ -10946,12 +10986,14 @@ def _queue_web_message(session_id: str, text: str) -> str:
     return pending_inputs.record(session_id, [{"type": "input_text", "text": text}])
 
 
-async def _press_stop(client: httpx.AsyncClient, session_id: str) -> None:
+async def _press_stop(
+    client: httpx.AsyncClient, session_id: str, *, delivered: bool = True
+) -> None:
     """POST an interrupt, as the web client's Stop button does."""
     response = await client.post(
         f"/v1/sessions/{session_id}/events", json={"type": "interrupt", "data": {}}
     )
-    assert response.status_code == 202, response.text
+    assert response.status_code == (202 if delivered else 503), response.text
 
 
 async def _mirror_user_message(
@@ -11026,7 +11068,7 @@ async def test_interrupted_native_message_is_not_reported_undelivered_by_a_later
         client, monkeypatch, interrupt_status=202 if delivered else 503
     ) as (session_id, published):
         cancelled = _queue_web_message(session_id, "cancel me")
-        await _press_stop(client, session_id)
+        await _press_stop(client, session_id, delivered=delivered)
         # The person's next message, sent after Stop, which the agent records.
         kept = _queue_web_message(session_id, "go on")
         await _mirror_user_message(client, session_id, "go on", "codex:go-on:0")
