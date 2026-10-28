@@ -1447,6 +1447,7 @@ function pinWindow(win, origin, attemptToKeep) {
 function setWindowServerUrl(win, serverUrl) {
   const state = windows.get(win);
   if (state) {
+    if (state.serverUrl !== serverUrl) state.fileOpenContext = Symbol("file-open-server");
     if (state.serverUrl && arcaTarget(state.serverUrl) !== arcaTarget(serverUrl)) {
       // Same-origin workspace/mount switches bypass pinWindow's origin teardown.
       state.browserRegistry?.closeAll("server-changed");
@@ -3091,7 +3092,7 @@ async function changeCachedOAuthToken(tokenType) {
  * @param {string} scheme The URL's scheme including the colon,
  *   e.g. ``"vscode:"``.
  */
-async function confirmExternalProtocol(win, url, scheme) {
+async function requestExternalProtocolConsent(win, url, scheme) {
   const pinned = pinnedOrigin(win);
   // The persisted grant applies only when the user is actually ON the
   // pinned server — a foreign page reached via redirect gets a fresh
@@ -3099,8 +3100,7 @@ async function confirmExternalProtocol(win, url, scheme) {
   const onPinnedServer = pinned !== null && originOf(win.webContents.getURL()) === pinned;
   const allowedSchemes = loadSettings().allowed_protocols?.[pinned] ?? [];
   if (onPinnedServer && allowedSchemes.includes(scheme)) {
-    void shell.openExternal(url);
-    return;
+    return true;
   }
   const requester = originOf(win.webContents.getURL());
   const { response, checkboxChecked } = await dialog.showMessageBox(win, {
@@ -3115,7 +3115,7 @@ async function confirmExternalProtocol(win, url, scheme) {
       : undefined,
     checkboxChecked: false,
   });
-  if (response !== 1) return;
+  if (response !== 1) return false;
   if (checkboxChecked && onPinnedServer) {
     const settings = loadSettings();
     const grants = settings.allowed_protocols ?? {};
@@ -3125,7 +3125,13 @@ async function confirmExternalProtocol(win, url, scheme) {
     settings.allowed_protocols = grants;
     saveSettings(settings);
   }
-  void shell.openExternal(url);
+  return true;
+}
+
+async function confirmExternalProtocol(win, url, scheme) {
+  if (await requestExternalProtocolConsent(win, url, scheme)) {
+    void shell.openExternal(url);
+  }
 }
 
 /**
@@ -4668,6 +4674,16 @@ function registerIpc() {
     shell,
     isPinnedOriginSender,
     localHostId: () => omnigentCli.localHostId(),
+    getServerContext: (event) => {
+      const state = windows.get(BrowserWindow.fromWebContents(event.sender));
+      return state?.fileOpenContext ?? state?.serverUrl ?? null;
+    },
+    confirmDefaultOpen: (event, filePath) => {
+      const win = BrowserWindow.fromWebContents(event.sender);
+      return win
+        ? requestExternalProtocolConsent(win, pathToFileURL(filePath).href, "file:")
+        : false;
+    },
     resolveSshHost: (event, hostId) => {
       const win = BrowserWindow.fromWebContents(event.sender);
       if (!win) return null;
