@@ -41,7 +41,7 @@ Preconditions: build this checkout's web UI and install its Playwright Chromium.
 ## Gotchas
 
 - Harnesses name the same kind of tool differently: Claude `Read`/`Bash`/`mcp__server__tool`, Codex `shell`/`apply_patch`, Pi and OpenCode lowercase `read`/`bash`, and SDK harnesses `server__tool` for spec-declared MCP servers. Codex does not mirror MCP calls into the transcript.
-- No tool-level error flag reaches the web. The destructive result line comes from the output text, so a tool that reports failure in another shape reads as a success.
+- No tool-level error flag reaches the web. The destructive result line comes from the output text, so a tool that reports failure in another shape reads as a success. For this reason a declined or failed Codex patch and a failed native Pi tool lead their output with `Error:`, and SDK Pi stores a failed result's object with `isError: true`.
 - A settled turn hides rows behind Worked and the summary line; open both before looking for a row.
 - Results too long to show in full skip the field view on purpose; check Expand there instead.
 - Prose fields show raw HTML as text, so a GitHub body's template comments and `<details>` tags appear as written; Raw shows the exact payload.

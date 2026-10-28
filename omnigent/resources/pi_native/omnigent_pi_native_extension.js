@@ -757,6 +757,13 @@ function textFromToolResult(event) {
   return "";
 }
 
+// The transcript has no error flag, so a failed result is marked in its text.
+function toolResultOutput(event) {
+  const text = textFromToolResult(event);
+  if (!event || event.isError !== true || /^error\s*:/i.test(text)) return text;
+  return `Error: ${text}`;
+}
+
 function contentBlocks(message) {
   if (
     !message ||
@@ -2109,7 +2116,7 @@ module.exports = function (pi) {
         item_type: "function_call_output",
         item_data: {
           call_id: callId,
-          output: textFromToolResult(event),
+          output: toolResultOutput(event),
         },
       },
       `pi:tool-result:${key}`,

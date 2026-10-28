@@ -409,8 +409,10 @@ def test_forwarder_posts_codex_file_change_tool_call() -> None:
             {"path": "/repo/greeting.py", "kind": {"type": "add"}, "diff": "print('hi')\n"}
         ]
     }
-    # Output summarizes each change as "<kind> <path>" from real fields.
-    assert posted[1]["data"]["item_data"]["output"] == "add /repo/greeting.py"
+    # Output leads with the outcome, then summarizes each change as "<kind> <path>".
+    assert posted[1]["data"]["item_data"]["output"] == (
+        "File change applied.\nadd /repo/greeting.py"
+    )
 
 
 def test_forwarder_sends_file_change_to_observer(
@@ -481,7 +483,7 @@ def test_forwarder_sends_file_change_to_observer(
 def test_forwarder_does_not_observe_unsuccessful_file_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str
 ) -> None:
-    """Failed or declined patches must not create phantom change records."""
+    """Failed or declined patches report the failure and create no change records."""
     (tmp_path / "tool_relay.json").write_text(
         json.dumps({"url": "http://relay.local", "token": "relay-secret"}),
         encoding="utf-8",
@@ -491,6 +493,7 @@ def test_forwarder_does_not_observe_unsuccessful_file_change(
         "urlopen",
         lambda *_args, **_kwargs: pytest.fail("unsuccessful patch reached file observer"),
     )
+    posted: list[dict[str, Any]] = []
 
     asyncio.run(
         _replay_completed_item(
@@ -500,9 +503,14 @@ def test_forwarder_does_not_observe_unsuccessful_file_change(
                 "changes": [{"path": "/repo/not-applied.py", "kind": {"type": "add"}}],
                 "status": status,
             },
-            lambda _request: httpx.Response(202, json={"queued": False}),
+            _capture_handler(posted),
             bridge_dir=tmp_path,
         )
+    )
+
+    # The error lead keeps the transcript from reading the patch as applied.
+    assert posted[1]["data"]["item_data"]["output"] == (
+        f"Error: File change ended with status {status}.\nadd /repo/not-applied.py"
     )
 
 
