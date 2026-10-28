@@ -1567,9 +1567,15 @@ async def test_managed_wake_fails_when_runner_never_reconnects(
     async def _launch_runner(*_args: object, **_kwargs: object) -> object:
         return sessions_module._HostLaunchAttempt(runner_id="runner_never_connects")
 
-    class _HostRegistry:
-        def get(self, _host_id: str) -> object:
-            return object()
+    host_registry = HostRegistry()
+    host_conn = host_registry.register(
+        conv.host_id,
+        ws=Mock(),
+        hello=HostHelloFrame(version="0.1.0-test", frame_protocol_version=1, name="test-host"),
+        owner=None,
+    )
+    # An older host does not answer status queries; retain the ordinary connect grace.
+    monkeypatch.setattr(sessions_module, "_HOST_RUNNER_STATUS_TIMEOUT_S", 0.01)
 
     class _TunnelRegistry:
         async def wait_for_runner(self, _runner_id: str, *, timeout_s: float) -> None:
@@ -1596,13 +1602,14 @@ async def test_managed_wake_fails_when_runner_never_reconnects(
         tracker=tracker,
         conversation_store=SimpleNamespace(get_conversation=lambda _sid: conv),
         host_store=SimpleNamespace(),
-        host_registry=_HostRegistry(),  # type: ignore[arg-type]
+        host_registry=host_registry,
         tunnel_registry=_TunnelRegistry(),  # type: ignore[arg-type]
     )
 
     launch = tracker.get(session_id)
     assert launch is not None
     assert launch.settled.is_set()
+    assert not host_conn.pending_runner_status
     assert launch.error == "managed runner did not connect after launch"
     assert stages[-1] == ("failed", "managed runner did not connect after launch")
 
@@ -1633,9 +1640,15 @@ async def test_managed_launch_fails_when_runner_never_connects(
     async def _fake_terminate(host: object, *_args: object, **_kwargs: object) -> None:
         terminated.append(host)
 
-    class _HostRegistry:
-        def get(self, _host_id: str) -> object:
-            return object()
+    host_registry = HostRegistry()
+    host_conn = host_registry.register(
+        host_id,
+        ws=Mock(),
+        hello=HostHelloFrame(version="0.1.0-test", frame_protocol_version=1, name="test-host"),
+        owner=None,
+    )
+    # An older host does not answer status queries; retain the ordinary connect grace.
+    monkeypatch.setattr(sessions_module, "_HOST_RUNNER_STATUS_TIMEOUT_S", 0.01)
 
     class _TunnelRegistry:
         async def wait_for_runner(self, _runner_id: str, *, timeout_s: float) -> None:
@@ -1672,13 +1685,14 @@ async def test_managed_launch_fails_when_runner_never_connects(
             set_host_id=lambda _sid, _host_id, _workspace: conv,
         ),
         host_store=_HostStore(),  # type: ignore[arg-type]
-        host_registry=_HostRegistry(),  # type: ignore[arg-type]
+        host_registry=host_registry,
         tunnel_registry=_TunnelRegistry(),  # type: ignore[arg-type]
     )
 
     launch = tracker.get(session_id)
     assert launch is not None
     assert launch.settled.is_set()
+    assert not host_conn.pending_runner_status
     assert launch.error == "managed runner did not connect after launch"
     assert stages[-1] == ("failed", "managed runner did not connect after launch")
     assert terminated == [sentinel_host]
@@ -1783,9 +1797,15 @@ async def test_managed_relaunch_failure_leaves_the_host_identity_alone(
     async def _fake_terminate(host: object, *_args: object, **_kwargs: object) -> None:
         terminated.append(host)
 
-    class _HostRegistry:
-        def get(self, _host_id: str) -> object:
-            return object()
+    host_registry = HostRegistry()
+    host_conn = host_registry.register(
+        host_id,
+        ws=Mock(),
+        hello=HostHelloFrame(version="0.1.0-test", frame_protocol_version=1, name="test-host"),
+        owner=None,
+    )
+    # An older host does not answer status queries; retain the ordinary connect grace.
+    monkeypatch.setattr(sessions_module, "_HOST_RUNNER_STATUS_TIMEOUT_S", 0.01)
 
     class _TunnelRegistry:
         async def wait_for_runner(self, _runner_id: str, *, timeout_s: float) -> None:
@@ -1816,7 +1836,7 @@ async def test_managed_relaunch_failure_leaves_the_host_identity_alone(
             set_host_id=lambda _sid, _host_id, _workspace: conv,
         ),
         host_store=_HostStore(),  # type: ignore[arg-type]
-        host_registry=_HostRegistry(),  # type: ignore[arg-type]
+        host_registry=host_registry,
         tunnel_registry=_TunnelRegistry(),  # type: ignore[arg-type]
         relaunch_host=object(),  # type: ignore[arg-type]
     )
@@ -1824,6 +1844,7 @@ async def test_managed_relaunch_failure_leaves_the_host_identity_alone(
     launch = tracker.get(session_id)
     assert launch is not None
     assert launch.settled.is_set()
+    assert not host_conn.pending_runner_status
     assert launch.error == "managed runner did not connect after launch"
     assert terminated == []
 
