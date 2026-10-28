@@ -1919,7 +1919,8 @@ async def test_run_turn_preserves_refused_input_but_keeps_post_submit_failures_a
 
     if refusal == "draft_persisted":
         assert enters >= 1
-        assert composer.text == "review this function"
+        # The bracketed-paste transport appends a protective newline before Enter.
+        assert composer.text == "review this function\n"
     else:
         assert enters == int(submitted)
     assert killed == []
