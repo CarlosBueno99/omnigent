@@ -97,6 +97,12 @@ from omnigent.runtime.harnesses._executor_adapter import (
 from omnigent.runtime.harnesses._scaffold import ToolResultEvent as _ToolResultEvent
 from omnigent.runtime.harnesses.process_manager import HarnessProcessManager
 from omnigent.runtime.prompt import EMBEDDED_BROWSER_PRIORITY_INSTRUCTION
+from omnigent.runtime.requester import (
+    REQUESTER_HEADER,
+    ExecutionRequester,
+    InputRequester,
+    ToolRequester,
+)
 from omnigent.server.schemas import CreateResponseRequest as _CreateResponseRequest
 from omnigent.spec.types import AgentSpec, ExecutorSpec, SharePolicy, ToolsConfig
 from omnigent.util.session_lifecycle import CLOSED_LABEL_KEY, CLOSED_LABEL_VALUE
@@ -3736,7 +3742,7 @@ async def test_sys_session_send_reuses_existing_child_session(
     Re-sending to the same ``(agent, title)`` continues the existing child.
 
     This catches the duplicate-create regression behind unreliable
-    continuation: if the runner POSTs ``/v1/sessions`` despite the existing
+    continuation: if the runner POSTs ``/v1/requester/sessions`` despite the existing
     child row, the test fails and the user would see a duplicate-title server
     error instead of a continuation. The parameterized ``args`` values also
     prove the runner preserves the public plain-string contract while accepting
@@ -3781,7 +3787,7 @@ async def test_sys_session_send_reuses_existing_child_session(
                     ]
                 },
             )
-        if request.method == "POST" and request.url.path == "/v1/sessions":
+        if request.method == "POST" and request.url.path == "/v1/requester/sessions":
             create_posts += 1
             return httpx.Response(500, json={"error": "duplicate"})
         if request.method == "PATCH" and request.url.path == "/v1/sessions/conv_existing":
@@ -3789,7 +3795,10 @@ async def test_sys_session_send_reuses_existing_child_session(
                 {"events_before": len(event_posts), **json.loads(request.content)["labels"]}
             )
             return httpx.Response(200, json={"ok": True})
-        if request.method == "POST" and request.url.path == "/v1/sessions/conv_existing/events":
+        if (
+            request.method == "POST"
+            and request.url.path == "/v1/requester/sessions/conv_existing/events"
+        ):
             event_posts.append(json.loads(request.content))
             return httpx.Response(200, json={"ok": True})
         return httpx.Response(404, json={"error": str(request.url)})
@@ -3862,9 +3871,12 @@ async def test_sys_session_send_named_child_retries_without_rejected_actor(
             and request.url.path == "/v1/sessions/conv_parent_retry/child_sessions"
         ):
             return httpx.Response(200, json={"data": []})
-        if request.method == "POST" and request.url.path == "/v1/sessions":
+        if request.method == "POST" and request.url.path == "/v1/requester/sessions":
             return httpx.Response(201, json={"id": "conv_child_retry"})
-        if request.method == "POST" and request.url.path == "/v1/sessions/conv_child_retry/events":
+        if (
+            request.method == "POST"
+            and request.url.path == "/v1/requester/sessions/conv_child_retry/events"
+        ):
             event_posts.append(json.loads(request.content))
             if len(event_posts) == 1:
                 return httpx.Response(403, json={"error": "created_by rejected"})
@@ -3931,7 +3943,7 @@ async def test_sys_session_send_existing_child_retries_without_rejected_actor(
             return httpx.Response(200, json={"ok": True})
         if (
             request.method == "POST"
-            and request.url.path == "/v1/sessions/conv_existing_retry/events"
+            and request.url.path == "/v1/requester/sessions/conv_existing_retry/events"
         ):
             event_posts.append(json.loads(request.content))
             if len(event_posts) == 1:
@@ -4029,10 +4041,13 @@ async def test_sys_session_send_model_lands_in_child_create_body(
             and request.url.path == "/v1/sessions/conv_parent_model/child_sessions"
         ):
             return httpx.Response(200, json={"data": []})
-        if request.method == "POST" and request.url.path == "/v1/sessions":
+        if request.method == "POST" and request.url.path == "/v1/requester/sessions":
             create_bodies.append(json.loads(request.content))
             return httpx.Response(201, json={"id": "conv_child_model"})
-        if request.method == "POST" and request.url.path == "/v1/sessions/conv_child_model/events":
+        if (
+            request.method == "POST"
+            and request.url.path == "/v1/requester/sessions/conv_child_model/events"
+        ):
             return httpx.Response(202, json={"queued": True})
         return httpx.Response(404, json={"error": str(request.url)})
 
@@ -4108,7 +4123,7 @@ async def test_sys_session_send_blocks_fresh_dispatch_when_harness_cli_missing(
             and request.url.path == "/v1/sessions/conv_parent_nopi/child_sessions"
         ):
             return httpx.Response(200, json={"data": []})
-        if request.method == "POST" and request.url.path == "/v1/sessions":
+        if request.method == "POST" and request.url.path == "/v1/requester/sessions":
             create_posts += 1
             return httpx.Response(201, json={"id": "conv_should_not_exist"})
         return httpx.Response(404, json={"error": str(request.url)})
@@ -4191,7 +4206,7 @@ async def test_sys_session_send_model_rejected_for_existing_child(
                     ]
                 },
             )
-        if request.method == "POST" and request.url.path == "/v1/sessions":
+        if request.method == "POST" and request.url.path == "/v1/requester/sessions":
             create_posts += 1
             return httpx.Response(201, json={"id": "conv_dup"})
         if request.method == "POST" and request.url.path.endswith("/events"):
@@ -4307,7 +4322,7 @@ async def test_sys_session_send_model_rejected_for_unplumbed_harness(
             and request.url.path == "/v1/sessions/conv_parent_unplumbed/child_sessions"
         ):
             return httpx.Response(200, json={"data": []})
-        if request.method == "POST" and request.url.path == "/v1/sessions":
+        if request.method == "POST" and request.url.path == "/v1/requester/sessions":
             create_posts += 1
             return httpx.Response(201, json={"id": "conv_never"})
         return httpx.Response(404, json={"error": str(request.url)})
@@ -4398,7 +4413,7 @@ async def test_sys_session_send_model_rejected_for_wrong_family(
             and request.url.path == "/v1/sessions/conv_parent_family/child_sessions"
         ):
             return httpx.Response(200, json={"data": []})
-        if request.method == "POST" and request.url.path == "/v1/sessions":
+        if request.method == "POST" and request.url.path == "/v1/requester/sessions":
             create_posts += 1
             return httpx.Response(201, json={"id": "conv_never"})
         return httpx.Response(404, json={"error": str(request.url)})
@@ -4541,7 +4556,7 @@ class _ModelSendResult:
     Outcome of one fresh-create ``sys_session_send`` model dispatch.
 
     :param output: The tool output string (JSON handle or ``Error:``).
-    :param create_bodies: The ``POST /v1/sessions`` bodies the mock
+    :param create_bodies: The ``POST /v1/requester/sessions`` bodies the mock
         server captured — the persisted ``model_override`` lives here.
     """
 
@@ -4580,10 +4595,13 @@ async def _dispatch_model_send(
             and request.url.path == f"/v1/sessions/{conv_id}/child_sessions"
         ):
             return httpx.Response(200, json={"data": []})
-        if request.method == "POST" and request.url.path == "/v1/sessions":
+        if request.method == "POST" and request.url.path == "/v1/requester/sessions":
             create_bodies.append(json.loads(request.content))
             return httpx.Response(201, json={"id": "conv_child_norm"})
-        if request.method == "POST" and request.url.path == "/v1/sessions/conv_child_norm/events":
+        if (
+            request.method == "POST"
+            and request.url.path == "/v1/requester/sessions/conv_child_norm/events"
+        ):
             return httpx.Response(202, json={"queued": True})
         return httpx.Response(404, json={"error": str(request.url)})
 
@@ -4935,7 +4953,10 @@ async def test_sys_session_send_by_id_rejects_closed_child(
                     "busy": False,
                 },
             )
-        if request.method == "POST" and request.url.path == "/v1/sessions/conv_closed/events":
+        if (
+            request.method == "POST"
+            and request.url.path == "/v1/requester/sessions/conv_closed/events"
+        ):
             event_posts += 1
             return httpx.Response(202, json={"queued": True})
         return httpx.Response(404, json={"error": str(request.url)})
@@ -5060,7 +5081,10 @@ async def test_sys_session_send_by_id_names_child_from_snapshot(
             )
         if request.method == "PATCH" and request.url.path == "/v1/sessions/conv_by_id_child":
             return httpx.Response(200, json={"ok": True})
-        if request.method == "POST" and request.url.path == "/v1/sessions/conv_by_id_child/events":
+        if (
+            request.method == "POST"
+            and request.url.path == "/v1/requester/sessions/conv_by_id_child/events"
+        ):
             return httpx.Response(202, json={"queued": True})
         return httpx.Response(404, json={"error": str(request.url)})
 
@@ -5137,13 +5161,16 @@ async def test_sys_session_send_completion_drains_from_parent_inbox(
             and request.url.path == "/v1/sessions/conv_parent_inbox/child_sessions"
         ):
             return httpx.Response(200, json={"data": []})
-        if request.method == "POST" and request.url.path == "/v1/sessions":
+        if request.method == "POST" and request.url.path == "/v1/requester/sessions":
             create_bodies.append(json.loads(request.content))
             return httpx.Response(201, json={"id": "conv_child_inbox"})
         if request.method == "PATCH" and request.url.path == "/v1/sessions/conv_child_inbox":
             label_patches.append(json.loads(request.content)["labels"])
             return httpx.Response(200, json={"ok": True})
-        if request.method == "POST" and request.url.path == "/v1/sessions/conv_child_inbox/events":
+        if (
+            request.method == "POST"
+            and request.url.path == "/v1/requester/sessions/conv_child_inbox/events"
+        ):
             return httpx.Response(202, json={"queued": True})
         if (
             request.method == "POST"
@@ -5245,11 +5272,14 @@ async def test_subagent_inbox_cleanup_does_not_unregister_next_turn(
                     ]
                 },
             )
-        if request.method == "POST" and request.url.path == "/v1/sessions":
+        if request.method == "POST" and request.url.path == "/v1/requester/sessions":
             return httpx.Response(201, json={"id": child_id})
         if request.method == "PATCH" and request.url.path == f"/v1/sessions/{child_id}":
             return httpx.Response(200, json={"ok": True})
-        if request.method == "POST" and request.url.path == f"/v1/sessions/{child_id}/events":
+        if (
+            request.method == "POST"
+            and request.url.path == f"/v1/requester/sessions/{child_id}/events"
+        ):
             return httpx.Response(202, json={"queued": True})
         if (
             request.method == "POST"
@@ -5887,7 +5917,7 @@ async def test_sys_cancel_task_stops_subagent_and_dedupes_late_completion(
             and request.url.path == "/v1/sessions/conv_parent_cancel/child_sessions"
         ):
             return httpx.Response(200, json={"data": []})
-        if request.method == "POST" and request.url.path == "/v1/sessions":
+        if request.method == "POST" and request.url.path == "/v1/requester/sessions":
             # claude-native sub-agent: the server stamps the wrapper label so
             # the cancel routes to stop_session (the hard-stop path).
             return httpx.Response(
@@ -5899,9 +5929,16 @@ async def test_sys_cancel_task_stops_subagent_and_dedupes_late_completion(
             )
         if (
             request.method == "POST"
+            and request.url.path == "/v1/requester/sessions/conv_child_cancel/events"
+        ):
+            assert json.loads(request.content)["type"] == "message"
+            return httpx.Response(202, json={"queued": True})
+        if (
+            request.method == "POST"
             and request.url.path == "/v1/sessions/conv_child_cancel/events"
         ):
             body = json.loads(request.content)
+            assert body["type"] == "stop_session"
             if body.get("type") == "stop_session":
                 stops.append(body)
                 subagent_work.mark_subagent_work_terminal(
@@ -8263,7 +8300,7 @@ async def test_sys_session_create_spawns_child_under_caller() -> None:
     captured: dict[str, Any] = {}
 
     async def _server_handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "POST" and request.url.path == "/v1/sessions":
+        if request.method == "POST" and request.url.path == "/v1/requester/sessions":
             captured.update(json.loads(request.content))
             return httpx.Response(
                 201,
@@ -8342,7 +8379,7 @@ async def test_sys_session_create_requires_exactly_one_mode(
 
 def _parse_multipart_create(request: httpx.Request) -> dict[str, Any]:
     """
-    Decode a captured multipart ``POST /v1/sessions`` request body.
+    Decode a captured multipart ``POST /v1/requester/sessions`` request body.
 
     Uses the stdlib email parser (multipart/form-data is MIME) rather
     than hand-rolled boundary splitting.
@@ -8368,8 +8405,10 @@ def _parse_multipart_create(request: httpx.Request) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("requester_user", [None, "bryan", "pat"])
 async def test_sys_session_create_bundle_mode_uploads_child_under_caller(
     tmp_path: Path,
+    requester_user: str | None,
 ) -> None:
     """
     Bundle mode bundles a local agent config, POSTs the multipart
@@ -8392,9 +8431,14 @@ async def test_sys_session_create_bundle_mode_uploads_child_under_caller(
 
     create_requests: list[httpx.Request] = []
     event_bodies: list[dict[str, Any]] = []
+    origin = InputRequester(
+        user_id=requester_user,
+        account_generation="generation" if requester_user is not None else None,
+    )
+    requester = ExecutionRequester(origin).snapshot()
 
     async def _server_handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "POST" and request.url.path == "/v1/sessions":
+        if request.method == "POST" and request.url.path == "/v1/requester/sessions":
             create_requests.append(request)
             return httpx.Response(
                 201,
@@ -8404,7 +8448,10 @@ async def test_sys_session_create_bundle_mode_uploads_child_under_caller(
                     "agent_name": "helper",
                 },
             )
-        if request.method == "POST" and request.url.path == "/v1/sessions/conv_child/events":
+        if (
+            request.method == "POST"
+            and request.url.path == "/v1/requester/sessions/conv_child/events"
+        ):
             event_bodies.append(json.loads(request.content))
             return httpx.Response(200, json={})
         return httpx.Response(404, json={"error": str(request.url)})
@@ -8421,6 +8468,7 @@ async def test_sys_session_create_bundle_mode_uploads_child_under_caller(
             server_client=server_client,
             conversation_id="conv_caller",
             runner_workspace=tmp_path,
+            requester=requester,
         )
 
     # Exactly one multipart create; parent forced to the caller
@@ -8442,8 +8490,18 @@ async def test_sys_session_create_bundle_mode_uploads_child_under_caller(
 
     # The optional message was queued as the child's first user event —
     # this is what starts the child's turn (same pattern as named send).
-    assert len(event_bodies) == 1
-    assert event_bodies[0]["data"]["content"][0]["text"] == "start"
+    assert event_bodies == [
+        {
+            "type": "message",
+            "requester": origin.model_dump(),
+            "data": {"role": "user", "content": [{"type": "input_text", "text": "start"}]},
+        }
+    ]
+    assert InputRequester.model_validate(event_bodies[0]["requester"]) == origin
+    assert (
+        ToolRequester.model_validate_json(create_requests[0].headers[REQUESTER_HEADER])
+        == requester
+    )
 
     handle = json.loads(output)
     assert handle["conversation_id"] == "conv_child"
@@ -9157,7 +9215,10 @@ async def test_sys_session_send_failed_continuation_receipts_its_dispatch(
         if request.method == "PATCH" and request.url.path == "/v1/sessions/conv_child":
             label_patches.append(json.loads(request.content)["labels"])
             return httpx.Response(200, json={"ok": True})
-        if request.method == "POST" and request.url.path == "/v1/sessions/conv_child/events":
+        if (
+            request.method == "POST"
+            and request.url.path == "/v1/requester/sessions/conv_child/events"
+        ):
             return httpx.Response(503, json={"error": "child unavailable"})
         return httpx.Response(404, json={"error": str(request.url)})
 
@@ -9220,7 +9281,10 @@ async def test_sys_session_send_session_id_posts_to_direct_child(
             )
         if request.method == "PATCH" and request.url.path == "/v1/sessions/conv_child":
             return httpx.Response(200, json={"ok": True})
-        if request.method == "POST" and request.url.path == "/v1/sessions/conv_child/events":
+        if (
+            request.method == "POST"
+            and request.url.path == "/v1/requester/sessions/conv_child/events"
+        ):
             event_posts.append(json.loads(request.content))
             return httpx.Response(200, json={"ok": True})
         return httpx.Response(404, json={"error": str(request.url)})
@@ -9276,7 +9340,7 @@ async def test_sys_session_send_session_id_rejects_non_child() -> None:
                     "title": "x:y",
                 },
             )
-        if request.url.path == "/v1/sessions/conv_other/events":
+        if request.url.path == "/v1/requester/sessions/conv_other/events":
             event_posts.append(json.loads(request.content))
             return httpx.Response(200, json={"ok": True})
         return httpx.Response(404, json={"error": str(request.url)})
@@ -10052,7 +10116,7 @@ async def test_web_fetch_dispatch_admits_researcher_without_harness_override(
     from an explicit ``args.harness``, never set on the web_fetch path), so the
     server-side reconstruction that resolves the researcher spec remains
     authoritative. This locks down that the fix reconciled the local resolvers
-    without altering what is POSTed to ``/v1/sessions``.
+    without altering what is POSTed to ``/v1/requester/sessions``.
     """
     import shutil
 
@@ -10085,10 +10149,13 @@ async def test_web_fetch_dispatch_admits_researcher_without_harness_override(
             and request.url.path == "/v1/sessions/conv_wf_parent/child_sessions"
         ):
             return httpx.Response(200, json={"data": []})
-        if request.method == "POST" and request.url.path == "/v1/sessions":
+        if request.method == "POST" and request.url.path == "/v1/requester/sessions":
             create_bodies.append(json.loads(request.content))
             return httpx.Response(201, json={"id": "conv_wf_child"})
-        if request.method == "POST" and request.url.path == "/v1/sessions/conv_wf_child/events":
+        if (
+            request.method == "POST"
+            and request.url.path == "/v1/requester/sessions/conv_wf_child/events"
+        ):
             return httpx.Response(202, json={"queued": True})
         return httpx.Response(404, json={"error": str(request.url)})
 
@@ -12600,7 +12667,7 @@ def _running_child_server_handler(
                     ]
                 },
             )
-        if request.method == "POST" and path == "/v1/sessions":
+        if request.method == "POST" and path == "/v1/requester/sessions":
             create_posts.append(1)
             return httpx.Response(500, json={"error": "duplicate"})
         if request.method == "PATCH" and path == f"/v1/sessions/{child_id}":
@@ -12611,7 +12678,7 @@ def _running_child_server_handler(
             if delete_posts is not None:
                 delete_posts.append(1)
             return httpx.Response(204)
-        if request.method == "POST" and path == f"/v1/sessions/{child_id}/events":
+        if request.method == "POST" and path == f"/v1/requester/sessions/{child_id}/events":
             event_posts.append(json.loads(request.content))
             return httpx.Response(events_status, json={"ok": events_status < 400})
         return httpx.Response(404, json={"error": str(request.url)})
@@ -13019,7 +13086,7 @@ async def test_named_send_defers_when_child_turn_still_launching(
             )
         if (
             request.method == "POST"
-            and request.url.path == "/v1/sessions/conv_launching_coder/events"
+            and request.url.path == "/v1/requester/sessions/conv_launching_coder/events"
         ):
             event_posts.append(json.loads(request.content))
             return httpx.Response(200, json={"ok": True})
@@ -13093,7 +13160,10 @@ async def test_send_by_session_id_reuses_running_child_without_restamp() -> None
             labels = json.loads(request.content)["labels"]
             stamped.append(labels[subagent_work.SUBAGENT_DISPATCH_ID_LABEL_KEY])
             return httpx.Response(200, json={"ok": True})
-        if request.method == "POST" and request.url.path == "/v1/sessions/conv_byid_coder/events":
+        if (
+            request.method == "POST"
+            and request.url.path == "/v1/requester/sessions/conv_byid_coder/events"
+        ):
             event_posts.append(json.loads(request.content))
             return httpx.Response(200, json={"ok": True})
         return httpx.Response(404, json={"error": str(request.url)})

@@ -240,6 +240,21 @@ class NativeRequesterQuery(BaseModel):
     codex_execution: dict[str, str]
 
 
+class NativeInputRegistration(BaseModel):
+    """Terminal input accepted only over the authenticated harness control channel."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    requester: InputRequester
+    thread_id: str = Field(min_length=1, max_length=256)
+    provider_url: str = Field(min_length=1, max_length=4096)
+    expected_turn_id: str | None = Field(default=None, min_length=1, max_length=256)
+
+
+class NativeInputRefusal(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    client_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+
 class MessageEvent(BaseModel):
     """
     Downward ``message`` event — start a new turn or steer an in-flight one.
@@ -1181,7 +1196,52 @@ class HarnessApp:
             self._native_requester,
             methods=["POST"],
         )
+        router.add_api_route(
+            "/sessions/{conversation_id}/native-input",
+            self._native_input,
+            methods=["POST"],
+        )
+        router.add_api_route(
+            "/sessions/{conversation_id}/native-input/refused",
+            self._native_input_refused,
+            methods=["POST"],
+        )
         return router
+
+    def register_native_input(self, body: NativeInputRegistration) -> str:
+        raise RuntimeError("Native input registration is unavailable")
+
+    def refuse_native_input(self, client_id: str) -> None:
+        raise RuntimeError("Native input registration is unavailable")
+
+    async def _native_input(
+        self, conversation_id: str, body: NativeInputRegistration, request: Request
+    ) -> Response:
+        denied = self._check_auth(request)
+        if denied is not None:
+            return denied
+        self._check_conversation_id(request, conversation_id)
+        try:
+            return JSONResponse({"client_id": self.register_native_input(body)})
+        except (RuntimeError, ValueError):
+            return JSONResponse(
+                {"detail": "Native input registration unavailable"}, status_code=503
+            )
+
+    async def _native_input_refused(
+        self, conversation_id: str, body: NativeInputRefusal, request: Request
+    ) -> Response:
+        denied = self._check_auth(request)
+        if denied is not None:
+            return denied
+        self._check_conversation_id(request, conversation_id)
+        try:
+            self.refuse_native_input(body.client_id)
+        except (RuntimeError, ValueError):
+            return JSONResponse(
+                {"detail": "Native input registration unavailable"}, status_code=503
+            )
+        return Response(status_code=204)
 
     async def native_tool_requester(self, execution: dict[str, str]) -> ToolRequester | None:
         """Unrecognized executors cannot establish native requester authority."""

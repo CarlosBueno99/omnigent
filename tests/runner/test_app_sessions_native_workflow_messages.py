@@ -8,6 +8,7 @@ import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -19,8 +20,14 @@ from omnigent.runner import create_runner_app
 from omnigent.runner.resource_registry import (
     SessionResourceRegistry,
 )
-from omnigent.runtime.requester import REQUESTER_FIELD, InputRequester, ToolRequester
+from omnigent.runtime.requester import (
+    REQUESTER_FIELD,
+    ExecutionRequester,
+    InputRequester,
+    ToolRequester,
+)
 from omnigent.spec.types import AgentSpec, ExecutorSpec
+from tests._helpers.polling import poll_until_async
 from tests.runner.conftest import (
     _BlockingHarnessClient,
     _build_lifecycle_app,
@@ -144,6 +151,105 @@ async def test_proxy_stream_relays_non_json_sse_frame() -> None:
     assert response.status_code == 200
     assert "event: heartbeat\n\n" in response.text
     assert '"response.completed"' in response.text
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        "absent",
+        "retained",
+        "unknown",
+        "null",
+        "invalid-id",
+        "extra-field",
+        "non-strict-origin",
+        "missing-origin",
+        "list",
+    ],
+)
+async def test_tool_requester_metadata_does_not_abort_stream(metadata, monkeypatch) -> None:
+    """Protected snapshots survive SSE decoding; malformed ones confer no authority."""
+    owner = InputRequester(user_id="bryan", account_generation="owner-generation")
+    # Harness contexts and retained native executions mint IDs independently.
+    retained = ExecutionRequester(
+        InputRequester(user_id="pat", account_generation="collaborator-generation")
+    ).snapshot()
+    if metadata == "unknown":
+        retained = ExecutionRequester(InputRequester()).snapshot()
+    payload: Any = retained.model_dump()
+    if metadata == "null":
+        payload = None
+    elif metadata == "invalid-id":
+        payload["execution_id"] = "invalid"
+    elif metadata == "extra-field":
+        payload["unexpected"] = True
+    elif metadata == "non-strict-origin":
+        payload["origin"]["user_id"] = 123
+    elif metadata == "missing-origin":
+        del payload["origin"]
+    elif metadata == "list":
+        payload = []
+
+    frames = [_sse({"type": "response.created", "response": {"id": "resp_1"}})]
+    for call_id in ("before", "protected", "after"):
+        item = {
+            "type": "function_call",
+            "status": "action_required",
+            "name": "sys_session_message",
+            "call_id": call_id,
+            "arguments": "{}",
+        }
+        if call_id == "protected" and metadata != "absent":
+            item[REQUESTER_FIELD] = payload
+        frames.append(_sse({"type": "response.output_item.done", "item": item}))
+    frames.append(_sse({"type": "response.completed", "response": {"id": "resp_1"}}))
+    hc = _ScriptedHarnessClient(frames)
+    spec = AgentSpec(spec_version=1, name="t")
+
+    async def resolver(agent_id, session_id=None):
+        return spec
+
+    app = create_runner_app(
+        process_manager=_FakeProcessManager(hc),  # type: ignore[arg-type]
+        spec_resolver=resolver,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    calls: dict[str, ToolRequester] = {}
+
+    async def capture_call(**kwargs):
+        calls[kwargs["call_id"]] = kwargs["requester"]
+        return "{}"
+
+    monkeypatch.setattr("omnigent.runner.tool_dispatch.dispatch_tool_locally", capture_call)
+    session_id = uuid4().hex
+    async with _runner_client(app) as client:
+        response = await client.post(
+            f"/v1/sessions/{session_id}/events?stream=true",
+            json={
+                "type": "message",
+                "role": "user",
+                "model": "test-agent",
+                "agent_id": "b" * 32,
+                "harness": "openai-agents",
+                "content": [{"type": "input_text", "text": "owner work"}],
+                REQUESTER_FIELD: owner.model_dump(),
+            },
+        )
+    assert response.status_code == 200
+    assert '"response.completed"' in response.text
+    assert '"response.failed"' not in response.text
+    assert set(calls) == {"before", "protected", "after"}
+    assert calls["before"].origin == owner
+    assert calls["after"] == calls["before"]
+    if metadata == "absent":
+        assert calls["protected"] == calls["before"]
+    elif metadata in {"retained", "unknown"}:
+        assert calls["protected"] == retained
+        assert retained.execution_id != calls["before"].execution_id
+    else:
+        assert calls["protected"].origin.user_id is None
+        assert calls["protected"].origin.account_generation is None
+        assert calls["protected"].origin.input_id != owner.input_id
 
 
 @pytest.mark.asyncio
@@ -472,6 +578,8 @@ class _HandshakeHarnessClient(_ScriptedHarnessClient):
                     if retained_requester is not None:
                         yield probe("retained", retained_requester)
                 await gate.wait()
+                if probe_tools:
+                    yield probe("pending")
                 # Mirror the executor adapter: once injections are consumed
                 # into the running turn, echo each correlation id back.
                 for inj_id in list(consumed_ids):
@@ -657,6 +765,121 @@ async def test_midturn_message_not_double_delivered_to_harness(monkeypatch) -> N
     # The only second turn is the explicitly submitted fresh owner message.
     assert len(hc.posted_bodies) == 2
     assert _body_contains_text(hc.posted_bodies[1], "fresh owner work")
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "error_type", "consumed"),
+    [
+        pytest.param("client", RuntimeError, False, id="client-runtime-error"),
+        pytest.param("client", TimeoutError, False, id="client-timeout"),
+        pytest.param("post", httpx.ReadTimeout, False, id="post-read-timeout-unconfirmed"),
+        pytest.param("post", httpx.ReadTimeout, True, id="post-read-timeout-consumed"),
+        pytest.param("post", httpx.WriteError, False, id="post-write-error"),
+        pytest.param("post", RuntimeError, True, id="post-runtime-error-consumed"),
+        pytest.param("post", TimeoutError, False, id="post-timeout-unconfirmed"),
+    ],
+)
+async def test_injection_failure_preserves_requester_delivery_uncertainty(
+    failure_stage, error_type, consumed, monkeypatch
+) -> None:
+    """Only failure before POST proves an injection was never delivered."""
+    gate = asyncio.Event()
+    app, pm, hc = _build_handshake_app(gate)
+    hc.probe_tools = True
+    calls: dict[str, ToolRequester] = {}
+
+    async def capture_call(**kwargs):
+        calls[kwargs["call_id"]] = kwargs["requester"]
+        return "{}"
+
+    monkeypatch.setattr("omnigent.runner.tool_dispatch.dispatch_tool_locally", capture_call)
+    get_client = pm.get_client
+
+    async def fail_get_client(conversation_id, harness, env=None):
+        if harness == "any":
+            raise error_type("client unavailable before submission")
+        return await get_client(conversation_id, harness, env)
+
+    attempted: list[dict[str, Any]] = []
+    post = hc.post
+
+    async def fail_post(url, *, json, timeout=None):
+        attempted.append(json)
+        if consumed:
+            await post(url, json=json, timeout=timeout)
+        raise error_type("delivery outcome unavailable")
+
+    session_id = uuid4().hex
+    owner = InputRequester(user_id="bryan", account_generation="owner-generation")
+    collaborator = InputRequester(user_id="pat", account_generation="collaborator-generation")
+    message = {
+        "type": "message",
+        "role": "user",
+        "model": "test-agent",
+        "agent_id": "b" * 32,
+        "harness": "openai-agents",
+    }
+    async with _runner_client(app) as client:
+        first = await client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={
+                **message,
+                "content": [{"type": "input_text", "text": "owner work"}],
+                REQUESTER_FIELD: owner.model_dump(),
+            },
+        )
+        assert first.status_code == 202
+        await poll_until_async(lambda: "1_before" in calls)
+        assert calls["1_before"].origin == owner
+
+        monkeypatch.setattr(
+            pm if failure_stage == "client" else hc,
+            "get_client" if failure_stage == "client" else "post",
+            fail_get_client if failure_stage == "client" else fail_post,
+        )
+        second = await client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={
+                **message,
+                "content": [{"type": "input_text", "text": "collaborator steer"}],
+                REQUESTER_FIELD: collaborator.model_dump(),
+            },
+        )
+        assert second.status_code == 202
+        assert second.json()["status"] == "buffered"
+
+        if failure_stage == "post":
+            # A later, definitely unsent message cannot clear an older uncertainty.
+            monkeypatch.setattr(pm, "get_client", fail_get_client)
+            third = await client.post(
+                f"/v1/sessions/{session_id}/events",
+                json={
+                    **message,
+                    "content": [{"type": "input_text", "text": "owner follow-up"}],
+                    REQUESTER_FIELD: owner.model_dump(),
+                },
+            )
+            assert third.status_code == 202
+            assert third.json()["status"] == "buffered"
+            assert len(attempted) == 1
+            assert attempted[0]["injection_id"]
+            assert InputRequester.from_body(attempted[0]) == collaborator
+        else:
+            assert not attempted
+            assert not hc.patched_events
+
+        gate.set()
+        await poll_until_async(lambda: "1_after" in calls and not app.state.active_turns)
+
+    for phase in ("pending", "after"):
+        requester = calls[f"1_{phase}"]
+        assert requester.execution_id == calls["1_before"].execution_id
+        if failure_stage == "client":
+            assert requester.origin == owner
+        else:
+            assert requester.origin.user_id is None
+            assert requester.origin.account_generation is None
+    assert calls["1_before"].origin == owner
 
 
 class _RefusingSteerHarnessClient(_HandshakeHarnessClient):

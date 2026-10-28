@@ -289,6 +289,48 @@ async def test_sharing_during_receiver_startup_preserves_owner_delivery(
     assert "Please inspect" in items.text
 
 
+@pytest.mark.parametrize("operation", ["message", "child", "same_host"])
+async def test_requester_routes_refuse_servers_with_only_legacy_orchestration(
+    auth_client, auth_app, peers, db_uri, monkeypatch, operation
+):
+    source, target, captured = peers
+    routes = auth_app.router.routes
+    assert any(route.path == "/v1/sessions/orchestrated" for route in routes)
+    assert any(route.path == "/v1/sessions/{session_id}/events" for route in routes)
+    monkeypatch.setattr(
+        auth_app.router,
+        "routes",
+        [route for route in routes if not route.path.startswith("/v1/requester/")],
+    )
+    store = SqlAlchemyConversationStore(db_uri)
+    before = {session.id for session in store.list_conversations().data}
+    if operation == "message":
+        result = await _send(auth_client, source, target)
+    else:
+        result = json.loads(
+            await execute_tool(
+                tool_name="sys_session_create",
+                arguments=json.dumps(
+                    {
+                        "agent_id": source["agent_id"],
+                        "placement": operation,
+                        "message": "Work must keep its requester",
+                    }
+                ),
+                requester=_requester(),
+                server_client=auth_client,
+                conversation_id=source["id"],
+            )
+        )
+    assert "error" in result, result
+    assert not captured.get("posts")
+    assert {session.id for session in store.list_conversations().data} == before
+    assert (
+        "Work must keep its requester"
+        not in (await auth_client.get(f"/v1/sessions/{target['id']}/items")).text
+    )
+
+
 @pytest.mark.parametrize("requester_user", ["alice", "bob", None])
 async def test_child_inherits_source_requester(auth_client, peers, db_uri, requester_user):
     source, target, captured = peers

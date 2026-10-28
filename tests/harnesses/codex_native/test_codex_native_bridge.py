@@ -1611,6 +1611,7 @@ def test_requester_registry_tracks_consumption_pending_and_delayed_calls() -> No
     pending = registry.snapshot(identity, response, revision=registry.revision)
     assert pending is not None and pending.origin.user_id is None
     registry.finish(refused, refused=True)
+    assert refused not in registry._submissions
     assert registry.snapshot(identity, response, revision=registry.revision) == original
 
     # A start receipt is not a consumption binding: it can join the old turn.

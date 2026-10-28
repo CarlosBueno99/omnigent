@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 import httpx
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from pydantic import ValidationError
 
 from omnigent.acp_cli_harnesses import ACP_CLI_HARNESSES
 from omnigent.debug_logging import (
@@ -2788,6 +2789,7 @@ def create_runner_app(
                 server_client=server_client,
                 event_dispatcher=getattr(app.state, "runner_event_dispatcher", None),
                 ensure_comment_relay=_ensure_comment_relay_started,
+                harness_manager=process_manager,
                 rebind_bridge=_rebind_claude_bridge,
             )
             _launch_pre: Callable[[bool], Awaitable[PreLaunchResult]] | None = None
@@ -6187,9 +6189,22 @@ def create_runner_app(
                                             isinstance(_requester_item, dict)
                                             and REQUESTER_FIELD in _requester_item
                                         ):
-                                            _tool_requester = ToolRequester.model_validate(
-                                                _requester_item[REQUESTER_FIELD]
-                                            )
+                                            # Harness contexts and retained native executions
+                                            # mint their own IDs, independently of this runner.
+                                            try:
+                                                _tool_requester = ToolRequester.model_validate(
+                                                    _requester_item[REQUESTER_FIELD]
+                                                )
+                                            except ValidationError:
+                                                _tool_requester = ExecutionRequester(
+                                                    InputRequester()
+                                                ).snapshot()
+                                                _logger.warning(
+                                                    "Invalid protected tool requester for %s; "
+                                                    "using unknown origin",
+                                                    conv_id,
+                                                    extra={"session_id": conv_id},
+                                                )
                                         _dispatch_tasks.append(
                                             _asyncio.create_task(
                                                 dispatch_tool_locally(
@@ -6669,13 +6684,15 @@ def create_runner_app(
                     ).append(message_body)
                     if _can_forward and process_manager is not None:
                         _requester = _execution_requesters.get(conversation_id)
-                        if _requester is not None:
-                            _requester.begin_injection(
-                                str(message_body["injection_id"]),
-                                InputRequester.from_body(message_body),
-                            )
                         try:
                             _hc = await process_manager.get_client(conversation_id, "any")
+                            # Acquiring the client cannot deliver this input. Register
+                            # immediately before POST, whose outcome may be ambiguous.
+                            if _requester is not None:
+                                _requester.begin_injection(
+                                    str(message_body["injection_id"]),
+                                    InputRequester.from_body(message_body),
+                                )
                             _injection_resp = await _hc.post(
                                 f"/v1/sessions/{conversation_id}/events",
                                 json=message_body,
@@ -6703,9 +6720,10 @@ def create_runner_app(
                                     extra={"session_id": conversation_id},
                                 )
                         except (TimeoutError, httpx.HTTPError, RuntimeError):
+                            # A POST failure may follow consumption; retain the restriction.
                             _logger.debug(
                                 "mid-turn injection forward failed for %s; "
-                                "LLM will see message on next turn",
+                                "message remains buffered until consumption is confirmed",
                                 conversation_id,
                                 exc_info=True,
                                 extra={"session_id": conversation_id},
@@ -7448,6 +7466,7 @@ def create_runner_app(
         resource_registry=resource_registry,
         server_client=server_client,
         terminal_registry=terminal_registry,
+        harness_manager=process_manager,
     )
     _ensure_native_terminal_for_turn = _resource_routes.ensure_native_terminal_for_turn
     _require_os_env = _resource_routes.require_os_env

@@ -5,11 +5,12 @@ same user, then read its status/history. It can also create private top-level
 workers on its host or a new managed sandbox. This is enabled by default, with
 `-session_orchestration` in `OMNIGENT_FEATURES` as a server kill switch.
 
-Shared-source support in this branch is a prototype. OpenAI Agents SDK and
-Codex-native web Chat have process and browser evidence. Native terminal input,
-provider-native helpers, Claude requester binding and old-server compatibility
-still require work before rollout. Sharing and this plumbing belong to one
-change; a passing web journey does not establish full harness compatibility.
+Shared-source support remains under review. OpenAI Agents SDK, Codex-native
+Chat and authenticated host-managed Codex terminal input have process evidence.
+Claude SDK requester binding is implemented, with isolated process validation
+pending. Native Claude, provider-created helpers and standalone Codex delegation
+remain unresolved compatibility limits; typing and ordinary helper work remain
+available. Do not infer support from another harness's passing journey.
 
 ## Sub-features
 
@@ -81,8 +82,14 @@ the header states are covered by `web/src/shell/ChatHeader.test.tsx`.
   sharing behavior. Both rows check shared owner requests, collaborator refusal
   for messaging and creation, fresh owner recovery, and owner side-chat delegation.
   The Codex row uses web submissions with provider consumption IDs and resolves
-  each tool's retained execution through authenticated harness IPC. This does not
-  cover typed terminal input or provider-native helper delegation.
+  each tool's retained execution through authenticated harness IPC. Its default
+  row sends the first task and creates a worker through the real terminal WebSocket,
+  including authenticated local single-user identity, then exercises Chat on the
+  same executor. Reattachment uses the same observed terminal. Provider-native
+  helper delegation and the standalone CLI launcher are not covered.
+  Claude SDK rows require the lockfile SDK and pinned CLI inside a clean Linux
+  container with loopback-only networking; they skip before probing Claude on
+  an ordinary workstation. A skip is not Claude process validation.
   It also checks that unconfigured managed creation gives a clear
   refusal without creating a session. Codex and tmux are required for the native row.
   Both harnesses also exercise a server restart with the explicit kill switch:
@@ -118,17 +125,19 @@ the header states are covered by `web/src/shell/ChatHeader.test.tsx`.
   | --- | --- | --- |
   | OpenAI Agents SDK Chat/API | Implemented | Real process send/create, editor refusal, fresh owner recovery and kill switch. |
   | Codex native web Chat | Implemented | Pinned CLI consumption IDs, authenticated harness lookup, browser actions and destination history. |
-  | Claude SDK Chat/API | Blocked, including private sessions | SDK must preserve a retained call-to-input binding; current component tests prove refusal only. |
+  | Claude SDK Chat/API | Implemented; process proof pending | Raw provider UUID echoes and exact SDK control tasks retain input/tool lineage before typed parsing. Component tests cover delayed callbacks; isolated pinned-process rows must pass. |
   | Claude native Chat/terminal | Blocked | PTY input must bind its actual requester to consumed execution and retained calls. Typing remains available. |
-  | Codex native terminal/local CLI | Blocked | Track the authenticated writer across relay/direct/local attachment, then register the composed submission before consumption. Typing remains available. |
+  | Codex host-managed terminal / default CLI attach | Implemented | Authenticated relay captures writers; the TUI proxy registers input before submission. Real terminal WebSocket send/create passes. Local CLI attach selection has component coverage. |
+  | Codex standalone CLI launcher | Delegation blocked | Typing remains available; this launcher has not integrated trusted input registration. |
   | Provider-native children/helpers | Incomplete | Preserve each input's requester through child creation, steering, queue consumption and wakes. Ordinary helper visibility is not proof. |
   | Legacy runner → updated server | Refused without requester | Private/shared sends and creates leave no new task or worker; ordinary child work keeps unknown origin. |
-  | Updated runner → older/mixed server replicas | Unverified | Explicit refusal before writes when a receiving server cannot preserve requester metadata. A capability read on another replica is insufficient. |
+  | Updated runner → older/mixed server replicas | Refuses unsupported receiving routes | Mutations require `/v1/requester/sessions` and its events route, with no legacy fallback. ASGI route-absence tests include servers that already have the older orchestrated endpoint; no released-binary mixed-replica process run. |
 
 - Component compatibility checks: `tests/runtime/harnesses/test_executor_adapter_requester.py`
   exercises retained callbacks with the real SDK parser/dispatcher. The Claude
-  scenario verifies that lost metadata stays unknown even after fresh owner
-  input; it is a refusal test, not successful Claude delegation.
+  scenarios verify retained SDK callback binding and that lost metadata stays
+  unknown even after fresh owner input. These are component checks, not Claude
+  process evidence.
   `tests/server/integration/test_session_orchestration.py` checks owner/editor/
   missing requester across child startup, peer delivery, sharing changes and
   durable queues. `tests/inner/test_acp_executor.py` and
@@ -143,8 +152,8 @@ the header states are covered by `web/src/shell/ChatHeader.test.tsx`.
   Append `-session_orchestration` to the isolated server's feature settings and
   restart it, then repeat from a private manager: expect a disabled error, no new
   task and no independent worker. Read history/info to confirm reads still work.
-- Live sandbox provisioning and native terminal-entered prompts require separate
-  verification; local process checks do not cover them.
+- Live sandbox provisioning, native Claude and standalone Codex delegation require
+  separate verification; local host-managed Codex process checks do not cover them.
 
 ## Gotchas
 
@@ -172,10 +181,16 @@ the header states are covered by `web/src/shell/ChatHeader.test.tsx`.
   An early wrong-replica refusal creates no row; a late launch failure may leave
   one that the owner can inspect. Keyless legacy routing must be configured on
   the runner; independent creation has no automatic routing fallback.
-- Independent creation uses `/v1/sessions/orchestrated`, which requires a source;
-  older servers without that route cannot silently accept ordinary creation.
-  A server that already has the route but predates requester tracking still
-  needs a protocol boundary; the current route alone does not establish it.
+- Runner creation and message mutations use the internal `/v1/requester/sessions`
+  route family, which reuses the ordinary handlers but cannot exist on a server
+  predating requester preservation. There is no fallback to ordinary or legacy
+  orchestrated routes. Public UI/API routes keep their existing paths.
+- Codex terminal identity accumulates across the terminal process incarnation.
+  Unknown or mixed writers keep terminal-origin delegation restricted until the
+  terminal restarts; reconnecting cannot clear it. Fresh authenticated owner Chat
+  starts an independent execution. This conservative terminal rule does not claim
+  per-prompt recovery for an ambiguously shared composer. Generic runner-bearer
+  attachments and programmatic terminal writes establish no human identity.
 - A shared receiver can continue working. A verified owner execution can send
   another message; sharing does not add automatic completion replies.
 - Requester and ownership checks govern these tools. They do not confine arbitrary code holding

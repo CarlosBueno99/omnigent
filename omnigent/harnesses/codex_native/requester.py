@@ -18,12 +18,16 @@ class _Submission:
     thread_id: str
     expected_turn_id: str | None
     origin: InputRequester
-    refused: bool = False
     consumed_by: str | None = None
 
 
 class CodexRequesterRegistry:
-    """Retain inputs and execution restrictions in an explicitly owned instance."""
+    """Retain inputs and execution restrictions in an explicitly owned instance.
+
+    Consumed inputs and executions live until scope replacement: completion
+    cannot rule out delayed calls. Each lookup checks the full provider history
+    for copied IDs; eviction or cached authority would lose that evidence.
+    """
 
     def __init__(self) -> None:
         self.revision = 0
@@ -43,7 +47,7 @@ class CodexRequesterRegistry:
         if submission is None:
             raise ValueError("Native input registration is missing")
         if refused:
-            submission.refused = True
+            del self._submissions[client_id]
             self.revision += 1
 
     def snapshot(
@@ -97,7 +101,6 @@ class CodexRequesterRegistry:
             if (
                 not isinstance(client_id, str)
                 or submission is None
-                or submission.refused
                 or submission.thread_id != identity.thread_id
                 or consumed.get(client_id) != [identity.turn_id]
                 or submission.expected_turn_id not in (None, identity.turn_id)
@@ -108,7 +111,10 @@ class CodexRequesterRegistry:
                 origins.append(submission.origin)
         if not origins:
             return None
-        execution = self._executions.setdefault(identity, ExecutionRequester(origins[0]))
+        execution = self._executions.get(identity)
+        if execution is None:
+            execution = ExecutionRequester(origins[0])
+            self._executions[identity] = execution
         for origin in origins:
             execution.consume(origin)
         for client_id, submission in self._submissions.items():
@@ -122,10 +128,9 @@ class CodexRequesterRegistry:
                 submission.consumed_by = locations[0]
             elif locations:
                 submission.consumed_by = None
-            if (
-                not submission.refused
-                and submission.consumed_by is None
-                and submission.expected_turn_id in (None, identity.turn_id)
+            if submission.consumed_by is None and submission.expected_turn_id in (
+                None,
+                identity.turn_id,
             ):
                 return ToolRequester(execution_id=execution.execution_id, origin=InputRequester())
         return execution.snapshot()

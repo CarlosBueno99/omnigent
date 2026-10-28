@@ -36,6 +36,7 @@ from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.native import owner_claim
 from omnigent.process_logging import redact_log_text
 from omnigent.runner.identity import strip_runner_auth_secrets
+from omnigent.terminals.writer import TerminalWriter, TerminalWriterEvidence
 from omnigent.util.tmux_compat import MIN_TMUX_VERSION, MIN_TMUX_VERSION_HINT, tmux_version
 
 if TYPE_CHECKING:
@@ -1127,6 +1128,11 @@ class TerminalInstance:
     # Runtime-owned observation; never part of the portable terminal spec.
     program_status_app: str | None = None
     program_status: ProgramStatusReader | None = field(default=None, init=False, repr=False)
+    # Opt in only when every supported writer is routed through observed input.
+    complete_writer_observation: bool = False
+    writer_evidence: TerminalWriterEvidence = field(
+        default_factory=lambda: TerminalWriterEvidence(uuid.uuid4().hex), init=False, repr=False
+    )
     # Owned per-launch egress proxy. ``None`` when the sandbox
     # carries no ``egress_rules`` or the backend doesn't need a
     # spawn-time wrap (the ``none`` backend does nothing here). Cleaned
@@ -1635,6 +1641,9 @@ class TerminalInstance:
 
         if self.running:
             return
+        self.writer_evidence = TerminalWriterEvidence(
+            uuid.uuid4().hex, complete_observation=self.complete_writer_observation
+        )
         self._last_exit_snapshot = None
         self._last_exit_status = None
         self._last_exit_signal = None
@@ -1818,6 +1827,8 @@ class TerminalInstance:
         if not self.running:
             return {"error": "Terminal is not running"}
 
+        if text or keys.split():
+            self.writer_evidence.record(TerminalWriter())
         try:
             if text:
                 for start in range(0, len(text), _SEND_KEYS_LITERAL_CHARS_PER_CALL):

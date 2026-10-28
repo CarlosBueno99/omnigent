@@ -1126,6 +1126,17 @@ async def test_control_auth_is_per_spawn_and_absent_from_child_environment(
         REQUESTER_FIELD: InputRequester(user_id="pat@example.test").model_dump(),
     }
     native_query = {"codex_execution": {"thread_id": "test-thread", "turn_id": "test-turn"}}
+    native_registration = {
+        "thread_id": "test-thread",
+        "provider_url": "ws://127.0.0.1:12345",
+        "requester": InputRequester(user_id="pat@example.test").model_dump(),
+    }
+    protected_calls = (
+        (events_url, message),
+        (requester_url, native_query),
+        (f"/v1/sessions/{conv_id}/native-input", native_registration),
+        (f"/v1/sessions/{conv_id}/native-input/refused", {"client_id": "a" * 32}),
+    )
     try:
         client = await manager.get_client(
             conv_id, _TEST_HARNESS_NAME, env={token_env: "override-test-token"}
@@ -1148,7 +1159,7 @@ async def test_control_auth_is_per_spawn_and_absent_from_child_environment(
             assert (await peer.get("/health")).status_code == 200
             for authorization in (None, "Bearer incorrect", sibling.headers["Authorization"]):
                 headers = {"Authorization": authorization} if authorization else {}
-                for url, payload in ((events_url, message), (requester_url, native_query)):
+                for url, payload in protected_calls:
                     response = await peer.post(url, json=payload, headers=headers)
                     assert response.status_code == 401
                     assert response.json() == {"detail": "unauthorized"}

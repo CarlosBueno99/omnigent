@@ -878,6 +878,16 @@ def register_core_routes(
         return await create_session(request)
 
     @router.post(
+        "/requester/sessions",
+        status_code=201,
+        response_model=None,
+        include_in_schema=False,
+        dependencies=[
+            Depends(require_json_or_multipart_content_type),
+            Depends(require_trusted_origin),
+        ],
+    )
+    @router.post(
         "/sessions",
         status_code=201,
         response_model=None,
@@ -898,6 +908,9 @@ def register_core_routes(
     ) -> SessionResponse | CreatedSessionResponse:
         """
         Create a session.
+
+        The internal ``/requester/sessions`` alias guarantees requester
+        propagation. Runners must not fall back when an older server lacks it.
 
         ``application/json`` preserves the existing contract: bind to
         an already-registered agent by ``agent_id`` and return the full

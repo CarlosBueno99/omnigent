@@ -171,9 +171,10 @@ def _route_identifier(value: object, kind: str) -> str:
     return value
 
 
-def _session_url(session_id: object) -> str:
+def _session_url(session_id: object, *, requester_bound: bool = False) -> str:
     """Build a session URL from one identifier, retaining legacy prefixed ids."""
-    return f"/v1/sessions/{_route_identifier(session_id, 'Session')}"
+    prefix = "/v1/requester" if requester_bound else "/v1"
+    return f"{prefix}/sessions/{_route_identifier(session_id, 'Session')}"
 
 
 def _optional_string(value: object) -> str | None:
@@ -1572,7 +1573,7 @@ async def _post_child_message_event(
         }
 
     resp = await server_client.post(
-        f"{_session_url(session_id)}/events",
+        f"{_session_url(session_id, requester_bound=True)}/events",
         json=_payload(created_by),
         # This message is gated at the recipient's REQUEST phase, which can
         # PARK on a human ASK (e.g. session_cost_budget) up to the policy's
@@ -1589,7 +1590,7 @@ async def _post_child_message_event(
         session_id,
     )
     return await server_client.post(
-        f"{_session_url(session_id)}/events",
+        f"{_session_url(session_id, requester_bound=True)}/events",
         json=_payload(None),
         timeout=_ASK_GATE_DELIVERY_TIMEOUT,
     )
@@ -2928,7 +2929,12 @@ async def _execute_subagent_tool(
         resp: httpx.Response | None = None
         try:
             for _ordinal_attempt in range(_max_ordinal_retries + 1):
-                resp = await server_client.post("/v1/sessions", json=create_body, timeout=30.0)
+                resp = await server_client.post(
+                    "/v1/requester/sessions",
+                    json=create_body,
+                    headers=requester_headers(),
+                    timeout=30.0,
+                )
                 if (
                     resp.status_code == 409
                     and _auto_ordinal
@@ -3584,7 +3590,7 @@ async def _execute_session_create(
     }
     create_requested = False
     try:
-        endpoint = "/v1/sessions" if placement == "child" else "/v1/sessions/orchestrated"
+        endpoint = "/v1/requester/sessions"
         if placement == "managed":
             from omnigent.runner.session_requests import post_on_host
 
@@ -3744,16 +3750,11 @@ async def _post_child_first_message(
         ``sys_session_send``) on failure.
     """
     try:
-        msg_resp = await server_client.post(
-            f"{_session_url(child_session_id)}/events",
-            json={
-                "type": "message",
-                "data": {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": message}],
-                },
-            },
-            timeout=30.0,
+        msg_resp = await _post_child_message_event(
+            server_client,
+            child_session_id,
+            content=[{"type": "input_text", "text": message}],
+            created_by=None,
         )
     except httpx.HTTPError as exc:
         return json.dumps(
@@ -3825,7 +3826,8 @@ async def _upload_config_bundle(
         metadata["title"] = title
     try:
         resp = await server_client.post(
-            "/v1/sessions",
+            "/v1/requester/sessions",
+            headers=requester_headers(),
             data={"metadata": json.dumps(metadata)},
             files={"bundle": (f"{source.name}.tar.gz", bundle_bytes, "application/gzip")},
             timeout=60.0,

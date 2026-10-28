@@ -57,6 +57,7 @@ from omnigent.policies.types import FAIL_CLOSED_PHASES
 from omnigent.runtime.harnesses._scaffold import (
     HarnessApp,
     HarnessResponseRequest,
+    NativeInputRegistration,
     PolicyVerdictPayload,
     TurnContext,
 )
@@ -360,6 +361,7 @@ class ExecutorAdapter(HarnessApp):
         )
         # OpenAI Runner creates its tool tasks per run. Claude's persistent reader
         # inherits the first run's context, so it must supply explicit provenance.
+        from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
         from omnigent.inner.openai_agents_sdk_executor import OpenAIAgentsSDKExecutor
 
         execution_token = self._task_tool_execution.set(
@@ -396,6 +398,11 @@ class ExecutorAdapter(HarnessApp):
                     tools=tools,
                     system_prompt=system_prompt,
                     config=config,
+                    **(
+                        {"requester": ctx.requester.snapshot()}
+                        if isinstance(executor, ClaudeSDKExecutor)
+                        else {}
+                    ),
                 ):
                     if ctx.cancelled.is_set():
                         log_input_event(
@@ -651,6 +658,24 @@ class ExecutorAdapter(HarnessApp):
             return None
         return await self._executor.resolve_tool_requester(identity)
 
+    def register_native_input(self, body: NativeInputRegistration) -> str:
+        from omnigent.inner.codex_native_executor import CodexNativeExecutor
+
+        # New submissions may initialize an executor. Retained tool lookups may not.
+        executor = self._ensure_executor()
+        if not isinstance(executor, CodexNativeExecutor):
+            raise RuntimeError("Native input registration is unavailable")
+        return executor.begin_terminal_input(
+            body.requester, body.thread_id, body.expected_turn_id, body.provider_url
+        )
+
+    def refuse_native_input(self, client_id: str) -> None:
+        from omnigent.inner.codex_native_executor import CodexNativeExecutor
+
+        if not isinstance(self._executor, CodexNativeExecutor):
+            raise RuntimeError("Native input registration is unavailable")
+        self._executor.refuse_terminal_input(client_id)
+
     async def _prepare_turn_retry(self) -> bool:
         """Wait for confirmed teardown without cancelling the background reap."""
         cleanup = self._abandoned_executor_cleanup
@@ -861,14 +886,14 @@ class ExecutorAdapter(HarnessApp):
         Other producers must supply an explicit requester; inherited reader-task context
         and display call IDs cannot establish authority.
 
-        Currently unbound paths are Claude SDK MCP, Codex SDK MCP, Pi tool callbacks,
+        Claude SDK MCP binds raw producer tool IDs to registered submissions before
+        the SDK parses them. Its persistent reader's context is never authority.
+        Currently unbound paths are Codex SDK MCP, Pi tool callbacks,
         Cursor/Copilot/Antigravity custom tools, and the generic ACP/Goose/Qwen Omnigent
         MCP relay. Their callbacks dispatch with explicit unknown authority. Ordinary
         tools still route through policies, but owner-verified cross-session messages
         and independent session creation are denied even from private sessions: an
-        explicit unknown envelope cannot use the server's headerless private fallback.
-        Child-session work also carries unknown provenance; Claude SDK delegation
-        compatibility is not established by preserving ordinary tool dispatch.
+        explicit unknown envelope cannot establish owner authority.
 
         Restoring authority requires trusted producer execution/call metadata and a
         typed binding to this context. Native Codex uses ``native_tool_requester``

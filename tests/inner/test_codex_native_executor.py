@@ -3697,13 +3697,115 @@ def test_interrupt_reraises_unrelated_rejections(
     )
 
 
-@pytest.mark.parametrize("restore_scope", [False, True], ids=["changed_scope", "restored_scope"])
-async def test_native_requester_round_trip_over_app_server_transport(
-    tmp_path: Path, restore_scope: bool
+@pytest.mark.parametrize("stage", ["connect", "read", "close"])
+@pytest.mark.parametrize("error_type", [TimeoutError, asyncio.CancelledError])
+async def test_native_requester_evidence_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, error_type: type[BaseException]
+) -> None:
+    from omnigent.harnesses.codex_native.execution import CodexExecutionIdentity
+
+    closed: list[bool] = []
+    error = error_type()
+
+    class EvidenceFailureClient(_FakeCodexNativeClient):
+        async def connect(self) -> None:
+            if stage == "connect":
+                raise error
+
+        async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            assert method == "thread/read"
+            if stage == "read":
+                raise error
+            return {"result": {}}
+
+        async def close(self) -> None:
+            closed.append(True)
+            if stage == "close":
+                raise error
+
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server.CodexAppServerClient", EvidenceFailureClient
+    )
+    _seed_bridge(tmp_path)
+    executor = CodexNativeExecutor(tmp_path)
+    identity = CodexExecutionIdentity("native_session", "thread_123", "actual_turn")
+    if isinstance(error, asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError):
+            await executor.resolve_tool_requester(identity)
+    else:
+        assert await executor.resolve_tool_requester(identity) is None
+    assert closed == [True]
+
+
+@pytest.mark.parametrize("active_turn_id", [None, "turn_existing"], ids=["start", "steer"])
+@pytest.mark.parametrize(
+    "error_type", [TimeoutError, ConnectionResetError, asyncio.CancelledError]
+)
+async def test_native_requester_ambiguous_submission_stays_pending(
+    draining_client, tmp_path: Path, active_turn_id: str | None, error_type: type[BaseException]
 ) -> None:
     from omnigent.harnesses.codex_native.execution import CodexExecutionIdentity
     from omnigent.runtime.requester import InputRequester
 
+    _seed_bridge(tmp_path, active_turn_id=active_turn_id)
+    state = read_bridge_state(tmp_path)
+    assert state is not None
+    executor = CodexNativeExecutor(tmp_path)
+    registry = executor._requesters_for_state(state)
+    owner = InputRequester(user_id="bryan")
+    owner_input = registry.begin(owner, state.thread_id, None)
+    identity = CodexExecutionIdentity("native_session", state.thread_id, "turn_existing")
+    response = {
+        "result": {
+            "thread": {
+                "id": state.thread_id,
+                "sessionId": identity.session_id,
+                "turns": [
+                    {
+                        "id": identity.turn_id,
+                        "items": [{"type": "userMessage", "clientId": owner_input}],
+                    }
+                ],
+            }
+        }
+    }
+    original = registry.snapshot(identity, response, revision=registry.revision)
+    assert original is not None and original.origin == owner
+    draining_client.delivery_errors = [error_type()]
+    params: dict[str, Any] = {
+        "threadId": state.thread_id,
+        "input": [{"type": "text", "text": "steer"}],
+    }
+    if active_turn_id is not None:
+        params["expectedTurnId"] = active_turn_id
+    expected_error = (
+        asyncio.CancelledError
+        if error_type is asyncio.CancelledError
+        else InjectionDeliveryAmbiguous
+    )
+    with pytest.raises(expected_error):
+        await codex_native_executor._native_delivery_request_once(
+            draining_client(),
+            "turn/steer" if active_turn_id else "turn/start",
+            params,
+            state,
+            requester=InputRequester(user_id="pat"),
+            registry=registry,
+        )
+    pending = registry.snapshot(identity, response, revision=registry.revision)
+    assert pending is not None and pending.origin.user_id is None
+    assert pending.execution_id == original.execution_id
+
+
+@pytest.mark.parametrize("restore_scope", [False, True], ids=["changed_scope", "restored_scope"])
+async def test_native_requester_round_trip_over_app_server_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restore_scope: bool
+) -> None:
+    from omnigent.harnesses.codex_native.bridge import CODEX_NATIVE_REQUEST_SESSION_ID_ENV_VAR
+    from omnigent.harnesses.codex_native.execution import CodexExecutionIdentity
+    from omnigent.runtime.requester import InputRequester
+
+    monkeypatch.setenv(CODEX_NATIVE_REQUEST_SESSION_ID_ENV_VAR, "conv_123")
     owner = InputRequester(user_id="bryan", account_generation="generation-b")
     collaborator = InputRequester(user_id="pat", account_generation="generation-p")
     identity = CodexExecutionIdentity("native_session", "thread_123", "actual_turn")
@@ -3714,6 +3816,8 @@ async def test_native_requester_round_trip_over_app_server_transport(
     hold_thread_read = False
     thread_read_started = asyncio.Event()
     release_thread_read = asyncio.Event()
+    submission_error: dict[str, Any] | None = None
+    evidence_error_method: str | None = None
 
     async def handle(websocket: ServerConnection) -> None:
         async for raw in websocket:
@@ -3722,7 +3826,22 @@ async def test_native_requester_round_trip_over_app_server_transport(
                 continue
             method, params = request["method"], request.get("params", {})
             response: dict[str, Any] = {"id": request["id"], "result": {}}
+            if method == evidence_error_method:
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "id": request["id"],
+                            "error": {"code": -32602, "message": "invalid params"},
+                        }
+                    )
+                )
+                continue
             if method in {"turn/start", "turn/steer"}:
+                if submission_error is not None:
+                    await websocket.send(
+                        json.dumps({"id": request["id"], "error": submission_error})
+                    )
+                    continue
                 # Resolve over a second connection before the provider consumes input.
                 if turns:
                     pending = await executor.resolve_tool_requester(identity)
@@ -3754,7 +3873,7 @@ async def test_native_requester_round_trip_over_app_server_transport(
                     await release_thread_read.wait()
             await websocket.send(json.dumps(response))
 
-    async def start(origin: InputRequester) -> None:
+    async def start(origin: InputRequester, *, rejected: bool = False) -> None:
         events = [
             event
             async for event in executor.run_turn(
@@ -3764,7 +3883,7 @@ async def test_native_requester_round_trip_over_app_server_transport(
                 ExecutorConfig(requester=origin),
             )
         ]
-        assert [type(event) for event in events] == [TurnComplete]
+        assert [type(event) for event in events] == [ExecutorError if rejected else TurnComplete]
 
     async with serve(handle, "127.0.0.1", 0) as server, asyncio.timeout(10):
         _seed_bridge(tmp_path)
@@ -3772,22 +3891,73 @@ async def test_native_requester_round_trip_over_app_server_transport(
         assert state is not None
         state = replace(state, socket_path=f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}")
         write_bridge_state(tmp_path, state)
-        await start(owner)
+        terminal_input = executor.begin_terminal_input(
+            owner, state.thread_id, None, state.socket_path
+        )
+        client = await codex_native_executor._connect_to_app_server(state)
+        assert client is not None
+        try:
+            await client.request(
+                "turn/start",
+                {
+                    "threadId": state.thread_id,
+                    "clientUserMessageId": terminal_input,
+                    "input": [{"type": "text", "text": "identical text"}],
+                },
+            )
+        finally:
+            await client.close()
         original = await executor.resolve_tool_requester(identity)
         assert original is not None and original.origin == owner
+        # Rejected registrations must neither replace nor restrict retained evidence.
+        for changed_state in (
+            replace(state, session_id="another_session"),
+            replace(state, thread_id="another_thread"),
+            replace(state, socket_path=state.socket_path + "/another-provider"),
+        ):
+            write_bridge_state(tmp_path, changed_state)
+            with pytest.raises(RuntimeError, match="Native terminal provider changed"):
+                executor.begin_terminal_input(
+                    collaborator, state.thread_id, identity.turn_id, state.socket_path
+                )
+            write_bridge_state(tmp_path, state)
+            assert await executor.resolve_tool_requester(identity) == original
+        for evidence_error_method in ("initialize", "thread/read"):
+            assert await executor.resolve_tool_requester(identity) is None
+        evidence_error_method = None
+        assert await executor.resolve_tool_requester(identity) == original
+
+        # Explicit RPC errors precede input enqueue in the pinned provider.
+        for submission_error in (
+            {"code": -32602, "message": "invalid params"},
+            {"code": -32600, "message": "direct input is not allowed"},
+            {"code": -32603, "message": "failed to start turn: internal agent died"},
+        ):
+            write_bridge_state(tmp_path, state)
+            await start(collaborator, rejected=True)
+            assert await executor.resolve_tool_requester(identity) == original
+            write_bridge_state(tmp_path, replace(state, active_turn_id=identity.turn_id))
+            assert not await executor.enqueue_session_message(
+                "key", "identical text", requester=collaborator
+            )
+            assert await executor.resolve_tool_requester(identity) == original
+        submission_error = None
+        write_bridge_state(tmp_path, state)
         assert (
             await executor.resolve_tool_requester(replace(identity, thread_id="native_child"))
             is None
         )
         # Pending input restricts the target until consumption or definitive refusal.
         registry = executor._requesters_for_state(state)
-        pending_input = registry.begin(collaborator, identity.thread_id, identity.turn_id)
+        pending_input = executor.begin_terminal_input(
+            collaborator, state.thread_id, identity.turn_id, state.socket_path
+        )
         pending = await executor.resolve_tool_requester(identity)
         assert pending is not None and pending.origin.user_id is None
         registry.finish(pending_input, refused=False)
         acknowledged = await executor.resolve_tool_requester(identity)
         assert acknowledged is not None and acknowledged.origin.user_id is None
-        registry.finish(pending_input, refused=True)
+        executor.refuse_terminal_input(pending_input)
         restored = await executor.resolve_tool_requester(identity)
         assert restored == original
         assert (

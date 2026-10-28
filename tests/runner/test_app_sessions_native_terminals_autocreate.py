@@ -5653,6 +5653,7 @@ class _RecordingCodexRegistry:
         spec: Any,
         resource_role: str | None = None,
         parent_os_env: Any = None,
+        complete_writer_observation: bool = False,
     ) -> SessionResourceView:
         """Record the spec and return a terminal resource view."""
         del terminal_name, session_key, resource_role, parent_os_env

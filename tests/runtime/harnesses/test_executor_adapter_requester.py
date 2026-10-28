@@ -6,9 +6,9 @@ callback/injection barriers and reuse the real scaffold's parsing, context creat
 SSE serialization and teardown rather than the adjacent recording-context stand-ins.
 
 The OpenAI scenario runs the actual SDK in-process with a mocked HTTP model transport.
-The Claude scenario runs the SDK's MCP dispatcher in a simulated persistent reader task.
-Neither validates a live provider or the SDK harness subprocess startup path; that
-requires a separate process regression before landing.
+Claude coverage includes an unbound reader and the real Client/Query/control tasks
+with a scripted CLI transport. Neither validates a live provider or the SDK harness
+subprocess startup path; that requires a separate process regression before landing.
 """
 
 from __future__ import annotations
@@ -506,3 +506,262 @@ async def test_real_openai_sdk_cached_tools_use_each_runs_execution() -> None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await delayed_call
             await adapter.on_shutdown()
+
+
+async def test_claude_sdk_raw_transport_binds_calls_before_query_drops_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real Client/Query/tasks, with only the CLI byte source simulated (no provider)."""
+    from claude_agent_sdk._internal.transport import subprocess_cli
+
+    from omnigent.inner import claude_sdk_executor as claude
+
+    submitted: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    replies: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    frames: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    connected = []
+
+    class ScriptedCLI:
+        def __init__(self, prompt, options):
+            assert prompt == ""
+            assert options.permission_prompt_tool_name == "stdio"
+            self._process = None
+            self._stdout_stream = self._stdin_stream = self._stderr_stream = None
+            self.options = options
+            connected.append(self)
+
+        async def connect(self):
+            pass
+
+        async def write(self, data):
+            frame = json.loads(data)
+            if frame["type"] == "user":
+                submitted.put_nowait(frame)
+            elif frame["type"] == "control_request":
+                frames.put_nowait(
+                    {
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": frame["request_id"],
+                            "response": {},
+                        },
+                    }
+                )
+            else:
+                replies.put_nowait(frame)
+
+        async def read_messages(self):
+            while True:
+                yield await frames.get()
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(subprocess_cli, "SubprocessCLITransport", ScriptedCLI)
+    monkeypatch.setattr(claude, "_find_system_claude", lambda: None)
+    executor = claude.ClaudeSDKExecutor()
+    executor._policy_evaluator = AsyncMock(
+        return_value=PolicyVerdictPayload(action="POLICY_ACTION_ALLOW")
+    )
+    adapter = ExecutorAdapter(executor_factory=lambda: executor)
+    finished = asyncio.Event()
+    delayed_started = asyncio.Event()
+    release_delayed = asyncio.Event()
+    received_metadata = []
+    reader_tasks = []
+    bindings = []
+
+    def assistant(call_id, *, echo=None, parent=None, name="mcp__omnigent__echo"):
+        frames.put_nowait(
+            {
+                "type": "assistant",
+                "session_id": "provider-session",
+                "uuid": f"row-{call_id}",
+                "parent_tool_use_id": parent,
+                **({"user_message_uuid": echo, "user_message_uuids": [echo]} if echo else {}),
+                "message": {
+                    "model": "test-model",
+                    "content": [{"type": "tool_use", "id": call_id, "name": name, "input": {}}],
+                },
+            }
+        )
+
+    def call(call_id, *, arguments=None):
+        frames.put_nowait(
+            {
+                "type": "control_request",
+                "request_id": call_id,
+                "request": {
+                    "subtype": "mcp_message",
+                    "server_name": "omnigent",
+                    "message": {
+                        "jsonrpc": "2.0",
+                        "id": call_id,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "echo",
+                            "arguments": arguments or {},
+                            "_meta": {"claudecode/toolUseId": call_id},
+                        },
+                    },
+                },
+            }
+        )
+
+    try:
+        for index, user in enumerate(("owner", "collaborator", "owner")):
+            finished.clear()
+            response = await adapter._start_or_inject_turn(
+                _message(
+                    InputRequester(user_id=user),
+                    tools=[
+                        {
+                            "type": "function",
+                            "name": "echo",
+                            "parameters": {"type": "object", "properties": {}},
+                        }
+                    ],
+                ).to_create_request(),
+                session_id="sdk-session",
+            )
+            assert isinstance(response, StreamingResponse)
+            ctx = adapter._active_turn_ctx
+            assert ctx is not None
+            dispatched = asyncio.Queue()
+
+            async def consume(response=response, ctx=ctx, dispatched=dispatched):
+                async for frame in response.body_iterator:
+                    event = json.loads(frame.decode().split("data: ", 1)[1])
+                    item = event.get("item", {})
+                    if item.get("status") == "action_required":
+                        dispatched.put_nowait(item)
+                        assert ctx._complete_tool(item["call_id"], '{"ok": true}')
+                finished.set()
+
+            consumer = asyncio.create_task(consume())
+            try:
+                submission = await asyncio.wait_for(submitted.get(), timeout=5)
+                state = executor._clients[adapter._session_key]
+                query = state.client._query
+                reader_tasks.append(query._read_task)
+                # The real SDK parser drops input UUIDs; its MCP dispatcher also drops _meta.
+                if index == 0:
+                    from mcp.types import CallToolRequest
+
+                    server = query.sdk_mcp_servers["omnigent"]
+                    handler = server.request_handlers[CallToolRequest]
+
+                    async def delayed_handler(request, handler=handler):
+                        received_metadata.append(request.params.meta)
+                        binding = claude._claude_tool_binding.get()
+                        if binding and binding.call_id == "late-owner":
+                            delayed_started.set()
+                            await release_delayed.wait()
+                            assert claude._claude_tool_binding.get() is binding
+                        return await handler(request)
+
+                    server.request_handlers[CallToolRequest] = delayed_handler
+                root_id = f"root-{index}"
+                frames.put_nowait(
+                    {
+                        "type": "stream_event",
+                        "uuid": f"stream-{index}",
+                        "session_id": "provider-session",
+                        "parent_tool_use_id": None,
+                        "user_message_uuid": submission["uuid"],
+                        "event": {
+                            "type": "content_block_start",
+                            "index": 0,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": f"partial-{index}",
+                                "name": "mcp__omnigent__echo",
+                                "input": {},
+                            },
+                        },
+                    }
+                )
+                # A partial streamed block is not a completed assistant call record.
+                call(f"partial-{index}")
+                item = await asyncio.wait_for(dispatched.get(), timeout=3)
+                assert ToolRequester.model_validate(item[REQUESTER_FIELD]).origin.user_id is None
+                await asyncio.wait_for(replies.get(), timeout=3)
+                assistant(root_id, echo=submission["uuid"])
+                call(root_id)
+                await poll_until_async(
+                    lambda dispatched=dispatched: not dispatched.empty() or not replies.empty(),
+                    timeout_s=3,
+                )
+                assert not dispatched.empty(), json.dumps(await replies.get())
+                item = await asyncio.wait_for(dispatched.get(), timeout=3)
+                bound = ToolRequester.model_validate(item[REQUESTER_FIELD])
+                assert bound == ctx.requester.snapshot()
+                assert item["call_id"] == root_id
+                bindings.append(bound)
+                await asyncio.wait_for(replies.get(), timeout=3)
+
+                # Later assistant messages omit the root echo; children join the retained parent.
+                assistant(f"spawn-{index}", name="Agent")
+                assistant(f"child-{index}", parent=f"spawn-{index}")
+                call(f"child-{index}")
+                item = await asyncio.wait_for(dispatched.get(), timeout=3)
+                assert ToolRequester.model_validate(item[REQUESTER_FIELD]) == bound
+                await asyncio.wait_for(replies.get(), timeout=3)
+
+                if index == 0:
+                    assistant("late-owner")
+                    call("late-owner")
+                    await asyncio.wait_for(delayed_started.wait(), timeout=3)
+                if index == 1:
+                    release_delayed.set()
+                    reply = await asyncio.wait_for(replies.get(), timeout=3)
+                    result = reply["response"]["response"]["mcp_response"]["result"]
+                    assert (
+                        json.loads(result["content"][0]["text"])["code"]
+                        == "runner_turn_context_desync"
+                    )
+                    assert dispatched.empty()
+                    # A child still emitting after its original root ended cannot borrow this one.
+                    assistant("late-child", parent="spawn-0")
+                    call("late-child")
+                    reply = await asyncio.wait_for(replies.get(), timeout=3)
+                    result = reply["response"]["response"]["mcp_response"]["result"]
+                    assert (
+                        json.loads(result["content"][0]["text"])["code"]
+                        == "runner_turn_context_desync"
+                    )
+                    assert dispatched.empty()
+                # A call missing its producer record cannot use argument-supplied authority.
+                call(f"unrecorded-{index}", arguments={REQUESTER_FIELD: bound.model_dump()})
+                item = await asyncio.wait_for(dispatched.get(), timeout=3)
+                assert ToolRequester.model_validate(item[REQUESTER_FIELD]).origin.user_id is None
+                await asyncio.wait_for(replies.get(), timeout=3)
+                frames.put_nowait(
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": False,
+                        "duration_ms": 1,
+                        "duration_api_ms": 1,
+                        "num_turns": 1,
+                        "session_id": "provider-session",
+                        "total_cost_usd": 0,
+                        "result": "done",
+                        "uuid": f"result-{index}",
+                    }
+                )
+                await asyncio.wait_for(finished.wait(), timeout=3)
+            finally:
+                consumer.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await consumer
+        assert len(connected) == 1
+        assert reader_tasks[0] is reader_tasks[1] is reader_tasks[2]
+        assert {binding.origin.user_id for binding in bindings} == {"owner", "collaborator"}
+        assert len({binding.execution_id for binding in bindings}) == 3
+        assert received_metadata and all(meta is None for meta in received_metadata)
+        assert claude._claude_tool_binding.get() is None
+    finally:
+        release_delayed.set()
+        await adapter.on_shutdown()

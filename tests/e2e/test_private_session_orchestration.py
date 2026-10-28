@@ -1,31 +1,81 @@
-"""Real local host/server/SDK and Codex processes; scripted model, no cloud sandbox."""
+"""Real host/server/SDK/CLI processes with a scripted provider.
+
+Claude requires a clean Linux container with only loopback networking (for example
+Docker --network none, without host config/socket mounts). A collection-time gate
+prevents even the suite's CLI availability probe on an unisolated machine.
+"""
 
 import ast
 import json
 import os
 import shutil
+import socket
+import subprocess
+import sys
 import tempfile
+import tomllib
+import uuid
+from importlib.metadata import version
 from pathlib import Path
 
 import httpx
 import pytest
 import yaml
+from websockets.sync.client import connect
 
 from dev.repro_env.runtime import write_model_config
 from tests._helpers.native_session import create_native_session
 from tests._helpers.polling import poll_until
 from tests._helpers.server_runner import server_runner
 from tests._helpers.session import bundle_files, post_session_bundle
-from tests.e2e.conftest import configure_mock_llm, get_mock_requests, set_fallback_mock_llm
+from tests.e2e.conftest import (
+    configure_mock_llm,
+    get_mock_message_requests,
+    get_mock_requests,
+    set_fallback_mock_llm,
+)
 
 _REPO = Path(__file__).resolve().parents[2]
 
 
+def _claude_isolation_reason() -> str | None:
+    """Check prerequisites without executing Claude or sending a network request."""
+    if sys.platform != "linux" or {name for _, name in socket.if_nameindex()} != {"lo"}:
+        return "Claude process proof requires a Linux container with --network none"
+    config_paths = [
+        Path("/etc/claude-code"),
+        Path("/var/run/docker.sock"),
+        Path.home() / ".claude",
+        Path.home() / ".claude.json",
+    ]
+    if configured := os.environ.get("CLAUDE_CONFIG_DIR"):
+        config_paths.append(Path(configured))
+    if any(path.exists() for path in config_paths):
+        return "Claude process proof requires clean provider config and no host socket mounts"
+    return None
+
+
+_CLAUDE_ISOLATION_REASON = _claude_isolation_reason()
+
+
 @pytest.mark.timeout(300)
-@pytest.mark.parametrize("harness", ["openai-agents", "codex-native"])
+@pytest.mark.parametrize(
+    "harness",
+    [
+        "openai-agents",
+        "codex-native",
+        pytest.param(
+            "claude-sdk",
+            marks=pytest.mark.skipif(
+                _CLAUDE_ISOLATION_REASON is not None,
+                reason=_CLAUDE_ISOLATION_REASON or "",
+            ),
+        ),
+    ],
+)
 @pytest.mark.parametrize("orchestration_enabled", [True, False], ids=["default", "kill-switch"])
 def test_private_manager_launch_send_read_and_sharing(
-    tmp_path, isolated_mock_llm_server_url, harness, orchestration_enabled
+    tmp_path, isolated_mock_llm_server_url, harness, orchestration_enabled, claude_managed_settings
 ):
     if harness == "codex-native" and any(shutil.which(cmd) is None for cmd in ("codex", "tmux")):
         pytest.skip("requires Codex and tmux")
@@ -33,8 +83,39 @@ def test_private_manager_launch_send_read_and_sharing(
     config = tmp_path / "config"
     write_model_config(config, mock, "claude-sonnet-4-20250514", "gpt-4o")
     base_env = {k: v for k, v in os.environ.items() if k in {"PATH", "LANG", "TMPDIR"}}
+    claude_env = {}
+    if harness == "claude-sdk":
+        # Keep real managed-settings detection; isolation must come from the container.
+        cli = shutil.which("claude")
+        assert cli is not None
+        cli_pin = json.loads(
+            (_REPO / ".github/actions/setup-harness-cli/manifest.json").read_text()
+        )["claude"]["version"]
+        sdk_pin = next(
+            package["version"]
+            for package in tomllib.loads((_REPO / "uv.lock").read_text())["package"]
+            if package["name"] == "claude-agent-sdk"
+        )
+        assert version("claude-agent-sdk") == sdk_pin
+        claude_env = {
+            "OMNIGENT_CLAUDE_PATH": cli,
+            "CLAUDE_CONFIG_DIR": str(tmp_path / "claude-config"),
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            "DISABLE_AUTOUPDATER": "1",
+        }
+        reported = subprocess.run(
+            [cli, "--version"],
+            env={**base_env, **claude_env},
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=15,
+        ).stdout
+        assert reported.split()[0] == cli_pin, reported
     with tempfile.TemporaryDirectory(prefix="orch-native-", dir="/tmp") as native_state:
         env = {
+            **claude_env,
             "OMNIGENT_FEATURES": None,
             "OMNIGENT_CONFIG_HOME": str(config),
             "OMNIGENT_CODEX_NATIVE_STATE_DIR": native_state,
@@ -72,22 +153,69 @@ def test_private_manager_launch_send_read_and_sharing(
                 )
 
                 def configure(marker, responses):
+                    required_tool = {
+                        "codex-native": "mcp__omnigent",
+                        "claude-sdk": "ToolSearch",
+                        "openai-agents": "sys_session_message",
+                    }[harness]
+                    if harness == "claude-sdk":
+                        names = sorted(
+                            {
+                                call["name"]
+                                for response in responses
+                                for call in response.get("tool_calls", [])
+                            }
+                        )
+                        if names:
+                            # Exercise the CLI's real deferred MCP discovery before calling it.
+                            responses = [
+                                {
+                                    "tool_calls": [
+                                        {
+                                            "name": "ToolSearch",
+                                            "arguments": json.dumps(
+                                                {
+                                                    "query": f"select:{','.join(names)}",
+                                                    "max_results": len(names),
+                                                }
+                                            ),
+                                            "call_id": f"toolu_search_{uuid.uuid4().hex[:12]}",
+                                        }
+                                    ]
+                                },
+                                *responses,
+                            ]
                     configure_mock_llm(
                         mock,
                         responses,
                         match=marker,
-                        required_tools=[
-                            "mcp__omnigent" if harness == "codex-native" else "sys_session_message"
-                        ],
+                        required_tools=[required_tool],
                     )
 
                 def tool(name, args, call_id):
                     result = {"name": name, "arguments": json.dumps(args), "call_id": call_id}
                     if harness == "codex-native":
                         result["namespace"] = "mcp__omnigent"
+                    elif harness == "claude-sdk":
+                        result["name"] = f"mcp__omnigent__{name}"
+                        result["call_id"] = f"toolu_{call_id.replace('-', '_')}"
                     return result
 
                 def tool_results(call_id):
+                    if harness == "claude-sdk":
+                        # Only provider HTTP bodies are scripted; UUID echoes and MCP
+                        # control metadata must be generated by the real pinned CLI.
+                        return [
+                            block
+                            for request in get_mock_message_requests(mock)
+                            if request["body"].get("stream") is True
+                            for message in request["body"].get("messages", [])
+                            if message.get("role") == "user"
+                            and isinstance(message.get("content"), list)
+                            for block in message["content"]
+                            if block.get("type") == "tool_result"
+                            and block.get("tool_use_id") == f"toolu_{call_id.replace('-', '_')}"
+                        ]
                     return [
                         entry
                         for request in get_mock_requests(mock)
@@ -112,6 +240,10 @@ def test_private_manager_launch_send_read_and_sharing(
                     if harness == "codex-native":
                         content = json.loads(output.split("\nOutput:\n", 1)[1])
                         return json.loads(content[0]["text"])
+                    if harness == "claude-sdk":
+                        if isinstance(output, list):
+                            output = "\n".join(block["text"] for block in output)
+                        return json.loads(output)
                     return ast.literal_eval(output)
 
                 def items(session):
@@ -136,6 +268,58 @@ def test_private_manager_launch_send_read_and_sharing(
                     )
                     assert response.status_code == 202, response.text
 
+                def send_terminal(session, text):
+                    response = client.post(
+                        f"/v1/sessions/{session}/resources/terminals",
+                        json={
+                            "terminal": "codex",
+                            "session_key": "main",
+                            "ensure_native_terminal": True,
+                        },
+                        timeout=90,
+                    )
+                    response.raise_for_status()
+                    terminal = response.json()
+                    assert terminal["metadata"]["requires_authenticated_attach"] is True
+                    listed = client.get(f"/v1/sessions/{session}/resources/terminals").json()
+                    assert "direct_attach_url" not in json.dumps(listed)
+
+                    def pane():
+                        metadata = terminal["metadata"]
+                        return subprocess.run(
+                            [
+                                "tmux",
+                                "-S",
+                                metadata["tmux_socket"],
+                                "capture-pane",
+                                "-p",
+                                "-t",
+                                metadata["tmux_target"],
+                            ],
+                            capture_output=True,
+                            text=True,
+                            check=True,
+                            timeout=10,
+                        ).stdout
+
+                    poll_until(
+                        lambda: any(
+                            line.lstrip().startswith(("›", "»")) for line in pane().splitlines()
+                        ),
+                        timeout_s=45,
+                    )
+                    url = stack.base_url.replace("http://", "ws://")
+                    url += f"/v1/sessions/{session}/resources/terminals/{terminal['id']}/attach"
+                    # This authenticates through the explicit OSS single-user provider.
+                    # Raw tmux send-keys would bypass the writer boundary under test.
+                    with connect(url, open_timeout=15) as terminal_ws:
+                        terminal_ws.send(json.dumps({"type": "resize", "cols": 120, "rows": 40}))
+                        terminal_ws.send(text.encode())
+                        poll_until(lambda: text in pane(), timeout_s=10)
+                        terminal_ws.send(b"\r")
+                        poll_until(lambda: text in json.dumps(items(session)), timeout_s=30)
+                    (stack.root / "authenticated-terminal.txt").write_text(pane())
+
                 sessions = []
                 for title in ("Manager", "Worker"):
                     metadata = {
@@ -158,11 +342,15 @@ def test_private_manager_launch_send_read_and_sharing(
                             "spawn": True,
                             "executor": {
                                 "harness": harness,
-                                "model": "gpt-4o",
+                                "model": (
+                                    "claude-sonnet-4-20250514"
+                                    if harness == "claude-sdk"
+                                    else "gpt-4o"
+                                ),
                                 "auth": {
                                     "type": "api_key",
                                     "api_key": "mock-key",
-                                    "base_url": f"{mock}/v1",
+                                    "base_url": mock if harness == "claude-sdk" else f"{mock}/v1",
                                 },
                             },
                             "skills_filter": "none",
@@ -262,7 +450,10 @@ def test_private_manager_launch_send_read_and_sharing(
                         {"text": "MANAGER_SENT"},
                     ],
                 )
-                send(manager, "MANAGER_SEND")
+                if harness == "codex-native":
+                    send_terminal(manager, "MANAGER_SEND")
+                else:
+                    send(manager, "MANAGER_SEND")
                 wait_text(manager, "MANAGER_SENT")
                 wait_text(worker, "WORKER_RESULT")
                 assert "WORKER_RESULT" not in json.dumps(items(manager)), (
@@ -309,7 +500,10 @@ def test_private_manager_launch_send_read_and_sharing(
                         {"text": "MANAGER_CREATED"},
                     ],
                 )
-                send(manager, "MANAGER_SEND_READ_CREATE")
+                if harness == "codex-native":
+                    send_terminal(manager, "MANAGER_SEND_READ_CREATE")
+                else:
+                    send(manager, "MANAGER_SEND_READ_CREATE")
                 wait_text(manager, "MANAGER_CREATED")
                 rows = client.get("/v1/sessions", params={"visibility": "mine"}).json()["data"]
                 created = next(row for row in rows if row["title"] == "Independent worker")

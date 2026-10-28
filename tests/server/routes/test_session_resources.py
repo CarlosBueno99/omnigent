@@ -1238,8 +1238,10 @@ def _terminals_only_payload() -> dict[str, object]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("authenticated_attach", [False, True])
 async def test_list_terminals_adds_direct_attach_url_when_advertised(
     client: httpx.AsyncClient,
+    authenticated_attach: bool,
 ) -> None:
     """A runner-advertised loopback listener surfaces per-terminal URLs.
 
@@ -1247,7 +1249,10 @@ async def test_list_terminals_adds_direct_attach_url_when_advertised(
     the disclosure gate treats as owner — mirroring the relay's
     write-attach behavior.
     """
-    fake_runner = _FakeRunnerClient(payload=_terminals_only_payload())
+    payload = _terminals_only_payload()
+    if authenticated_attach:
+        payload["data"][0].setdefault("metadata", {})["requires_authenticated_attach"] = True
+    fake_runner = _FakeRunnerClient(payload=payload)
     set_runner_router(_FakeRunnerRouter(fake_runner))  # type: ignore[arg-type]
     set_runner_direct_attach_resolver(
         lambda conversation_id: DirectAttachEndpoint(port=54321, token="tok_abc")
@@ -1257,6 +1262,9 @@ async def test_list_terminals_adds_direct_attach_url_when_advertised(
 
     assert resp.status_code == 200
     (item,) = resp.json()["data"]
+    if authenticated_attach:
+        assert "direct_attach_url" not in item["metadata"]
+        return
     assert item["metadata"]["direct_attach_url"] == (
         "ws://127.0.0.1:54321/v1/sessions/79b22ebd2309e48fdeb450c65611d51b"
         "/resources/terminals/terminal_runner_s1/attach?token=tok_abc"

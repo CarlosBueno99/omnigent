@@ -8323,15 +8323,13 @@ def _call_mcp_tool(
     if name in _read_relay_tool_names(bridge_dir):
         codex_execution = CodexExecutionIdentity.from_mcp_meta(params.get("_meta"))
         claude_execution = ClaudeExecutionIdentity.from_mcp_meta(params.get("_meta"))
-        if codex_execution is not None or claude_execution is not None:
-            return _call_relay_tool(
-                bridge_dir,
-                name,
-                arguments,
-                codex_execution=codex_execution,
-                claude_execution=claude_execution,
-            )
-        return _call_relay_tool(bridge_dir, name, arguments)
+        return _call_relay_tool(
+            bridge_dir,
+            name,
+            arguments,
+            codex_execution=codex_execution,
+            claude_execution=claude_execution,
+        )
     if name not in tools:
         return _mcp_error(f"unknown tool: {name!r}")
     bridge_config = _read_json_file(bridge_dir / _CONFIG_FILE)

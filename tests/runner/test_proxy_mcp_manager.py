@@ -216,7 +216,7 @@ async def test_schemas_for_happy_path_parses_tools() -> None:
     call = transport.calls[0]
     assert call.body["method"] == "tools/list"
     assert call.body["jsonrpc"] == "2.0"
-    assert "/v1/sessions/conv_test/mcp" in call.url
+    assert call.url == "http://ap-server/v1/sessions/conv_test/mcp"
 
 
 @pytest.mark.asyncio
@@ -389,7 +389,9 @@ async def test_call_tool_happy_path_returns_text(requester_user: str | None) -> 
         "Multiple text blocks must be joined with newline"
     )
     # Verify the request was well-formed
+    assert len(transport.calls) == 1
     call = transport.calls[0]
+    assert call.url == "http://ap-server/v1/sessions/conv_test/mcp"
     assert call.body["method"] == "tools/call"
     assert call.body["params"]["name"] == "github__search"
     assert call.body["params"]["arguments"] == {"query": "asyncio"}
@@ -723,21 +725,23 @@ async def test_call_tool_network_error_raises() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("request_id", ["00000000-0000-4000-8000-000000000001", "private-header"])
+@pytest.mark.parametrize("status", [404, 405, 504])
 async def test_call_tool_http_failure_keeps_operation_evidence_without_replaying(
-    caplog: pytest.LogCaptureFixture, request_id: str
+    caplog: pytest.LogCaptureFixture, request_id: str, status: int
 ) -> None:
     response = httpx.Response(
-        504,
+        status,
         text="private-response-body",
         headers={"x-request-id": request_id, "authorization": "private-credential"},
     )
     transport = _StubTransport([response])
     manager = _make_manager(transport)
 
-    with caplog.at_level(logging.WARNING), pytest.raises(RuntimeError, match="504"):
+    with caplog.at_level(logging.WARNING), pytest.raises(RuntimeError, match=str(status)):
         await manager.call_tool(None, "sys_os_shell", {"command": "private-shell-command"})
 
     assert len(transport.calls) == 1
+    assert transport.calls[0].url == "http://ap-server/v1/sessions/conv_test/mcp"
     [record] = [
         r for r in caplog.records if getattr(r, "event_name", None) == "mcp_proxy_call_failed"
     ]
@@ -745,7 +749,7 @@ async def test_call_tool_http_failure_keeps_operation_evidence_without_replaying
     assert attrs["operation_id"] == transport.calls[0].body["params"][MCP_OPERATION_ID_PARAM]
     assert attrs["jsonrpc_request_id"] == 1
     assert attrs["failure_phase"] == "http_status"
-    assert attrs["http_status"] == 504
+    assert attrs["http_status"] == status
     assert attrs["exception_type"] == "HTTPStatusError"
     assert attrs["proxy_route"] == "session"
     assert attrs["phase_elapsed_ms"] >= 0

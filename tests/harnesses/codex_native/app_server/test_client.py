@@ -9,15 +9,102 @@ from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
-from websockets.asyncio.client import ClientConnection
+from websockets.asyncio.client import ClientConnection, connect
 from websockets.asyncio.server import ServerConnection, serve
-from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
+from websockets.exceptions import (
+    ConnectionClosed,
+    ConnectionClosedError,
+    ConnectionClosedOK,
+    InvalidStatus,
+)
 
 from omnigent.harnesses.codex_native import app_server
 from omnigent.harnesses.codex_native.app_server import (
     CodexAppServerClient,
     CodexAppServerResponseError,
 )
+from omnigent.harnesses.codex_native.terminal_proxy import (
+    TOKEN_ENV,
+    CodexTerminalProxy,
+    RegisteredTerminalInput,
+)
+
+
+@pytest.mark.parametrize("method", ["turn/start", "turn/steer"])
+@pytest.mark.parametrize("outcome", ["accepted", "refused", "lost", "registration_failed"])
+async def test_terminal_proxy_registers_before_delivery_and_preserves_display_ids(method, outcome):
+    registered_id = "a" * 32
+    refuse = AsyncMock()
+    register = AsyncMock(return_value=RegisteredTerminalInput(registered_id, refuse))
+    if outcome == "registration_failed":
+        register.side_effect = RuntimeError("Harness unavailable")
+    received = []
+
+    async def handle(websocket):
+        async for raw in websocket:
+            message = json.loads(raw)
+            received.append(message)
+            register.assert_awaited_once()
+            assert message["params"]["clientUserMessageId"] == registered_id
+            if outcome == "lost":
+                await websocket.close()
+            elif outcome == "refused":
+                await websocket.send(json.dumps({"id": message["id"], "error": {"code": -32600}}))
+            else:
+                await websocket.send(
+                    json.dumps({"id": message["id"], "result": {"turnId": "turn"}})
+                )
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "method": "item/started",
+                            "params": {
+                                "item": {
+                                    "type": "userMessage",
+                                    "clientId": registered_id,
+                                    "content": [],
+                                }
+                            },
+                        }
+                    )
+                )
+
+    async with serve(handle, "127.0.0.1", 0) as provider:
+        proxy = CodexTerminalProxy(
+            f"ws://127.0.0.1:{provider.sockets[0].getsockname()[1]}", register
+        )
+        url = await proxy.start()
+        try:
+            with pytest.raises(InvalidStatus):
+                async with connect(url):
+                    pytest.fail("Unauthenticated terminal connected")
+            register.assert_not_awaited()
+            async with connect(
+                url, additional_headers={"Authorization": f"Bearer {proxy.environment[TOKEN_ENV]}"}
+            ) as terminal:
+                params = {"threadId": "thread", "clientUserMessageId": "display-id", "input": []}
+                if method == "turn/steer":
+                    params["expectedTurnId"] = "turn"
+                await terminal.send(json.dumps({"id": 7, "method": method, "params": params}))
+                if outcome == "lost":
+                    with pytest.raises(ConnectionClosed):
+                        await asyncio.wait_for(terminal.recv(), timeout=3)
+                else:
+                    response = json.loads(await asyncio.wait_for(terminal.recv(), timeout=3))
+                    assert response["id"] == 7
+                    if outcome == "accepted":
+                        event = json.loads(await asyncio.wait_for(terminal.recv(), timeout=3))
+                        assert event["params"]["item"]["clientId"] == "display-id"
+                    else:
+                        assert "error" in response
+            register.assert_awaited_once_with("thread", "turn" if method == "turn/steer" else None)
+            if outcome == "refused":
+                refuse.assert_awaited_once_with()
+            else:
+                refuse.assert_not_awaited()
+            assert len(received) == (0 if outcome == "registration_failed" else 1)
+        finally:
+            await proxy.close()
 
 
 @pytest.mark.parametrize(

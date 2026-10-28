@@ -317,12 +317,9 @@ async def _native_delivery_request_once(
             registry is not None
             and client_id is not None
             and isinstance(exc, CodexAppServerResponseError)
-            and (
-                is_server_draining_error(exc)
-                or is_compaction_steer_refusal(exc)
-                or is_stale_active_turn_error(exc)
-            )
         ):
+            # Pinned turn/start and turn/steer error responses precede enqueue.
+            # Lost replies, timeouts and cancellation cannot prove refusal.
             registry.finish(client_id, refused=True)
         outcome = "rpc_error"
         if isinstance(exc, asyncio.CancelledError):
@@ -682,6 +679,28 @@ class CodexNativeExecutor(Executor):
             self._requester_scope = scope
         return self._requester_registry
 
+    def begin_terminal_input(
+        self,
+        requester: InputRequester,
+        thread_id: str,
+        expected_turn_id: str | None,
+        provider_url: str,
+    ) -> str:
+        """Register a trusted terminal submission against this provider incarnation."""
+        state = read_bridge_state(self._bridge_dir)
+        if (
+            state is None
+            or state.session_id != self._request_session_id
+            or state.thread_id != thread_id
+            or state.socket_path != provider_url
+        ):
+            raise RuntimeError("Native terminal provider changed or is not ready")
+        return self._requesters_for_state(state).begin(requester, thread_id, expected_turn_id)
+
+    def refuse_terminal_input(self, client_id: str) -> None:
+        """Forget only a submission that the terminal transport proved was refused."""
+        self._requester_registry.finish(client_id, refused=True)
+
     async def resolve_tool_requester(
         self, identity: CodexExecutionIdentity
     ) -> ToolRequester | None:
@@ -696,18 +715,19 @@ class CodexNativeExecutor(Executor):
         scope = (state.session_id, state.thread_id, state.socket_path)
         registry = self._requesters_for_state(state)
         revision = registry.revision
-        client = await _connect_to_app_server(state)
-        if client is None:
-            return None
         try:
-            response = await client.request(
-                "thread/read", {"threadId": identity.thread_id, "includeTurns": True}
-            )
+            client = await _connect_to_app_server(state)
+            if client is None:
+                return None
+            try:
+                response = await client.request(
+                    "thread/read", {"threadId": identity.thread_id, "includeTurns": True}
+                )
+            finally:
+                await client.close()
         except (OSError, WebSocketException, CodexAppServerResponseError, TimeoutError):
             _logger.warning("Codex requester evidence unavailable", exc_info=True)
             return None
-        finally:
-            await client.close()
         # Validate after all transport awaits, including connection cleanup.
         current = read_bridge_state(self._bridge_dir)
         if (
@@ -840,8 +860,8 @@ class CodexNativeExecutor(Executor):
                         "turn/interrupt",
                         {"threadId": state.thread_id, "turnId": ""},
                     )
-                except Exception:  # the local cancel above already took effect.
-                    _logger.exception("Codex native MCP startup interrupt failed")
+                except Exception:
+                    _logger.warning("Codex native MCP startup interrupt failed", exc_info=True)
                 _logger.info("Codex native MCP startup cancelled: %s", ", ".join(pending))
             if state.active_turn_id is not None:
                 try:

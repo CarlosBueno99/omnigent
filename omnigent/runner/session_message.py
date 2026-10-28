@@ -31,7 +31,9 @@ async def execute_message_tool(
     if client is None or source_id is None:
         return json.dumps({"error": "Session messaging requires an authenticated runner"})
     try:
-        path = f"/v1/sessions/{target}/events"
+        # The accepting replica must understand requester provenance, not merely
+        # the older peer-message capability. Never retry on a legacy endpoint.
+        path = f"/v1/requester/sessions/{target}/events"
         payload = {"type": "session_message", "data": {"message": message}}
         headers = {ORCHESTRATION_SOURCE_HEADER: source_id, **requester_headers()}
         response = await client.post(path, headers=headers, json=payload, timeout=60)

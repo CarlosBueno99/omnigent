@@ -853,6 +853,12 @@ def register_events_routes(
         return user_id, conv
 
     @event_router.post(
+        "/requester/sessions/{session_id}/events",
+        include_in_schema=False,
+        status_code=202,
+        response_model=None,
+    )
+    @event_router.post(
         "/sessions/{session_id}/events",
         # Internal event ingestion — hidden from the public API reference.
         include_in_schema=False,
@@ -868,6 +874,9 @@ def register_events_routes(
     ) -> dict[str, bool | str] | list[dict[str, bool | str]]:
         """
         Route entry for :func:`_post_event_impl`.
+
+        The internal ``/requester`` alias guarantees that delegation metadata
+        is understood by the replica accepting the event, before any effects.
 
         A single object preserves the existing API. A top-level JSON array is
         processed in order and returns one acknowledgement per event when all

@@ -170,6 +170,7 @@ class _StubResourceRegistry:
         sandbox_override: str | None = None,
         parent_os_env: object | None = None,
         resource_role: str | None = None,
+        complete_writer_observation: bool = False,
     ) -> SessionResourceView:
         """Return an auxiliary terminal resource view for a fake instance."""
         return await self._launch(
