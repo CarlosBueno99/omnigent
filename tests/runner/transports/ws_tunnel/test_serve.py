@@ -3719,6 +3719,58 @@ async def test_serve_tunnel_shutdown_during_renewal_mint_finishes_graceful_drain
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("permit_delay_s", [0.0, 40.0, 100.0, 150.0])
+@pytest.mark.parametrize("opened_ago_s", [None, 25.0], ids=["watcher-start", "socket-open"])
+async def test_await_renewal_keeps_its_deadline_when_the_permit_is_delayed(
+    monkeypatch: pytest.MonkeyPatch, permit_delay_s: float, opened_ago_s: float | None
+) -> None:
+    """Admission readiness must not restart the socket's renewal interval."""
+    now = 1000.0
+    sleeps: list[float] = []
+    mint_times: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    async def prepare() -> str:
+        mint_times.append(now)
+        return "renewed-token"
+
+    monkeypatch.setattr(serve_module, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(serve_module, "asyncio", SimpleNamespace(sleep=sleep))
+    monkeypatch.setattr(serve_module, "_tunnel_renewal_delay_s", lambda _interval: 100.0)
+    loop = asyncio.get_running_loop()
+    renewal_signal: asyncio.Future[tuple[str | None, str]] = loop.create_future()
+    permit_ready: asyncio.Future[str] = loop.create_future()
+    watcher = asyncio.create_task(
+        serve_module._await_renewal(
+            100.0,
+            renewal_signal,
+            prepare,
+            None,
+            "runner_delayed_permit",
+            permit_ready,
+            opened_monotonic=None if opened_ago_s is None else now - opened_ago_s,
+        )
+    )
+    try:
+        await asyncio.sleep(0)
+        now += permit_delay_s
+        permit_ready.set_result("permit")
+        await watcher
+    finally:
+        watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watcher
+    renewal_delay_s = 100.0 - (opened_ago_s or 0.0)
+    assert sleeps == [max(0.0, renewal_delay_s - permit_delay_s)]
+    assert mint_times == [1000.0 + max(renewal_delay_s, permit_delay_s)]
+    assert renewal_signal.result() == ("renewed-token", "permit")
+
+
+@pytest.mark.asyncio
 async def test_await_renewal_skips_cutover_when_shutdown_races_mint() -> None:
     """A shutdown that begins while the mint is in flight cancels the cutover.
 

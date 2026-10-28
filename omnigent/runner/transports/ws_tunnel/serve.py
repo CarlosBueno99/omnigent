@@ -509,7 +509,7 @@ async def serve_tunnel(
     # Token the renewal watcher minted, carried to the next iteration so the
     # make-before-break replacement reuses it. The _UNSET sentinel keeps a
     # prepared no-auth None distinct from "nothing prepared" to avoid re-minting.
-    prepared_token: str | None | _UnsetToken = _UNSET
+    prepared_token: str | _UnsetToken | None = _UNSET
     planned_permit: str | None = None
     planned_predecessor: asyncio.Task[_CloseDetails] | None = None
     continuity_token: str | None = None
@@ -1118,7 +1118,7 @@ async def _sign_in_pending(factory: Callable[[], str | None] | None) -> bool:
         return False
     try:
         return bool(await asyncio.to_thread(getattr, factory, "sign_in_pending", False))
-    except Exception:  # noqa: BLE001 - optional status cannot prevent a tunnel upgrade.
+    except Exception:
         _logger.warning(
             "sign_in_pending read failed; continuing with the available credential",
             exc_info=True,
@@ -1292,6 +1292,8 @@ async def _await_renewal(
     shutdown_event: asyncio.Event | None,
     runner_id: str,
     permit_ready: asyncio.Future[str],
+    *,
+    opened_monotonic: float | None = None,
 ) -> None:
     """Resolve fresh credentials and signal a make-before-break renewal.
 
@@ -1308,17 +1310,22 @@ async def _await_renewal(
         means credentials are unavailable this round.
     :param shutdown_event: Graceful-shutdown event; renewal stands down when set.
     :param runner_id: Runner id for log correlation.
+    :param permit_ready: Admission permit, which can wait for predecessor work.
+    :param opened_monotonic: Socket-open time; defaults to this watcher's start.
     :returns: None.
     """
+    renew_at = (
+        time.monotonic() if opened_monotonic is None else opened_monotonic
+    ) + _tunnel_renewal_delay_s(interval_s)
     permit = await permit_ready
-    await asyncio.sleep(_tunnel_renewal_delay_s(interval_s))
+    await asyncio.sleep(max(0.0, renew_at - time.monotonic()))
     retry_delay_s = _TUNNEL_RENEWAL_RETRY_INITIAL_S
     while not renewal_signal.done():
         if shutdown_event is not None and shutdown_event.is_set():
             return
         try:
             token = await on_prepare_renewal()
-        except Exception:  # noqa: BLE001 -- any factory failure keeps the current tunnel
+        except Exception:
             _logger.warning(
                 "runner %s tunnel renewal could not resolve credentials; "
                 "keeping the current tunnel and retrying in %.0fs",
@@ -1531,6 +1538,7 @@ async def _serve_tunnel_once(
         ) as ws,
         diagnostics.monitoring(_report_diagnostics, connection_id=connection_id),
     ):
+        opened_monotonic = time.monotonic()
         diagnostics.settings.update(
             protocol_ping_interval_s=getattr(ws, "ping_interval", None),
             protocol_ping_timeout_s=getattr(ws, "ping_timeout", None),
@@ -1644,6 +1652,7 @@ async def _serve_tunnel_once(
                     shutdown_event,
                     runner_id,
                     permit_ready,
+                    opened_monotonic=opened_monotonic,
                 ),
                 name=f"runner-tunnel-renewal:{runner_id}",
             )

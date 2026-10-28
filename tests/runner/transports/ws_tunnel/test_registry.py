@@ -476,17 +476,41 @@ async def test_register_replacing_existing_session_aborts_inflight() -> None:
 
 
 @pytest.mark.asyncio
-async def test_deregister_aborts_inflight() -> None:
+@pytest.mark.parametrize("generation", ["current", "renewed", "predecessor_only"])
+@pytest.mark.parametrize("retire", [False, True])
+async def test_deregister_aborts_inflight(generation: str, retire: bool) -> None:
     """Tunnel close → in-flight requests fail with ConnectionError, not hang."""
-    reg = TunnelRegistry()
-    reg.register("r1", _NoopWS(), _hello())
+    retired: list[str] = []
+    reg = TunnelRegistry(on_retire=retired.append)
+    old = reg.register("r1", _ClosingWS(), _renewal_hello())
     state = reg.open_request("r1", "req1")
+    channel = reg.open_ws_channel("r1", "terminal", session=old)
+    current = old
+    if generation != "current":
+        current = reg.register("r1", _ClosingWS(), _renewal_hello(old))
+        if generation == "predecessor_only":
+            reg.deregister("r1", current, retire=False)
 
-    reg.deregister("r1")
-
-    assert state.head_future.done()
-    with pytest.raises(ConnectionError, match="tunnel closed"):
-        state.head_future.result()
+    removed = reg.deregister("r1", retire=retire)
+    try:
+        assert removed is (old if generation == "predecessor_only" else current)
+        assert reg.get("r1") is None
+        assert not reg.has_live_predecessor("r1")
+        assert not reg.accepts_frames(old)
+        assert not reg.accepts_frames(current)
+        assert state.head_future.done()
+        with pytest.raises(ConnectionError, match="tunnel closed"):
+            state.head_future.result()
+        assert await channel.inbound_queue.get() is None
+        await _wait_until(lambda: old.ws.closed is not None and current.ws.closed is not None)
+        assert old.ws.closed[0] == current.ws.closed[0] == 1001
+        assert retired == (["r1"] if retire else [])
+    finally:
+        reg.deregister("r1", old, retire=False)
+        if state.head_future.done() and not state.head_future.cancelled():
+            state.head_future.exception()
+        else:
+            state.head_future.cancel()
 
 
 @pytest.mark.asyncio

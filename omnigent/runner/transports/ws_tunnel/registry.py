@@ -486,6 +486,7 @@ class TunnelRegistry:
             deregistration only removes the registry entry if the
             current or draining entry is this exact session object. A
             draining connection's loss aborts only its own requests.
+            Without a guard, remove both current and draining generations.
         :param retire: ``True`` when this server retires a live tunnel on
             purpose and expects the runner to reconnect, which the
             ``on_retire`` callback reports. The tunnel route passes
@@ -504,28 +505,39 @@ class TunnelRegistry:
                 if current is not None:
                     self._offer_renewal(current)
                 return session
-            if current is None or (session is not None and current is not session):
+            if session is not None and current is not session:
                 return None
-            removed = self._sessions.pop(runner_id)
-            self.record_close(removed, code=1001, reason="tunnel retired by server; reconnect")
-            in_flight_count = len(removed.in_flight)
-            if in_flight_count:
-                _logger.warning(
-                    "Deregistering runner %s; aborting %d in-flight request(s)",
-                    runner_id,
-                    in_flight_count,
-                    extra={"session_id": runner_primary_session_id()},
+            removed = self._sessions.pop(runner_id, None)
+            predecessor = self._draining.pop(runner_id, None) if session is None else None
+            if removed is None:
+                removed = predecessor
+            if removed is None:
+                return None
+            removed_sessions = [removed]
+            if predecessor is not None and predecessor is not removed:
+                removed_sessions.append(predecessor)
+            for removed_session in removed_sessions:
+                self.record_close(
+                    removed_session, code=1001, reason="tunnel retired by server; reconnect"
                 )
-            else:
-                _logger.info(
-                    "Deregistering runner %s; no in-flight requests",
-                    runner_id,
-                    extra={"session_id": runner_primary_session_id()},
+                in_flight_count = len(removed_session.in_flight)
+                if in_flight_count:
+                    _logger.warning(
+                        "Deregistering runner %s; aborting %d in-flight request(s)",
+                        runner_id,
+                        in_flight_count,
+                        extra={"session_id": runner_primary_session_id()},
+                    )
+                else:
+                    _logger.info(
+                        "Deregistering runner %s; no in-flight requests",
+                        runner_id,
+                        extra={"session_id": runner_primary_session_id()},
+                    )
+                self._abort_session_inflight(
+                    removed_session,
+                    ConnectionError("tunnel closed before request completed"),
                 )
-            self._abort_session_inflight(
-                removed,
-                ConnectionError("tunnel closed before request completed"),
-            )
         # Report the deliberate retire before the close reaches the route's
         # disconnect hook, which reads it when deciding what the loss means.
         if retire and self._on_retire is not None:
@@ -535,7 +547,10 @@ class TunnelRegistry:
         # prompt, spread reconnect instead of an escalating backoff. Avoid 1012
         # too — the server's own shutdown_state treats an observed 1012 as
         # "this server is shutting down".
-        _retire_session_writer(removed, code=1001, reason="tunnel retired by server; reconnect")
+        for removed_session in removed_sessions:
+            _retire_session_writer(
+                removed_session, code=1001, reason="tunnel retired by server; reconnect"
+            )
         return removed
 
     def record_close(self, session: RunnerSession, *, code: int, reason: str) -> None:
@@ -944,7 +959,7 @@ class TunnelRegistry:
                             session.diagnostics.enqueued(
                                 frame, session.outbound_queue.qsize(), requested_at
                             )
-                        except Exception:  # noqa: BLE001 — recording failures are best-effort.
+                        except Exception:
                             _logger.debug(
                                 "Runner %s outbound queue diagnostics failed",
                                 session.runner_id,
