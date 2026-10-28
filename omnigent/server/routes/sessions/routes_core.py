@@ -1055,8 +1055,11 @@ def register_core_routes(
 
         if any(item.requester is not None for item in body.initial_items):
             raise OmnigentError("Initial requester is server-owned", code=ErrorCode.FORBIDDEN)
+        # Runner credentials identify the transport, not the initiating person.
+        requester_id = None if RUNNER_TUNNEL_TOKEN_HEADER in request.headers else user_id
         input_requester = InputRequester(
-            user_id=user_id, account_generation=account_generation(user_id) if user_id else None
+            user_id=requester_id,
+            account_generation=account_generation(requester_id) if requester_id else None,
         )
         if REQUESTER_HEADER in request.headers:
             requester_source = source

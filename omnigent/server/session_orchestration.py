@@ -11,7 +11,6 @@ from omnigent.runner.identity import (
     RUNNER_TUNNEL_TOKEN_HEADER,
     token_bound_runner_id,
 )
-from omnigent.runtime.requester import REQUESTER_HEADER
 from omnigent.server.auth import LEVEL_OWNER
 from omnigent.server.feature_flags import Feature
 from omnigent.server.requester import tool_requester
@@ -32,9 +31,8 @@ def require_owned_session(
     permissions: PermissionStore,
     *,
     check_source: bool = False,
-    allow_shared: bool = False,
 ) -> Conversation:
-    """Resolve actual ownership and inherited sharing, without administrator bypass."""
+    """Resolve ownership and inherited source chains without administrator bypass."""
     session_id = normalize_uuid(identifier)
     session = conversations.get_conversation(session_id) if session_id else None
     current, seen = session, set()
@@ -51,15 +49,6 @@ def require_owned_session(
         if grant is None or grant.level != LEVEL_OWNER:
             break
         if check_source:
-            if not allow_shared:
-                # Legacy runners can only establish authority from private sources.
-                grants, cursor = permissions.list_for_session(current.id, limit=2)
-                if cursor is not None or any(g.user_id != user_id for g in grants):
-                    raise OmnigentError(
-                        "Shared sessions cannot send messages or launch independent sessions "
-                        "without a verified owner execution",
-                        code=ErrorCode.FORBIDDEN,
-                    )
             if current.labels.get(SIDE_CHAT_LABEL_KEY) == "1":
                 # Side chats keep their own grants but inherit source restrictions.
                 source_id = current.labels.get(SIDE_CHAT_SOURCE_LABEL_KEY)
@@ -89,8 +78,6 @@ def require_orchestration_source(
         conversations,
         permissions,
         check_source=True,
-        # The envelope is authenticated below before any action is admitted.
-        allow_shared=REQUESTER_HEADER in request.headers,
     )
     token = (request.headers.get(RUNNER_TUNNEL_TOKEN_HEADER) or "").strip()
     if not token or not source.runner_id or token_bound_runner_id(token) != source.runner_id:
@@ -98,8 +85,9 @@ def require_orchestration_source(
             "Session orchestration requires the sender's bound runner", code=ErrorCode.FORBIDDEN
         )
     requester = tool_requester(request, source)
-    if requester is not None and (
-        requester.origin.user_id != user_id
+    if (
+        requester is None
+        or requester.origin.user_id != user_id
         or requester.origin.account_generation != account_generation(user_id)
     ):
         raise OmnigentError(

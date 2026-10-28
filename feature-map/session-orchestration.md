@@ -7,8 +7,9 @@ workers on its host or a new managed sandbox. This is enabled by default, with
 
 Shared-source support in this branch is a prototype. OpenAI Agents SDK and
 Codex-native web Chat have process and browser evidence. Native terminal input,
-provider-native helpers, Claude requester binding and legacy compatibility
-still require work before rollout.
+provider-native helpers, Claude requester binding and old-server compatibility
+still require work before rollout. Sharing and this plumbing belong to one
+change; a passing web journey does not establish full harness compatibility.
 
 ## Sub-features
 
@@ -36,8 +37,9 @@ still require work before rollout.
 - `scheduled`: scheduled runs, their forks and children use the new sends and
   independent creates like any private session their owner owns, so an
   automation can message the owner's other sessions or start workers.
-- `refusal`: disabled flag, another owner, unverified shared sender or wrong runner binding
-  refuses the operation. Unsupported servers reject independent creation without
+- `refusal`: disabled flag, another owner, unverified requester or wrong runner binding
+  refuses the operation, even from a private sender. Missing requester metadata
+  never becomes owner authority. Unsupported servers reject independent creation without
   falling back to ordinary creation. Timeouts, 408/429/5xx responses and invalid
   acknowledgements are uncertain and must not auto-retry. After uncertain
   creation, inspect existing sessions before creating another worker.
@@ -110,14 +112,29 @@ the header states are covered by `web/src/shell/ChatHeader.test.tsx`.
   Pat's message during owner work, reduce Pat to read-only, and verify that old
   work does not gain owner authority. Repeat independent worker creation and
   check that a refused request leaves no new worker.
-- Unsupported requester paths: the current Claude-native PTY integration cannot
-  bind authenticated submissions to retained calls, including in the inspected
-  newer CLI. Its tool-use locator is transported but grants no authority. Claude
-  SDK callbacks without execution binding are also unknown. Codex terminal input
-  and provider-native helpers still lack registered consumed input. Unknown
-  callbacks cannot delegate through the new requester gate. The legacy private
-  fallback and these compatibility gaps must be resolved before shipping; the
-  prototype does not promise to preserve private delegation on every harness yet.
+- Requester compatibility matrix (implementation limits, not test results):
+
+  | Entry point | Owner delegation | Required verification |
+  | --- | --- | --- |
+  | OpenAI Agents SDK Chat/API | Implemented | Real process send/create, editor refusal, fresh owner recovery and kill switch. |
+  | Codex native web Chat | Implemented | Pinned CLI consumption IDs, authenticated harness lookup, browser actions and destination history. |
+  | Claude SDK Chat/API | Blocked, including private sessions | SDK must preserve a retained call-to-input binding; current component tests prove refusal only. |
+  | Claude native Chat/terminal | Blocked | PTY input must bind its actual requester to consumed execution and retained calls. Typing remains available. |
+  | Codex native terminal/local CLI | Blocked | Track the authenticated writer across relay/direct/local attachment, then register the composed submission before consumption. Typing remains available. |
+  | Provider-native children/helpers | Incomplete | Preserve each input's requester through child creation, steering, queue consumption and wakes. Ordinary helper visibility is not proof. |
+  | Legacy runner → updated server | Refused without requester | Private/shared sends and creates leave no new task or worker; ordinary child work keeps unknown origin. |
+  | Updated runner → older/mixed server replicas | Unverified | Explicit refusal before writes when a receiving server cannot preserve requester metadata. A capability read on another replica is insufficient. |
+
+- Component compatibility checks: `tests/runtime/harnesses/test_executor_adapter_requester.py`
+  exercises retained callbacks with the real SDK parser/dispatcher. The Claude
+  scenario verifies that lost metadata stays unknown even after fresh owner
+  input; it is a refusal test, not successful Claude delegation.
+  `tests/server/integration/test_session_orchestration.py` checks owner/editor/
+  missing requester across child startup, peer delivery, sharing changes and
+  durable queues. `tests/inner/test_acp_executor.py` and
+  `tests/test_sessions_native_messages.py` cover other affected consumers of
+  shared dispatch metadata. Run these as ordinary pytest targets, with retries
+  disabled; they do not replace process or terminal evidence.
 - Native compatibility check for each supported requester path: send a distinctive task to a second session;
   open its Chat and confirm the source label and result. Ask the manager to
   read it. Share the manager and repeat as owner, then collaborator: only the
@@ -156,7 +173,9 @@ the header states are covered by `web/src/shell/ChatHeader.test.tsx`.
   one that the owner can inspect. Keyless legacy routing must be configured on
   the runner; independent creation has no automatic routing fallback.
 - Independent creation uses `/v1/sessions/orchestrated`, which requires a source;
-  older servers cannot silently accept the request as ordinary session creation.
+  older servers without that route cannot silently accept ordinary creation.
+  A server that already has the route but predates requester tracking still
+  needs a protocol boundary; the current route alone does not establish it.
 - A shared receiver can continue working. A verified owner execution can send
   another message; sharing does not add automatic completion replies.
 - Requester and ownership checks govern these tools. They do not confine arbitrary code holding
@@ -167,8 +186,8 @@ the header states are covered by `web/src/shell/ChatHeader.test.tsx`.
   using allow-listed tunnel tokens are unsupported;
   this gate requires token-derived runner IDs and refuses other bindings.
 - Side chats require an owned, available source chain. Verified owner executions
-  may delegate through shared chains; the legacy path requires every source to
-  be private. Nested side chats and children inherit the checks. Missing or cyclic
+  may delegate through shared chains; missing requester identity refuses even
+  when every source is private. Nested side chats and children inherit the checks. Missing or cyclic
   chains are refused. Sharing changes never rehabilitate a known collaborator's
   queued input or consumed steering.
 - Peer messages carry task text, display attribution, and protected requester
@@ -199,7 +218,8 @@ the header states are covered by `web/src/shell/ChatHeader.test.tsx`.
   it is disabled. Peer messaging has no additional per-agent opt-in; creation
   retains its existing `spawn` advertisement gate. No schema migration or
   per-owner settings page is needed.
-  V1 treats eligible private agents as delegates across the owner's sessions.
+  V1 treated eligible private agents as delegates across the owner's sessions;
+  this change additionally requires a verified owner execution.
   Unlike sharing, messaging does not grant another user access, but untrusted
   content can still influence an agent to steer other owned sessions. Enabling
   the flag accepts that broader trust; hiding a tool is not authorization.

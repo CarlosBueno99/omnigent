@@ -3532,6 +3532,43 @@
         "title": "IncompleteEvent",
         "type": "object"
       },
+      "InputRequester": {
+        "additionalProperties": false,
+        "description": "The authenticated origin of one accepted input, separate from attribution.\n\nAuthentication is established by the transport that supplies this value,\nnot by parsing it. An unknown user never acquires the runner owner's identity.",
+        "properties": {
+          "account_generation": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Generation"
+          },
+          "input_id": {
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Input Id",
+            "type": "string"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
+          }
+        },
+        "title": "InputRequester",
+        "type": "object"
+      },
       "LaunchRunnerRequest": {
         "description": "Request body for `POST /v1/hosts/{host_id}/runners`.",
         "properties": {
@@ -9603,6 +9640,16 @@
               }
             ],
             "title": "Model Override"
+          },
+          "requester": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputRequester"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "tools": {
             "anyOf": [

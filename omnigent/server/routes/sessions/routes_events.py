@@ -1162,18 +1162,8 @@ def register_events_routes(
 
             body = orchestration_message(source.id, body.data.get("message"))
             source_requester = tool_requester(request, source)
-            body = body.model_copy(
-                update={
-                    "requester": (
-                        source_requester.origin
-                        if source_requester is not None
-                        else InputRequester(
-                            user_id=user_id,
-                            account_generation=account_generation(user_id) if user_id else None,
-                        )
-                    )
-                }
-            )
+            assert source_requester is not None  # Required by the orchestration gate.
+            body = body.model_copy(update={"requester": source_requester.origin})
         if body.type == "message" and _is_native_terminal_session(conv):
             _logger.info(
                 "Native input received before runner initialization",

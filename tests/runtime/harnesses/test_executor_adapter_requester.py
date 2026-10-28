@@ -6,7 +6,7 @@ callback/injection barriers and reuse the real scaffold's parsing, context creat
 SSE serialization and teardown rather than the adjacent recording-context stand-ins.
 
 The OpenAI scenario runs the actual SDK in-process with a mocked HTTP model transport.
-The Claude scenario retains a real MCP handler in a simulated persistent reader task.
+The Claude scenario runs the SDK's MCP dispatcher in a simulated persistent reader task.
 Neither validates a live provider or the SDK harness subprocess startup path; that
 requires a separate process regression before landing.
 """
@@ -27,7 +27,7 @@ import pytest
 from openai import AsyncOpenAI
 from starlette.responses import StreamingResponse
 
-from omnigent.inner.claude_sdk_executor import _build_mcp_tools
+from omnigent.inner.claude_sdk_executor import _build_mcp_tools, _tool_call_metadata
 from omnigent.inner.executor import (
     Executor,
     ExecutorConfig,
@@ -122,6 +122,11 @@ async def _next_call(events: asyncio.Queue[dict[str, Any]]) -> dict[str, Any]:
 
 
 async def test_persistent_claude_callback_cannot_inherit_either_turns_requester() -> None:
+    from claude_agent_sdk import create_sdk_mcp_server
+    from claude_agent_sdk._internal.message_parser import parse_message
+    from claude_agent_sdk._internal.query import Query
+    from mcp.types import CallToolRequest
+
     executor = _CallbackExecutor()
     adapter = ExecutorAdapter(executor_factory=lambda: executor)
     owner = InputRequester(user_id="owner", account_generation="owner-generation")
@@ -136,11 +141,27 @@ async def test_persistent_claude_callback_cannot_inherit_either_turns_requester(
         [tool] = _build_mcp_tools(
             [{"name": "echo", "parameters": {"type": "object", "properties": {}}}], bridge
         )
+        server = create_sdk_mcp_server(name="omnigent", tools=[tool])["instance"]
+        handler = server.request_handlers[CallToolRequest]
+        received_metadata: list[object] = []
+
+        async def record_request(request):
+            received_metadata.append(request.params.meta)
+            return await handler(request)
+
+        server.request_handlers[CallToolRequest] = record_request
+        query = Query(
+            transport=AsyncMock(),
+            is_streaming_mode=True,
+            sdk_mcp_servers={"omnigent": server},
+        )
 
         async def persistent_reader() -> None:
             assert current_tool_requester.get() == first_requester
             while True:
-                results.put_nowait(await tool.handler(await calls.get()))
+                results.put_nowait(
+                    await query._handle_sdk_mcp_request("omnigent", await calls.get())
+                )
 
         token = current_tool_requester.set(first_requester)
         try:
@@ -149,31 +170,68 @@ async def test_persistent_claude_callback_cannot_inherit_either_turns_requester(
             current_tool_requester.reset(token)
 
     try:
-        async with _turn(adapter, executor, collaborator) as (second, events, config):
-            assert config.requester == collaborator
-            assert executor._tool_executor is bridge
-            adapter._translate_event(
-                ToolCallRequest(name="mcp__omnigent__echo", metadata={"call_id": "observed"}),
-                second,
-            )
-            # Model arguments and inherited task context both contain plausible authority.
-            calls.put_nowait({REQUESTER_FIELD: second.requester.snapshot().model_dump()})
-            item = await _next_call(events)
-            bound = ToolRequester.model_validate(item[REQUESTER_FIELD])
-            assert bound.origin.user_id is None
-            assert bound.execution_id not in {
-                first_requester.execution_id,
-                second.requester.execution_id,
-            }
-            assert item["call_id"] == "observed"
-            assert second._complete_tool(item["call_id"], '{"ok": true}')
-            result = await asyncio.wait_for(results.get(), timeout=3)
-            assert json.loads(result["content"][0]["text"]) == {"ok": True}
-            assert adapter._executor is executor
+        for origin in (collaborator, owner):
+            async with _turn(adapter, executor, origin) as (second, events, config):
+                assert config.requester == origin
+                assert executor._tool_executor is bridge
+                message = parse_message(
+                    {
+                        "type": "assistant",
+                        "session_id": "test-session",
+                        "uuid": "assistant-record",
+                        "user_message_uuid": origin.input_id,
+                        "message": {
+                            "model": "test-model",
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": "toolu_originating_call",
+                                    "name": "mcp__omnigent__echo",
+                                    "input": {},
+                                }
+                            ],
+                        },
+                    }
+                )
+                assert not hasattr(message, "user_message_uuid")
+                block = message.content[0]
+                adapter._translate_event(
+                    ToolCallRequest(name=block.name, metadata=_tool_call_metadata(block)),
+                    second,
+                )
+                # The SDK receives the provider ID, but currently drops it before dispatch.
+                calls.put_nowait(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "echo",
+                            "_meta": {"claudecode/toolUseId": "toolu_originating_call"},
+                            "arguments": {
+                                REQUESTER_FIELD: second.requester.snapshot().model_dump()
+                            },
+                        },
+                    }
+                )
+                item = await _next_call(events)
+                bound = ToolRequester.model_validate(item[REQUESTER_FIELD])
+                assert bound.origin.user_id is None
+                assert bound.execution_id not in {
+                    first_requester.execution_id,
+                    second.requester.execution_id,
+                }
+                assert item["call_id"] == "toolu_originating_call"
+                assert received_metadata[-1] is None
+                assert second._complete_tool(item["call_id"], '{"ok": true}')
+                result = await asyncio.wait_for(results.get(), timeout=3)
+                assert json.loads(result["result"]["content"][0]["text"]) == {"ok": True}
+                assert adapter._executor is executor
     finally:
         reader.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await reader
+        await query.close()
 
 
 async def test_delayed_bound_callback_cannot_rebind_to_a_new_execution() -> None:

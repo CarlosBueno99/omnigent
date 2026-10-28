@@ -25,8 +25,8 @@ def tool_requester(
     """Use authenticated direct identity; only the bound runner may attest input.
 
     Direct capture requires an authenticated ``user_id``. Headerless runners
-    retain ``None`` for the legacy private-session fallback, never that user's
-    identity. Operation IDs scope retries, not the account or generation.
+    retain ``None`` for unknown input, never that user's identity. Private
+    sessions do not establish input provenance. Operation IDs scope retries.
     """
     raw = request.headers.get(REQUESTER_HEADER)
     if raw is None:

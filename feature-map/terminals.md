@@ -163,6 +163,12 @@ verify-env run -- python -m pytest <test> --ui-skip-build --video=on \
 
 ## Gotchas
 
+- Preserving terminal typing does not prove orchestration requester identity.
+  Repeat the owner/editor/fresh-owner journeys from [Session orchestration](./session-orchestration.md)
+  through the agent terminal, direct browser attachment and local CLI when
+  those paths change. A successful web Chat run does not cover typed input;
+  unknown requester work must remain unable to delegate.
+
 - The terminal strip and the agent terminal behind the Chat/Terminal switcher
   are different surfaces. A reattach or reconnect fix must be checked on both.
 - A host switch updates the host badge immediately. The badge changing is not

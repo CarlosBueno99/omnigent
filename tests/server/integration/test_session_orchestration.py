@@ -51,7 +51,13 @@ async def peers(auth_client, auth_app, db_uri, monkeypatch):
     return source, target, captured
 
 
-async def _send(client, source, target, message="Please inspect the PR", *, requester=None):
+def _requester(user_id="alice"):
+    return ExecutionRequester(InputRequester(user_id=user_id)).snapshot()
+
+
+async def _send(client, source, target, message="Please inspect the PR", *, requester="owner"):
+    if requester == "owner":
+        requester = _requester()
     return json.loads(
         await execute_tool(
             tool_name="sys_session_message",
@@ -154,7 +160,11 @@ async def test_runner_is_trusted_for_other_owned_sessions_it_hosts(auth_client, 
     permissions = SqlAlchemyPermissionStore(db_uri)
     permissions.ensure_user("bob")
     permissions.grant("bob", sibling["id"], LEVEL_READ)
-    assert "Shared sessions cannot" in (await _send(auth_client, sibling, target))["detail"]
+    assert (await _send(auth_client, sibling, target)).get("queued") is True
+    assert (
+        "verified owner execution"
+        in (await _send(auth_client, sibling, target, requester=None))["detail"]
+    )
 
 
 @pytest.mark.parametrize("batch", [False, True])
@@ -172,7 +182,10 @@ async def test_peer_message_tracks_runner_startup(auth_client, peers, monkeypatc
     event = {"type": "session_message", "data": {"message": "Start"}}
     response = await auth_client.post(
         f"/v1/sessions/{target['id']}/events",
-        headers={ORCHESTRATION_SOURCE_HEADER: source["id"]},
+        headers={
+            ORCHESTRATION_SOURCE_HEADER: source["id"],
+            REQUESTER_HEADER: _requester().model_dump_json(),
+        },
         json=[event] if batch else event,
     )
     assert response.status_code == 202, response.text
@@ -195,6 +208,7 @@ async def test_peer_message_tracks_runner_startup(auth_client, peers, monkeypatc
         "blank",
         "oversize",
         "missing_source",
+        "missing_requester",
         "unknown_requester",
         "stale_account",
         "invalid_requester",
@@ -226,6 +240,8 @@ async def test_refusal_before_delivery(condition, auth_client, auth_app, peers, 
     headers = {ORCHESTRATION_SOURCE_HEADER: source["id"]}
     if condition == "missing_source":
         headers.clear()
+    if condition not in {"shared_read", "shared_edit", "public", "missing_requester"}:
+        headers[REQUESTER_HEADER] = _requester().model_dump_json()
     if condition in {"unknown_requester", "stale_account", "invalid_requester"}:
         origin = InputRequester(
             user_id="alice" if condition == "stale_account" else None,
@@ -254,12 +270,12 @@ async def test_refusal_before_delivery(condition, auth_client, auth_app, peers, 
     assert not captured.get("posts")
 
 
-async def test_sharing_during_receiver_startup_blocks_delivery(
+async def test_sharing_during_receiver_startup_preserves_owner_delivery(
     auth_client, peers, db_uri, monkeypatch
 ):
     from omnigent.server.routes import sessions
 
-    source, target, captured = peers
+    source, target, _ = peers
     permissions = SqlAlchemyPermissionStore(db_uri)
     permissions.ensure_user("bob")
 
@@ -268,30 +284,53 @@ async def test_sharing_during_receiver_startup_blocks_delivery(
 
     monkeypatch.setattr(sessions, "_ensure_runner_relay_ready", share_while_starting)
     result = await _send(auth_client, source, target)
-    assert "error" in result, result
-    assert not any("/events" in path for path, _ in captured.get("posts", []))
+    assert result.get("queued") is True, result
     items = await auth_client.get(f"/v1/sessions/{target['id']}/items")
-    assert "Please inspect" not in items.text
+    assert "Please inspect" in items.text
 
 
-async def test_child_inherits_source_sharing(auth_client, peers, db_uri):
+@pytest.mark.parametrize("requester_user", ["alice", "bob", None])
+async def test_child_inherits_source_requester(auth_client, peers, db_uri, requester_user):
     source, target, captured = peers
     response = await auth_client.post(
         "/v1/sessions",
+        headers={REQUESTER_HEADER: _requester(requester_user).model_dump_json()}
+        if requester_user is not None
+        else {},
         json={
             "agent_id": source["agent_id"],
             "parent_session_id": source["id"],
+            "initial_items": [
+                {
+                    "type": "message",
+                    "data": {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Child work"}],
+                    },
+                }
+            ],
         },
     )
     assert response.status_code == 201, response.text
     child = response.json()
-    assert (await _send(auth_client, child, target)).get("queued") is True
+    [initial_message] = [
+        body for path, body in captured["posts"] if path == f"/v1/sessions/{child['id']}/events"
+    ]
+    origin = InputRequester.from_body(initial_message)
+    # A headerless runner keeps child work usable without inventing owner authority.
+    assert origin.user_id == requester_user
+    requester = ExecutionRequester(origin).snapshot()
     permissions = SqlAlchemyPermissionStore(db_uri)
     permissions.ensure_user("bob")
     permissions.grant("bob", source["id"], LEVEL_READ)
     captured.clear()
-    assert "Shared sessions cannot" in (await _send(auth_client, child, target))["detail"]
-    assert not captured.get("posts")
+    result = await _send(auth_client, child, target, requester=requester)
+    if requester_user == "alice":
+        assert result.get("queued") is True, result
+        assert InputRequester.from_body(captured["body"]).user_id == "alice"
+    else:
+        assert "verified owner execution" in result["detail"]
+        assert not captured.get("posts")
 
 
 @pytest.mark.parametrize("descendant", ["side_chat", "nested_side_chat", "child"])
@@ -329,21 +368,25 @@ async def test_side_chat_inherits_sharing_for_new_controls(
     before_sessions = {s.id for s in store.list_conversations().data}
     before_grants = permissions.list_for_user("alice")
     captured.clear()
-    assert "Shared sessions cannot" in (await _send(auth_client, manager, target))["detail"]
+    assert (
+        "verified owner execution"
+        in (await _send(auth_client, manager, target, requester=_requester("bob")))["detail"]
+    )
     for placement in ("same_host", "managed"):
         result = json.loads(
             await execute_tool(
+                requester=_requester("bob"),
                 tool_name="sys_session_create",
                 arguments=json.dumps({"agent_id": side["agent_id"], "placement": placement}),
                 server_client=auth_client,
                 conversation_id=manager["id"],
             )
         )
-        assert "Shared sessions cannot" in result["detail"], result
+        assert "verified owner execution" in result["detail"], result
     assert not captured.get("posts")
     assert {s.id for s in store.list_conversations().data} == before_sessions
     assert permissions.list_for_user("alice") == before_grants
-    # Sharing restricts new controls, not existing owner reads or incoming work.
+    # Collaborator work is restricted; owner reads and new owner work still succeed.
     history = await auth_client.get(f"/v1/sessions/{manager['id']}/items")
     assert history.status_code == 200, history.text
     _bind_runner(db_uri, target["id"])
@@ -450,6 +493,7 @@ async def test_scheduled_origin_allows_new_controls_children_and_reads(
         for placement in ("same_host", "managed"):
             result = json.loads(
                 await execute_tool(
+                    requester=_requester(),
                     tool_name="sys_session_create",
                     arguments=json.dumps({"agent_id": source["agent_id"], "placement": placement}),
                     server_client=auth_client,
@@ -503,7 +547,12 @@ async def test_scheduled_origin_allows_new_controls_children_and_reads(
 @pytest.mark.parametrize("placement", ["same_host", "managed"])
 @pytest.mark.parametrize(
     "condition,orchestration_environment",
-    [("flag_off", "-session_orchestration"), ("shared", None), ("binding", None)],
+    [
+        ("flag_off", "-session_orchestration"),
+        ("shared", None),
+        ("binding", None),
+        ("legacy", None),
+    ],
     indirect=["orchestration_environment"],
 )
 async def test_creation_refuses_before_launch(
@@ -528,6 +577,9 @@ async def test_creation_refuses_before_launch(
     before_grants = permissions.list_for_user("alice")
     result = json.loads(
         await execute_tool(
+            requester=None
+            if condition == "legacy"
+            else _requester("bob" if condition == "shared" else "alice"),
             tool_name="sys_session_create",
             arguments=json.dumps({"agent_id": source["agent_id"], "placement": placement}),
             server_client=auth_client,
@@ -536,14 +588,18 @@ async def test_creation_refuses_before_launch(
     )
     expected = {
         "flag_off": "Session orchestration is disabled",
-        "shared": "Shared sessions cannot",
+        "shared": "verified owner execution",
+        "legacy": "verified owner execution",
         "binding": "requires the sender's bound runner",
     }[condition]
     assert expected in result["detail"], result
     if condition == "flag_off":
         response = await auth_client.post(
             "/v1/sessions",
-            headers={ORCHESTRATION_SOURCE_HEADER: source["id"]},
+            headers={
+                ORCHESTRATION_SOURCE_HEADER: source["id"],
+                REQUESTER_HEADER: _requester().model_dump_json(),
+            },
             json={
                 "agent_id": source["agent_id"],
                 "host_type": "managed" if placement == "managed" else "external",
@@ -569,6 +625,7 @@ async def test_same_host_still_requires_host_ownership(auth_client, auth_app, pe
     before_grants = permissions.list_for_user("alice")
     result = json.loads(
         await execute_tool(
+            requester=_requester(),
             tool_name="sys_session_create",
             arguments=json.dumps({"agent_id": source["agent_id"], "placement": "same_host"}),
             server_client=auth_client,
@@ -659,6 +716,7 @@ async def test_same_host_creation_uses_current_source_and_stays_private(
         before = {s.id for s in store.list_conversations().data}
         result = json.loads(
             await execute_tool(
+                requester=_requester(),
                 tool_name="sys_session_create",
                 arguments=json.dumps(
                     {
@@ -680,7 +738,10 @@ async def test_same_host_creation_uses_current_source_and_stays_private(
     else:
         response = await auth_client.post(
             "/v1/sessions/orchestrated",
-            headers={ORCHESTRATION_SOURCE_HEADER: manager["id"]},
+            headers={
+                ORCHESTRATION_SOURCE_HEADER: manager["id"],
+                REQUESTER_HEADER: _requester().model_dump_json(),
+            },
             json={"agent_id": source["agent_id"], "host_id": hosts[2], "workspace": "/requested"},
         )
         assert response.status_code == 201, response.text
@@ -746,7 +807,10 @@ async def test_independent_creation_rejects_child_or_bundle_shape(auth_client, p
     from tests._helpers.session import post_session_bundle
 
     source, _, _ = peers
-    headers = {ORCHESTRATION_SOURCE_HEADER: source["id"]}
+    headers = {
+        ORCHESTRATION_SOURCE_HEADER: source["id"],
+        REQUESTER_HEADER: _requester().model_dump_json(),
+    }
     if shape == "parent":
         response = await auth_client.post(
             "/v1/sessions/orchestrated",
@@ -826,6 +890,7 @@ async def test_managed_creation_uses_default_provider_and_saves_private_first_ta
     try:
         result = json.loads(
             await execute_tool(
+                requester=_requester(),
                 tool_name="sys_session_create",
                 arguments=json.dumps(
                     {
@@ -882,6 +947,7 @@ async def test_managed_creation_requires_launchable_provider(
     monkeypatch.setattr(routes_core, "_create_session_from_existing_agent", unexpected_creation)
     result = json.loads(
         await execute_tool(
+            requester=_requester(),
             tool_name="sys_session_create",
             arguments=json.dumps({"agent_id": source["agent_id"], "placement": "managed"}),
             server_client=auth_client,
@@ -906,9 +972,10 @@ async def test_orchestrated_endpoint_requires_source(auth_client, peers, monkeyp
     assert response.status_code == 403, response.text
 
 
+@pytest.mark.parametrize("requester_user", ["alice", "bob", None])
 @pytest.mark.parametrize("share_before_admission", [False, True])
 async def test_startup_queue_admission_and_replay(
-    auth_client, auth_app, peers, db_uri, monkeypatch, share_before_admission
+    auth_client, auth_app, peers, db_uri, monkeypatch, share_before_admission, requester_user
 ):
     from omnigent.server.startup_inputs import STARTUP_LABEL
 
@@ -928,11 +995,11 @@ async def test_startup_queue_admission_and_replay(
         return result
 
     monkeypatch.setattr(startup, "accepts", check_startup)
-    result = await _send(auth_client, source, target)
+    result = await _send(auth_client, source, target, requester=_requester(requester_user))
     pending = store.list_pending_inputs(target["id"])
     assert not captured.get("posts")
-    if share_before_admission:
-        assert "Shared sessions cannot" in result["detail"]
+    if requester_user != "alice":
+        assert "verified owner execution" in result["detail"]
         assert pending == []
     else:
         assert result["queued"] is True
@@ -944,7 +1011,10 @@ async def test_startup_queue_admission_and_replay(
         assert len(delivered) == 1
         assert f"[Message from session {source['id']}]" in json.dumps(delivered)
         assert store.list_pending_inputs(target["id"]) == []
-        assert "Shared sessions cannot" in (await _send(auth_client, source, target))["detail"]
+        assert (
+            "verified owner execution"
+            in (await _send(auth_client, source, target, requester=None))["detail"]
+        )
 
 
 @pytest.mark.parametrize("two_replica_stack", ["authenticated"], indirect=True)
@@ -1077,6 +1147,7 @@ async def test_managed_create_is_addressed_before_provisioning(
     ) as client:
         result = json.loads(
             await execute_tool(
+                requester=_requester(),
                 tool_name="sys_session_create",
                 arguments=json.dumps(
                     {
@@ -1179,6 +1250,7 @@ async def test_same_host_creation_across_replicas(
     ) as client:
         result = json.loads(
             await execute_tool(
+                requester=_requester(),
                 tool_name="sys_session_create",
                 arguments=json.dumps(
                     {
