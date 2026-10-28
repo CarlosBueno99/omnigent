@@ -3227,7 +3227,7 @@ async def _send_to_existing_session(
             }
         )
     display_title = title_without_closed_marker(_optional_string(snap_data.get("title")))
-    agent_label, instance_title = _snapshot_agent_title(snap_data)
+    agent_label, instance_title, _ = _snapshot_agent_title(snap_data)
     existing_work = _subagent_work.get_subagent_work(target_session_id)
     if existing_work is not None and existing_work.status == "launching":
         # No active turn to inject into yet; a send now could race a parallel
@@ -4886,7 +4886,7 @@ def _parse_session_title(raw_title: str | None) -> _ParsedTitle:
     return _ParsedTitle(agent=head, title=tail)
 
 
-def _snapshot_agent_title(snapshot: _JsonObject) -> tuple[str, str]:
+def _snapshot_agent_title(snapshot: _JsonObject) -> tuple[str, str, _ParsedTitle]:
     """
     Return a child session's ``(agent, title)`` identity from its snapshot.
 
@@ -4896,8 +4896,8 @@ def _snapshot_agent_title(snapshot: _JsonObject) -> tuple[str, str]:
 
     :param snapshot: ``GET /v1/sessions/{id}`` body, e.g.
         ``{"title": "LeakRepro", "agent_name": "codex-native-ui"}``.
-    :returns: The agent label and instance title, e.g.
-        ``("codex-native-ui", "LeakRepro")``.
+    :returns: The agent label, the instance title, and the parsed title,
+        e.g. ``("codex-native-ui", "LeakRepro", _ParsedTitle(None, None))``.
     """
     display_title = title_without_closed_marker(_optional_string(snapshot.get("title")))
     parsed = _parse_session_title(display_title)
@@ -4908,7 +4908,7 @@ def _snapshot_agent_title(snapshot: _JsonObject) -> tuple[str, str]:
         or "agent"
     )
     title = parsed.title if parsed.title is not None else (display_title or "")
-    return agent, title
+    return agent, title, parsed
 
 
 def _truncate_activity(
@@ -6644,9 +6644,7 @@ async def _session_close_via_rest(
     )
     if scope_error is not None:
         return scope_error
-    display_title = title_without_closed_marker(_optional_string(target_snap.get("title")))
-    parsed = _parse_session_title(display_title)
-    agent, title = _snapshot_agent_title(target_snap)
+    agent, title, parsed = _snapshot_agent_title(target_snap)
     patch_body: _JsonObject = {
         "labels": {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE},
         # archived=True triggers the server's _spawn_archive_stop reaper,
@@ -6654,7 +6652,7 @@ async def _session_close_via_rest(
         # Without this the child's OS-process cluster is never reaped.
         "archived": True,
     }
-    tombstone = f"{parsed.agent}:{parsed.title}" if parsed.agent is not None else display_title
+    tombstone = f"{parsed.agent}:{parsed.title}" if parsed.agent is not None else title
     if tombstone:
         patch_body["title"] = f"{tombstone}{_CLOSED_TITLE_INFIX}{target_id}"
     try:

@@ -12331,9 +12331,10 @@ async def _child_session_summaries_from_conversations(
     children: list[Conversation],
     parent_session_id: str,
     conv_store: ConversationStore,
+    agent_store: AgentStore,
 ) -> list[ChildSessionSummary]:
     """
-    Build child summaries with one batched message-preview lookup.
+    Build child summaries with batched message-preview and agent lookups.
 
     ``ChildSessionSummary.last_message_preview`` needs the latest visible
     message per child. Loading those by calling ``list_items`` once per
@@ -12346,16 +12347,17 @@ async def _child_session_summaries_from_conversations(
         ``list_conversations(kind="sub_agent")``.
     :param parent_session_id: Parent session id, e.g. ``"conv_parent987"``.
     :param conv_store: Conversation store used for the batched message read.
+    :param agent_store: Agent store used to resolve each child's agent name.
     :returns: One :class:`ChildSessionSummary` per input child, preserving
         input order.
     """
     if not children:
         return []
     child_ids = [child.id for child in children]
-    message_items_by_child = await asyncio.to_thread(
-        conv_store.list_latest_message_items_for_conversations,
-        child_ids,
-        10,
+    agent_ids = list({child.agent_id for child in children if child.agent_id is not None})
+    message_items_by_child, agents_by_id = await asyncio.gather(
+        asyncio.to_thread(conv_store.list_latest_message_items_for_conversations, child_ids, 10),
+        asyncio.to_thread(agent_store.get_many, agent_ids),
     )
     previews = {
         child_id: _latest_message_preview(message_items)
@@ -12366,6 +12368,9 @@ async def _child_session_summaries_from_conversations(
             child,
             parent_session_id,
             previews.get(child.id),
+            agent_name=(
+                agents_by_id[child.agent_id].name if child.agent_id in agents_by_id else None
+            ),
         )
         for child in children
     ]
