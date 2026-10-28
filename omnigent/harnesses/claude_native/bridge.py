@@ -4309,18 +4309,15 @@ def inject_user_message(
     # message's rejection.
     unknown_name = _passthrough_slash_command_name(content)
     rejection_needle: str | None = None
-    rejection_baseline = 0
     if unknown_name is not None:
         rejection_needle = f"{_UNKNOWN_COMMAND_REJECTION_PREFIX}/{unknown_name}"
-        rejection_baseline = _count_unknown_command_rejections(
-            _capture_pane(socket_path, tmux_target), rejection_needle
-        )
-    _paste_and_submit(
+    rejection_baseline = _paste_and_submit(
         bridge_dir,
         socket_path,
         tmux_target,
         text=injected_text,
         needle=needle,
+        rejection_needle=rejection_needle,
         ready_timeout_s=timeout_s,
     )
     if rejection_needle is None:
@@ -4359,9 +4356,10 @@ def _paste_and_submit(
     *,
     text: str,
     needle: str,
+    rejection_needle: str | None = None,
     preserve_draft: bool = False,
     ready_timeout_s: float = _TMUX_READY_TIMEOUT_S,
-) -> None:
+) -> int:
     r"""
     Deliver *text* into Claude's input box as one paste plus a verified Enter.
 
@@ -4377,9 +4375,10 @@ def _paste_and_submit(
     :param text: Exact text to paste (already escaped as needed).
     :param needle: Draft marker from :func:`_submit_needle`; empty skips
         draft-visibility verification (blind submit).
+    :param rejection_needle: Unknown-command rejection to baseline before the paste.
     :param preserve_draft: Refuse to replace terminal edits during a fallback delivery.
     :param ready_timeout_s: Bound the readiness wait after recovering a clipped composer.
-    :returns: None.
+    :returns: Pre-submit rejection count, or zero when no rejection is watched.
     :raises ClaudeUserPromptPending: If a question or permission prompt is
         pending before the submit Enter; the message was not sent.
     :raises ClaudeComposerNotCleared: If a draft left in the input box could
@@ -4405,7 +4404,16 @@ def _paste_and_submit(
         preserve_draft=preserve_draft,
         ready_timeout_s=ready_timeout_s,
     ):
+        # Recovery can reveal stale rejections outside the original viewport.
+        rejection_baseline = (
+            _count_unknown_command_rejections(
+                _capture_pane(socket_path, tmux_target), rejection_needle
+            )
+            if rejection_needle is not None
+            else 0
+        )
         _paste_and_verify(bridge_dir, socket_path, tmux_target, text=text, needle=needle)
+    return rejection_baseline
 
 
 def _paste_and_verify(

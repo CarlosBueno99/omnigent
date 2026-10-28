@@ -4787,9 +4787,13 @@ def test_plain_text_skips_the_rejection_watch(
     assert len(payloads) == 1
 
 
+@pytest.mark.parametrize(
+    "initially_clipped", [False, True], ids=["visible", "revealed-by-recovery"]
+)
 def test_stale_rejection_in_scrollback_does_not_trigger_redelivery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    initially_clipped: bool,
 ) -> None:
     """
     A rejection of the same name already in scrollback is not "fresh".
@@ -4811,7 +4815,8 @@ def test_stale_rejection_in_scrollback_does_not_trigger_redelivery(
     stale = "● Unknown command: /my-skill\n"
 
     loaded_payloads: list[bytes] = []
-    tui = {"pane": stale + _composer_pane()}
+    tui: dict[str, Any] = {"pane": stale + _composer_pane(), "clipped": initially_clipped}
+    sizes: list[str] = []
 
     def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
         """
@@ -4823,7 +4828,15 @@ def test_stale_rejection_in_scrollback_does_not_trigger_redelivery(
         """
         del kwargs
         if "capture-pane" in cmd:
+            if tui["clipped"]:
+                return SimpleNamespace(returncode=0, stdout="──────\n❯ \n", stderr="")
             return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
+        if "display-message" in cmd:
+            return SimpleNamespace(returncode=0, stdout="120 7 latest\n", stderr="")
+        if "resize-window" in cmd:
+            height = cmd[cmd.index("-y") + 1]
+            sizes.append(height)
+            tui["clipped"] = height != "24"
         if "load-buffer" in cmd:
             loaded_payloads.append(Path(cmd[-1]).read_bytes())
         if "paste-buffer" in cmd:
@@ -4835,10 +4848,8 @@ def test_stale_rejection_in_scrollback_does_not_trigger_redelivery(
 
     monkeypatch.setattr("subprocess.run", _fake_run)
     inject_user_message(bridge_dir, content="/my-skill retry after typo fix")
-    assert len(loaded_payloads) == 1, (
-        f"A stale rejection must not trigger escaped re-delivery; "
-        f"got {len(loaded_payloads)} paste(s)."
-    )
+    assert loaded_payloads == [b"/my-skill retry after typo fix\r"]
+    assert sizes == (["24", "7"] if initially_clipped else [])
 
 
 def test_rejection_line_matching_ignores_message_echo() -> None:
