@@ -1,10 +1,15 @@
-// Per-tool presentation for ToolCard. A tool that needs its own title, result
-// line, or expanded body registers a `ToolView` in TOOL_VIEWS; every part is
-// optional, and whatever a view leaves out uses the generic rendering.
+// Per-tool presentation for ToolCard. A tool that needs its own title, failure
+// line, line counts, or expanded body registers a `ToolView` in TOOL_VIEWS;
+// every part is optional, and whatever a view leaves out uses the generic rendering.
 
 import type { ComponentType } from "react";
 import { FILE_EDIT_TOOL_NAMES } from "@/lib/toolEditDiff";
-import { type ToolCall, type ToolResultSummary, summarizeFileEdit } from "@/lib/toolResultSummary";
+import {
+  type LineCounts,
+  type ToolCall,
+  fileEditFailureLine,
+  fileEditLineCounts,
+} from "@/lib/toolResultSummary";
 import { type ToolTitle, splitToolName } from "@/lib/toolTitle";
 import { FileEditBody } from "./FileEditBody";
 
@@ -17,8 +22,10 @@ export interface ToolBodyProps {
 export interface ToolView {
   /** Row title; returning `null` falls back to `formatToolTitle`. */
   title?: (args: Record<string, unknown>) => ToolTitle | null;
-  /** Line under the row; returning `null` hides it. Replaces `summarizeToolResult`. */
-  summary?: (call: ToolCall) => ToolResultSummary | null;
+  /** Failure line under the row; returning `null` hides it. Replaces `toolFailureLine`. */
+  failure?: (call: ToolCall) => string | null;
+  /** Added and removed line counts after the row's title, e.g. "+4 -2"; `null` shows none. */
+  lineCounts?: (call: ToolCall) => LineCounts | null;
   /**
    * Expanded content in place of the generic Input / Result fields; Raw stays available.
    * The card adds a state only while `output` is null, so the view must render any output, errors included.
@@ -28,9 +35,10 @@ export interface ToolView {
   bodyLabel?: string;
 }
 
-/** File edits: added/removed line counts on the result line, and the diff when expanded. */
+/** File edits: added/removed line counts on the row, and the diff when expanded. */
 const FILE_EDIT_VIEW: ToolView = {
-  summary: summarizeFileEdit,
+  failure: fileEditFailureLine,
+  lineCounts: fileEditLineCounts,
   Body: FileEditBody,
   bodyLabel: "Diff",
 };

@@ -556,7 +556,7 @@ def test_tool_rows_read_as_actions_with_their_outcome(
     chat_session_contract: ChatSessionContract,
     width: int,
 ) -> None:
-    """Tool rows show a humanized title, MCP server, and result line instead of raw JSON."""
+    """Tool rows show a humanized title and MCP server, and a line only under a failure."""
     chat = chat_session_contract
     _seed_tool_calls(chat)
     page.set_viewport_size({"width": width, "height": 844})
@@ -570,30 +570,34 @@ def test_tool_rows_read_as_actions_with_their_outcome(
 
     plan = page.get_by_role("button", name=re.compile(r"^Manage todo list"))
     expect(plan).to_contain_text("write · 2 items")
-    plan_result = plan.get_by_test_id("tool-result-line")
-    expect(plan_result).to_have_text("Task plan updated (2 tasks).")
+    expect(plan.get_by_test_id("tool-failure-line")).to_have_count(0)
+    expect(plan).not_to_contain_text("Task plan updated")
     issue = page.get_by_role("button", name=re.compile(r"^Get issue"))
     # Known MCP servers carry their brand spelling, not the config name.
     expect(issue.get_by_text("Linear", exact=True)).to_be_visible()
     # The list of fields to return is not the subject of the call.
     expect(issue).not_to_contain_text("items")
-    expect(issue.get_by_test_id("tool-result-line")).to_have_text(f"{_ISSUE_TITLE} · In Review")
+    expect(issue).not_to_contain_text(_ISSUE_TITLE)
     failure = page.get_by_role("button", name=re.compile(r"^Create pull request"))
     expect(failure.get_by_text("GitHub", exact=True)).to_be_visible()
-    failure_result = failure.get_by_test_id("tool-result-line")
+    failure_result = failure.get_by_test_id("tool-failure-line")
     expect(failure_result).to_have_text(_PR_ERROR)
     color = "el => getComputedStyle(el).color"
-    assert failure_result.evaluate(color) != plan_result.evaluate(color)
+    assert failure_result.evaluate(color) != failure.evaluate(color)
 
     transcript = page.locator('[role="log"]')
     expect(transcript).not_to_contain_text("mcp__linear__")
     expect(transcript).not_to_contain_text('{"operation"')
-    # The result sits under its title row, and long rows truncate rather than widen the page.
-    assert plan.evaluate(
+    # The failure sits under its title row, and long rows truncate rather than widen the page.
+    assert failure.evaluate(
         "row => row.lastElementChild.getBoundingClientRect().top"
         " >= row.firstElementChild.getBoundingClientRect().bottom - 1"
     )
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    # Rows fill the reply's width even though its text is one short line.
+    reply = page.locator('[data-testid="message-bubble"][data-role="assistant"]')
+    right_edge = "el => el.getBoundingClientRect().right"
+    assert reply.evaluate(right_edge) - plan.evaluate(right_edge) < 2
 
     issue.click()
     card = issue.locator("xpath=..")
@@ -708,13 +712,13 @@ def test_patch_row_counts_lines_across_its_files(
     chat_session_contract: ChatSessionContract,
     width: int,
 ) -> None:
-    """A Codex patch row sums its files' line counts and expands to per-file diffs."""
+    """A Codex patch row shows its files' summed line counts and expands to per-file diffs."""
     page.set_viewport_size({"width": width, "height": 720})
     _open_edit_rows(page, chat_session_contract)
 
     patch = page.get_by_role("button", name=re.compile(r"^Edit 3 files"))
-    result = patch.get_by_test_id("tool-result-line")
-    expect(result).to_have_text("Updated 3 files with 3 additions and 2 removals")
+    expect(patch.get_by_test_id("tool-line-counts")).to_have_text("+3 -2")
+    expect(patch.get_by_test_id("tool-failure-line")).to_have_count(0)
 
     patch.click()
     expect(page.get_by_role("tab", name="Diff")).to_have_attribute("aria-selected", "true")
@@ -739,17 +743,16 @@ def test_failed_edit_rows_show_their_error(
     _open_edit_rows(page, chat_session_contract)
 
     missed = page.get_by_role("button", name=re.compile(r"^Edit .*README\.md"))
-    expect(missed.get_by_test_id("tool-result-line")).to_have_text(
+    expect(missed.get_by_test_id("tool-failure-line")).to_have_text(
         "String to replace not found in file."
     )
     declined = page.get_by_role("button", name=re.compile(r"^Edit .*config\.py"))
-    declined_result = declined.get_by_test_id("tool-result-line")
+    declined_result = declined.get_by_test_id("tool-failure-line")
     expect(declined_result).to_have_text("Error: File change ended with status declined.")
-    applied_result = page.get_by_role("button", name=re.compile(r"^Edit 3 files")).get_by_test_id(
-        "tool-result-line"
-    )
+    for row in (missed, declined):
+        expect(row.get_by_test_id("tool-line-counts")).to_have_count(0)
     color = "el => getComputedStyle(el).color"
-    assert declined_result.evaluate(color) != applied_result.evaluate(color)
+    assert declined_result.evaluate(color) != declined.evaluate(color)
 
     declined.click()
     body = declined.locator("xpath=..")

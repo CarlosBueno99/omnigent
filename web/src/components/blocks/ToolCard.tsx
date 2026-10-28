@@ -1,6 +1,7 @@
-// Tool-call row: icon, title and a one-line result, expanding to labeled input
-// and result fields with the raw payload one toggle away. Kept light so the
-// assistant's prose reads first; per-tool views plug in through `toolViews.ts`.
+// Tool-call row: icon and title, plus a failure line when the call failed,
+// expanding to labeled input and result fields with the raw payload one toggle
+// away. Kept light so the assistant's prose reads first; per-tool views plug in
+// through `toolViews.ts`.
 
 import { ChevronRightIcon, CircleSlashIcon, Loader2Icon, XCircleIcon } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
@@ -25,11 +26,7 @@ import { type ShellOutputFormat, parseShellToolOutput } from "@/lib/shellToolOut
 import { terminalSurfaceStyle } from "@/lib/terminalPalette";
 import { iconForTool } from "@/lib/toolIcon";
 import { mcpServerDisplayName } from "@/lib/mcpServerName";
-import {
-  type ToolCall,
-  type ToolResultSummary,
-  summarizeToolResult,
-} from "@/lib/toolResultSummary";
+import { type LineCounts, type ToolCall, toolFailureLine } from "@/lib/toolResultSummary";
 import {
   type ToolRunCall,
   type ToolTitle,
@@ -144,10 +141,8 @@ export function ToolCard({
     () => view?.title?.(args) ?? formatToolTitle(name, args),
     [view, name, args],
   );
-  const summary = useMemo(
-    () => (view?.summary === undefined ? summarizeToolResult(call) : view.summary(call)),
-    [view, call],
-  );
+  const failure = useMemo(() => (view?.failure ?? toolFailureLine)(call), [view, call]);
+  const lineCounts = useMemo(() => view?.lineCounts?.(call) ?? null, [view, call]);
   const elapsedDuration = useElapsedDuration(state === "input-available" ? startedAt : null);
   const displayDuration = duration ?? elapsedDuration;
 
@@ -169,7 +164,8 @@ export function ToolCard({
         nativeToolType={nativeToolType}
         state={state}
         duration={displayDuration}
-        summary={summary}
+        failure={failure}
+        lineCounts={lineCounts}
         onBodyClick={onBodyClick}
       />
       <CollapsibleContent className="mt-1 ml-2 space-y-2 border-l pl-3 py-1 data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=open]:animate-in">
@@ -469,8 +465,8 @@ function toolRunCall(item: RenderItem): ToolRunCall {
 
 /**
  * Muted trigger for a tool call. Status/category icon at left, title (verb
- * medium + dynamic body) truncated to one line, MCP server tag, optional
- * duration, and chevron; the result summary sits on a second line.
+ * medium + dynamic body) truncated to one line, an edit's line counts, MCP
+ * server tag, optional duration, and chevron; a failure sits on a second line.
  */
 function ToolTriggerRow({
   title,
@@ -479,7 +475,8 @@ function ToolTriggerRow({
   nativeToolType,
   state,
   duration,
-  summary,
+  failure,
+  lineCounts,
   onBodyClick,
 }: {
   title: ToolTitle;
@@ -489,7 +486,8 @@ function ToolTriggerRow({
   nativeToolType: string | undefined;
   state: ToolState;
   duration: number | undefined;
-  summary: ToolResultSummary | null;
+  failure: string | null;
+  lineCounts: LineCounts | null;
   /** When set, the body text (e.g. file path) is rendered as a clickable link. */
   onBodyClick?: () => void;
 }) {
@@ -503,10 +501,16 @@ function ToolTriggerRow({
     >
       <span className="flex w-full items-center gap-1.5">
         <StatusIcon name={name} nativeToolType={nativeToolType} state={state} />
-        <span className="min-w-0 flex-1 truncate">
-          {title.verb !== null && <span className="font-medium text-foreground">{title.verb}</span>}
-          {title.verb !== null && title.body.length > 0 && " "}
-          <ToolTitleBody title={title} displayPath={displayPath} onBodyClick={onBodyClick} />
+        {/* Only the title truncates, so the counts beside it stay visible. */}
+        <span className="flex min-w-0 flex-1 items-center gap-1.5">
+          <span className="min-w-0 truncate">
+            {title.verb !== null && (
+              <span className="font-medium text-foreground">{title.verb}</span>
+            )}
+            {title.verb !== null && title.body.length > 0 && " "}
+            <ToolTitleBody title={title} displayPath={displayPath} onBodyClick={onBodyClick} />
+          </span>
+          {lineCounts !== null && <ToolLineCounts counts={lineCounts} />}
         </span>
         {title.server !== undefined && (
           <Badge
@@ -521,34 +525,30 @@ function ToolTriggerRow({
         )}
         <ChevronRightIcon className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
       </span>
-      {summary !== null && <ToolResultLine summary={summary} />}
+      {failure !== null && (
+        // Indented to the title past the icon.
+        <span
+          data-testid="tool-failure-line"
+          className="mt-px block min-w-0 truncate pl-5 text-destructive text-sm"
+        >
+          {failure}
+        </span>
+      )}
     </CollapsibleTrigger>
   );
 }
 
-/** The result summary under a trigger row, indented to the title past the icon. */
-function ToolResultLine({ summary }: { summary: ToolResultSummary }) {
-  const content =
-    summary.segments === undefined
-      ? summary.text
-      : summary.segments.map((segment, index) => (
-          <span
-            // eslint-disable-next-line react/no-array-index-key
-            key={index}
-            className={segment.tone && DIFF_TONE_CLASS[segment.tone]}
-          >
-            {segment.text}
-          </span>
-        ));
+/** An edit's "+4 -2", leaving out a zero side. */
+function ToolLineCounts({ counts }: { counts: LineCounts }) {
   return (
-    <span
-      data-testid="tool-result-line"
-      className={cn(
-        "mt-px block min-w-0 truncate pl-5 text-sm",
-        summary.isError && "text-destructive",
+    <span data-testid="tool-line-counts" className="shrink-0 tabular-nums">
+      {counts.additions > 0 && (
+        <span className={DIFF_TONE_CLASS.added}>+{counts.additions.toLocaleString()}</span>
       )}
-    >
-      {content}
+      {counts.additions > 0 && counts.removals > 0 && " "}
+      {counts.removals > 0 && (
+        <span className={DIFF_TONE_CLASS.removed}>-{counts.removals.toLocaleString()}</span>
+      )}
     </span>
   );
 }

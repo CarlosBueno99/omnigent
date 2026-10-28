@@ -1,6 +1,6 @@
 import { createElement } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { FileViewerContext } from "@/shell/FileViewerContext";
 import type { RenderItem } from "@/lib/renderItems";
@@ -114,7 +114,7 @@ describe("getOutputPreview", () => {
 });
 
 describe("ToolCard rendering", () => {
-  it("renders an unknown tool's humanized title, result line and duration", () => {
+  it("renders an unknown tool's humanized title and duration, with no line under a success", () => {
     // WHY: the always-visible trigger shows a humanized title and key argument values.
     const { container } = renderCard({
       name: "manage_todo_list",
@@ -127,15 +127,16 @@ describe("ToolCard rendering", () => {
     expect(screen.getByText("Manage todo list")).toBeInTheDocument();
     expect(trigger.textContent).toContain("write · 1 item");
     expect(trigger).toHaveAttribute("title", "Manage todo list write · 1 item (manage_todo_list)");
-    expect(screen.getByTestId("tool-result-line").textContent).toBe("Task plan updated (1 task).");
+    // WHY: a successful call's details wait behind the expand, so the row reads as its title.
+    expect(screen.queryByTestId("tool-failure-line")).toBeNull();
+    expect(trigger.textContent).not.toContain("Task plan updated");
     expect(screen.getByText("3.3s")).toBeInTheDocument();
-    // WHY: row text follows the Interface font size; the result line sits one caption step down.
+    // WHY: row text follows the Interface font size.
     expect(trigger).toHaveClass("text-ui");
     expect(screen.getByText("Manage todo list")).toHaveClass("font-medium");
-    expect(screen.getByTestId("tool-result-line")).toHaveClass("text-sm");
   });
 
-  it("tags an MCP tool with its server and reports its failure on the result line", () => {
+  it("tags an MCP tool with its server and reports its failure on a line under it", () => {
     renderCard({
       name: "mcp__github__create_pull_request",
       arguments: { owner: "omnigent-ai", repo: "omnigent", draft: true },
@@ -146,9 +147,10 @@ describe("ToolCard rendering", () => {
     // A known server shows its brand spelling rather than the config name.
     expect(screen.getByText("GitHub")).toBeInTheDocument();
     expect(screen.queryByText("github")).toBeNull();
-    const line = screen.getByTestId("tool-result-line");
+    const line = screen.getByTestId("tool-failure-line");
     expect(line.textContent).toBe("Error: 422 Validation Failed: A pull request already exists");
-    expect(line.className).toContain("text-destructive");
+    // WHY: the failure sits one caption step below the row's Interface font size.
+    expect(line).toHaveClass("text-destructive", "text-sm");
   });
 
   it("expands to labeled Input and Result fields, with the raw JSON behind a Fields | Raw switch", () => {
@@ -166,7 +168,7 @@ describe("ToolCard rendering", () => {
     expect(screen.getByText("Find workflow")).toBeInTheDocument();
     expect(screen.getByText("done")).toBeInTheDocument();
     expect(screen.getByText("Result")).toBeInTheDocument();
-    expect(screen.getAllByText("the output text").length).toBeGreaterThan(1);
+    expect(screen.getByText("the output text")).toBeInTheDocument();
     expect(screen.queryByText("Parameters")).toBeNull();
 
     // Both views stay visible, so the current one reads at a glance.
@@ -455,12 +457,12 @@ describe("ToolCard rendering", () => {
 });
 
 describe("ToolCard registered views", () => {
-  it("uses a registered view's title, result line and body in place of the generic ones", () => {
+  it("uses a registered view's title, failure line and body in place of the generic ones", () => {
     // WHY: tool-specific renderers plug in through toolViews.ts without
     // touching ToolCard; each part replaces only its generic counterpart.
     registeredViews.set("fake_plan", {
       title: () => ({ verb: "Started 2 of 2", body: "Fetch open PRs" }),
-      summary: (call) => ({ text: `Done: ${String(call.args.done)}`, isError: false }),
+      failure: (call) => `Could not finish ${String(call.args.done)}`,
       Body: ({ call }) => createElement("div", null, `Checklist for ${call.name}`),
     });
     const { container } = renderCard({
@@ -470,7 +472,9 @@ describe("ToolCard registered views", () => {
       state: "output-available",
     });
     expect(screen.getByText("Started 2 of 2")).toBeInTheDocument();
-    expect(screen.getByTestId("tool-result-line").textContent).toBe("Done: Find workflow");
+    expect(screen.getByTestId("tool-failure-line").textContent).toBe(
+      "Could not finish Find workflow",
+    );
     fireEvent.click(container.querySelector<HTMLElement>('[data-slot="collapsible-trigger"]')!);
     expect(screen.getByText("Checklist for fake_plan")).toBeInTheDocument();
     expect(screen.queryByText("Input")).toBeNull();
@@ -479,7 +483,7 @@ describe("ToolCard registered views", () => {
     expect(screen.getByText("Input")).toBeInTheDocument();
   });
 
-  it("shows an edit's line counts in diff colors and its diff behind a Diff | Raw switch", async () => {
+  it("shows an edit's line counts after its title and its diff behind a Diff | Raw switch", async () => {
     await registerRealView("Edit");
     const { container } = renderCard({
       name: "Edit",
@@ -491,20 +495,21 @@ describe("ToolCard registered views", () => {
       output: "The file /repo/config.py has been updated successfully.",
       state: "output-available",
     });
-    const line = screen.getByTestId("tool-result-line");
-    expect(line.textContent).toBe("Updated with 1 addition and 2 removals");
-    expect(within(line).getByText("1")).toHaveClass("text-green-600");
-    expect(within(line).getByText("2")).toHaveClass("text-red-600");
-    expect(within(line).getByText("addition")).not.toHaveClass("text-green-600");
-    expect(line).not.toHaveClass("text-destructive");
+    const trigger = container.querySelector<HTMLElement>('[data-slot="collapsible-trigger"]')!;
+    const counts = screen.getByTestId("tool-line-counts");
+    expect(trigger.textContent).toBe("Edit /repo/config.py+1 -2");
+    expect(within(counts).getByText("+1")).toHaveClass("text-green-600");
+    expect(within(counts).getByText("-2")).toHaveClass("text-red-600");
+    expect(screen.queryByTestId("tool-failure-line")).toBeNull();
 
-    fireEvent.click(container.querySelector<HTMLElement>('[data-slot="collapsible-trigger"]')!);
+    fireEvent.click(trigger);
+    const body = container.querySelector<HTMLElement>('[data-slot="collapsible-content"]')!;
     expect(screen.getByRole("tab", { name: "Diff" })).toHaveAttribute("aria-selected", "true");
     // The Diff tab names the view; the panel is titled with the file and its counts instead.
     expect(screen.getAllByText("Diff")).toHaveLength(1);
-    const added = screen.getByText("+1");
+    const added = within(body).getByText("+1");
     expect(added).toHaveClass("text-green-600");
-    expect(screen.getByText("-2")).toHaveClass("text-red-600");
+    expect(within(body).getByText("-2")).toHaveClass("text-red-600");
     expect(added.parentElement?.textContent).toBe("/repo/config.py+1-2");
     expect(container.textContent).toContain("-TIMEOUT = 30");
     expect(container.textContent).toContain("+TIMEOUT = 60");
@@ -515,7 +520,7 @@ describe("ToolCard registered views", () => {
     expect(container.textContent).toContain("-RETRIES = 3");
   });
 
-  it("labels a replace-all edit's counts as each match's", async () => {
+  it("gives a replace-all edit no row counts and labels its panel's as each match's", async () => {
     await registerRealView("Edit");
     const { container } = renderCard({
       name: "Edit",
@@ -523,9 +528,7 @@ describe("ToolCard registered views", () => {
       output: "The file /repo/a.py has been updated. All occurrences were successfully replaced.",
       state: "output-available",
     });
-    expect(screen.getByTestId("tool-result-line").textContent).toBe(
-      "Updated each match with 1 addition and 1 removal",
-    );
+    expect(screen.queryByTestId("tool-line-counts")).toBeNull();
     fireEvent.click(container.querySelector<HTMLElement>('[data-slot="collapsible-trigger"]')!);
     expect(screen.getByText("+1").parentElement?.textContent).toBe("/repo/a.py (each match)+1-1");
   });
@@ -560,7 +563,7 @@ describe("ToolCard registered views", () => {
       diffText: "+y",
     },
   ])(
-    "shows a $producer's error on the result line and above its diff",
+    "shows a $producer's error under the row and above its diff",
     async ({ name, args, output, error, diffText }) => {
       await registerRealView(name);
       const { container } = renderCard({
@@ -569,9 +572,10 @@ describe("ToolCard registered views", () => {
         output,
         state: "output-available",
       });
-      const line = screen.getByTestId("tool-result-line");
+      const line = screen.getByTestId("tool-failure-line");
       expect(line.textContent).toBe(error);
       expect(line).toHaveClass("text-destructive");
+      expect(screen.queryByTestId("tool-line-counts")).toBeNull();
       fireEvent.click(container.querySelector<HTMLElement>('[data-slot="collapsible-trigger"]')!);
       // The expanded body repeats the error in a box, then labels the diff as not applied.
       expect(screen.getByTestId("tool-error-box")).toHaveTextContent(error);
@@ -608,7 +612,8 @@ describe("ToolCard registered views", () => {
       output,
       state: "output-available",
     });
-    expect(screen.queryByTestId("tool-result-line")).toBeNull();
+    expect(screen.queryByTestId("tool-failure-line")).toBeNull();
+    expect(screen.queryByTestId("tool-line-counts")).toBeNull();
     fireEvent.click(container.querySelector<HTMLElement>('[data-slot="collapsible-trigger"]')!);
     const text = container.textContent ?? "";
     expect(text).toContain(output);
@@ -719,7 +724,7 @@ describe("ToolCard registered views", () => {
   );
 
   it("falls back to the generic parts a view leaves out", () => {
-    registeredViews.set("fake_plan", { summary: () => null });
+    registeredViews.set("fake_plan", { failure: () => null });
     const { container } = renderCard({
       name: "fake_plan",
       arguments: { step: "one" },
@@ -727,27 +732,9 @@ describe("ToolCard registered views", () => {
       state: "output-available",
     });
     expect(screen.getByText("Fake plan")).toBeInTheDocument();
-    expect(screen.queryByTestId("tool-result-line")).toBeNull();
+    expect(screen.queryByTestId("tool-failure-line")).toBeNull();
     fireEvent.click(container.querySelector<HTMLElement>('[data-slot="collapsible-trigger"]')!);
     expect(screen.getByText("Input")).toBeInTheDocument();
-  });
-
-  it("renders a result line whose segments repeat a text", () => {
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-    onTestFinished(() => errors.mockRestore());
-    const segments = [
-      { text: "2 additions", tone: "added" },
-      { text: " and " },
-      { text: "3 removals", tone: "removed" },
-      { text: " and " },
-      { text: "1 rename" },
-    ] as const;
-    const text = segments.map((segment) => segment.text).join("");
-    registeredViews.set("fake_plan", { summary: () => ({ text, isError: false, segments }) });
-    renderCard({ name: "fake_plan", arguments: {}, output: "ok", state: "output-available" });
-    expect(screen.getByTestId("tool-result-line")).toHaveTextContent(text);
-    const keyWarnings = errors.mock.calls.filter(([message]) => /same key/.test(String(message)));
-    expect(keyWarnings).toEqual([]);
   });
 });
 
