@@ -1869,7 +1869,7 @@ async def test_runner_idle_shutdown_marks_relay_bound_sessions_before_the_grace(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_isolated_session_status_cache")
-@pytest.mark.parametrize("foreign_write", ["fresh", "blip", "none"])
+@pytest.mark.parametrize("foreign_write", ["fresh", "blip", "none", "unavailable"])
 async def test_runner_disconnect_grace_spares_runner_live_on_another_replica(
     tunnel_three_layer_stack: _TunnelStack,
     monkeypatch: pytest.MonkeyPatch,
@@ -1919,7 +1919,13 @@ async def test_runner_disconnect_grace_spares_runner_live_on_another_replica(
         await communicator.wait(timeout=budget(2.0))
         # Let this replica close, then claim as the sibling would.
         await asyncio.sleep(0.1)
-        if foreign_write != "none":
+        if foreign_write == "unavailable":
+
+            def unavailable(_runner_id: str) -> None:
+                raise ConnectionError("metadata backend unavailable")
+
+            monkeypatch.setattr(store, "get_runner_connection", unavailable)
+        elif foreign_write != "none":
             own = session_live_state.runner_connection_epoch(runner_id)
             assert own is not None
             sibling = "b" * 32
@@ -1930,7 +1936,10 @@ async def test_runner_disconnect_grace_spares_runner_live_on_another_replica(
                 assert store.close_runner_connection(runner_id, sibling)
         await asyncio.sleep(grace * 3)
         cached = sessions_module._session_status_cache.get(session_id)
-        if foreign_write != "none":
+        if foreign_write == "unavailable":
+            assert cached == "running"
+            assert sessions_module._session_active_response_cache.get(session_id) is not None
+        elif foreign_write != "none":
             assert cached is None, (
                 f"a runner live on another replica left stale local state {cached!r}"
             )

@@ -135,14 +135,14 @@ def test_idle_session_stays_healthy_after_unreadable_replica_handoff(
 
         rig._poll_until(
             lambda: (
-                f"Runner disconnect for session={session_id}:" in stack.process_log.read_text()
+                f"Runner liveness lookup failed for runner={stack.runner_id}"
+                in stack.process_log.read_text()
             ),
             timeout=110,
             what="the old replica's disconnect decision after its real grace period",
         )
         log = stack.process_log.read_text()
-        assert f"live-status read failed for session={session_id}" in log
-        assert f"liveness lookup failed for session={session_id}" in log
+        assert f"fenced runner lookup failed for session={session_id}" in log
         assert replica.runner_online()
 
         # A browser request can return to A once its backend reads recover.

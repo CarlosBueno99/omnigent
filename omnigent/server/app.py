@@ -3839,14 +3839,17 @@ def create_app(
                 runner_id,
             )
             return
-        if await asyncio.to_thread(
+        remote_liveness = await asyncio.to_thread(
             _runner_live_on_another_replica_from_conversations,
             affected,
             runner_id,
             reference_epoch,
             conversation_store=conversation_store,
             for_disconnect_decision=True,
-        ):
+        )
+        if remote_liveness is None:
+            return
+        if remote_liveness:
             for conv in affected:
                 _relinquish_session_live_state(conv.id)
             _logger.info(
@@ -3870,14 +3873,17 @@ def create_app(
             )
             if tunnel_registry.get(runner_id) is not None:
                 return
-            if await asyncio.to_thread(
+            remote_liveness = await asyncio.to_thread(
                 _runner_live_on_another_replica_from_conversations,
                 affected,
                 runner_id,
                 reference_epoch,
                 conversation_store=conversation_store,
                 for_disconnect_decision=True,
-            ):
+            )
+            if remote_liveness is None:
+                return
+            if remote_liveness:
                 for conv in affected:
                     _relinquish_session_live_state(conv.id)
                 return

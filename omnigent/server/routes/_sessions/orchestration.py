@@ -8402,14 +8402,22 @@ def _runner_live_on_another_replica_from_conversations(
     *,
     conversation_store: ConversationStore | None = None,
     for_disconnect_decision: bool = False,
-) -> bool:
+) -> bool | None:
     """Read fenced DB-clock evidence only for the expected runner binding."""
     if not any(conv.runner_id == runner_id for conv in conversations):
         return False
     store = conversation_store or session_live_state.conversation_store()
     if store is None:
         return False
-    connection = store.get_runner_connection(runner_id)
+    try:
+        connection = store.get_runner_connection(runner_id)
+    except Exception:  # noqa: BLE001 — unreadable ownership preserves accepted work
+        _logger.warning(
+            "Runner liveness lookup failed for runner=%s; preserving accepted work",
+            runner_id,
+            exc_info=True,
+        )
+        return None
     return connection is not None and connection.live_elsewhere(
         reference_epoch,
         retained=for_disconnect_decision,
