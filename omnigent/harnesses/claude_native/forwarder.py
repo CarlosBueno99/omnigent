@@ -73,6 +73,7 @@ from omnigent.native.failure_telemetry import (
 )
 from omnigent.process_logging import harness_stderr_capture_enabled
 from omnigent.runner.transports.ws_tunnel.event_delivery import RunnerEventDispatcher
+from omnigent.runtime.tool_output import cap_tool_output
 from omnigent.session_event_batch import (
     MAX_SESSION_EVENT_BATCH_EVENTS,
     encode_session_event_batch,
@@ -3784,7 +3785,10 @@ def _stop_failure_detail(
 
 
 def _transcript_api_error_for_hook(
-    bridge_dir: Path, record: ClaudeHookRecord, response_id: str | None
+    bridge_dir: Path,
+    record: ClaudeHookRecord,
+    response_id: str | None,
+    ended_response_ids: Collection[str | None] = (),
 ) -> tuple[FailureContext | None, str, str | None]:
     """Match retained API-error evidence, explaining why it cannot be reused."""
     if not record.claude_session_id:
@@ -3807,6 +3811,11 @@ def _transcript_api_error_for_hook(
     if not isinstance(context.get("native_error_message"), str):
         return None, "error_text_unavailable", None
     owner = state.api_error_response_id
+    if owner is not None and (
+        owner in ended_response_ids
+        or owner in (state.pending_settled_response_id, state.settled_response_id)
+    ):
+        return None, "response_already_settled", None
     if owner is not None and response_id is not None and owner != response_id:
         return None, "response_mismatch", None
     return context, "matched", owner
@@ -4536,7 +4545,7 @@ async def _forward_available_status_events(
                                         extra={"session_id": session_id},
                                     )
                                     return durable
-                        except Exception:  # noqa: BLE001 - retain the compaction cursor on failure
+                        except Exception:
                             # Non-HTTP failure (e.g. reading Claude session
                             # messages). Hold the cursor and retry next poll.
                             _logger.warning(
@@ -4631,7 +4640,11 @@ async def _forward_available_status_events(
                         transcript_context_state,
                         error_response_id,
                     ) = await asyncio.to_thread(
-                        _transcript_api_error_for_hook, bridge_dir, record, response_id
+                        _transcript_api_error_for_hook,
+                        bridge_dir,
+                        record,
+                        response_id,
+                        (dedupe.pending_settled_response_id, dedupe.settled_response_id),
                     )
                     if error_response_id is not None:
                         status_response_id = error_response_id
@@ -5098,7 +5111,7 @@ async def _handle_compact_summary_item(
             extra={"session_id": session_id},
         )
         return False
-    except Exception:  # noqa: BLE001 - retry compaction reads without advancing the cursor
+    except Exception:
         # Non-HTTP failure (e.g. reading Claude session messages). Retry.
         _logger.warning(
             "Unexpected error persisting compaction boundary (transcript path) for %s; seq=%s",
@@ -5769,6 +5782,13 @@ async def _post_external_conversation_item(
     from omnigent.runtime import telemetry
 
     _log_transcript_failure(session_id, item)
+    item_data = item.data
+    # The server caps output after body validation; cap the mirror before upload
+    # so a large tool result can reach that handler. The native transcript stays full.
+    if item.item_type == "function_call_output" and isinstance(
+        output := item_data.get("output"), str
+    ):
+        item_data = {**item_data, "output": cap_tool_output(output)}
 
     # The forwarder is the decoupled response path (it tails Claude's
     # transcript and re-POSTs items under its own trace, not the request's).
@@ -5788,7 +5808,7 @@ async def _post_external_conversation_item(
                 "type": "external_conversation_item",
                 "data": {
                     "item_type": item.item_type,
-                    "item_data": item.data,
+                    "item_data": item_data,
                     "response_id": item.response_id,
                     # Server-side idempotency key: the forwarder retries a
                     # timed-out POST it cannot know the disposition of, so

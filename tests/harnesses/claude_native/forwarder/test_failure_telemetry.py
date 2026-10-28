@@ -374,9 +374,10 @@ def _record_events(
 @pytest.mark.parametrize("next_turn", ["task_notification", "queued_prompt"])
 @pytest.mark.parametrize("next_turn_poll", ["same_poll", "next_poll"])
 @pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("second_failure_poll", ["immediate", "quiet", "restart"])
 @pytest.mark.asyncio
 async def test_api_error_survives_next_turn_opening_before_stop_failure(
-    tmp_path: Path, next_turn: str, next_turn_poll: str, restart: bool
+    tmp_path: Path, next_turn: str, next_turn_poll: str, restart: bool, second_failure_poll: str
 ) -> None:
     bridge_dir = tmp_path / "bridge"
     transcript_path = tmp_path / "session.jsonl"
@@ -432,6 +433,20 @@ async def test_api_error_survives_next_turn_opening_before_stop_failure(
         hooks = await _poll_hooks(client, bridge_dir, hooks, dedupe, state.current_response_id)
         assert dedupe.pending_settled_response_id == failed_response_id
 
+        # The next prompt can fail before producing its own transcript error.
+        if second_failure_poll != "immediate":
+            state = await _poll_transcript(client, bridge_dir, state, dedupe)
+        if second_failure_poll == "restart":
+            state = forwarder._read_forward_state(bridge_dir)
+            assert state is not None
+            dedupe = forwarder._ForwardDedupeState()
+        bridge.record_hook_event(bridge_dir, {**_MAIN_STOP_FAILURE, "error": "server_error"})
+        hooks = await _poll_hooks(client, bridge_dir, hooks, dedupe, state.current_response_id)
+        second_failure = failures[-1]
+        assert second_failure.get("response_id") is None
+        assert "Synthetic spend limit reached" not in second_failure["failure_detail"]
+        assert second_failure["failure_context"].get("native_record_id") is None
+
         # Later native errors must still fail their own turn after the old settle.
         _append_transcript(transcript_path, {**_MAIN_API_ERROR, "uuid": "next-error"})
         state = await _poll_transcript(client, bridge_dir, state, dedupe)
@@ -439,7 +454,7 @@ async def test_api_error_survives_next_turn_opening_before_stop_failure(
         bridge.record_hook_event(bridge_dir, _MAIN_STOP_FAILURE)
         await _poll_hooks(client, bridge_dir, hooks, dedupe, state.current_response_id)
 
-    failure, later_failure = failures
+    failure, _second_failure, later_failure = failures
     assert failure["response_id"] == failed_response_id
     assert later_failure["response_id"] == state.api_error_response_id
     assert later_failure["failure_context"]["native_record_id"] == "next-error"
