@@ -1716,7 +1716,7 @@ def clear_active_turn_id_if_matches(
             return
         try:
             on_cleared()
-        except Exception:  # noqa: BLE001 - the clear is committed; callbacks cannot be retried.
+        except Exception:
             _logger.warning(
                 "Codex-native cleared-turn callback raised for %s", bridge_dir, exc_info=True
             )
