@@ -101,6 +101,8 @@ import {
   useWorkspaceServeable,
 } from "@/hooks/useWorkspaceChangedFiles";
 import {
+  sessionPullRequestsKey,
+  type StoredPullRequests,
   storedListToShow,
   storesSessionPullRequests,
   useSessionPullRequests,
@@ -1098,11 +1100,12 @@ function PullRequestListRow({
   hostOffline: boolean;
   sandboxAsleep: boolean;
 }) {
-  const info = usePullRequestInfo(conversationId, { poll: true, prUrl: association.url });
+  const info = usePullRequestInfo(conversationId, { poll: "list", prUrl: association.url });
   const canEdit = useCanEdit(conversationId);
   const data = info.data ? normalizePullRequestInfo(info.data) : undefined;
   const offline = hostOffline || info.error instanceof RunnerOfflineError;
-  const pr = !offline && data?.pr?.url === association.url ? data.pr : undefined;
+  const cachedPr = data?.pr?.url === association.url ? data.pr : undefined;
+  const pr = !offline ? cachedPr : undefined;
   const summary = pr ?? association;
   const checks = pr?.checks;
   const mergeState = pr ? mergeButtonState(pr) : undefined;
@@ -1187,15 +1190,7 @@ function PullRequestListRow({
             </TooltipProvider>
           </>
         ) : ready && pr ? (
-          <>
-            {(checksUnavailable || !!checks?.failing || !!checks?.pending) && checkStatus}
-            <PullRequestMerge
-              compact
-              conversationId={conversationId}
-              prUrl={association.url}
-              pr={pr}
-            />
-          </>
+          (checksUnavailable || !!checks?.failing || !!checks?.pending) && checkStatus
         ) : info.error ? (
           <span title={String(info.error)}>Status unavailable</span>
         ) : !pr ? (
@@ -1212,6 +1207,16 @@ function PullRequestListRow({
               </span>
             )}
           </>
+        )}
+        {cachedPr && (
+          <PullRequestMerge
+            compact
+            showTrigger={!!ready}
+            unavailable={offline || !!info.error || !canEdit || !data?.capabilities.merging}
+            conversationId={conversationId}
+            prUrl={association.url}
+            pr={cachedPr}
+          />
         )}
       </div>
       <DropdownMenu>
@@ -1266,7 +1271,10 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
   const [linking, setLinking] = useState(false);
   const [url, setUrl] = useState("");
   const selected = selection?.sessionId === conversationId ? selection.url : undefined;
-  const info = usePullRequestInfo(conversationId, { poll: true, prUrl: selected });
+  const info = usePullRequestInfo(conversationId, {
+    poll: selected && !showingDetails ? "list" : true,
+    prUrl: selected,
+  });
   const queryClient = useQueryClient();
   const [refreshing, setRefreshing] = useState(false);
   const refresh = async () => {
@@ -1384,7 +1392,18 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
             update.mutate(
               { url, action: "attach" },
               {
-                onSuccess: (data) => {
+                onSuccess: async (data) => {
+                  if (storesPrs && data.prs) {
+                    const key = sessionPullRequestsKey(conversationId);
+                    await queryClient.cancelQueries({ queryKey: key });
+                    queryClient.setQueryData<StoredPullRequests>(key, (previous) => ({
+                      prs: data.prs!.map((pr) => ({
+                        ...previous?.prs.find((storedPr) => storedPr.url === pr.url),
+                        ...pr,
+                      })),
+                      synced: previous?.synced ?? false,
+                    }));
+                  }
                   changeSelection(data.selected_pr_url);
                   setLinking(false);
                   setUrl("");
