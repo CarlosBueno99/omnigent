@@ -180,6 +180,10 @@ def test_live_hook_protects_a_prompt_even_during_a_torn_capture(
         _PERMISSION_BELOW_PREVIEW,
         _PLAN_APPROVAL,
         _PLAN_APPROVAL_EXIT_PLAN_MODE,
+        " A clipped session title as wide as the pane… ─\n"
+        "❯ 1. Keep overlay\n  2. Try another bridge\n"
+        "───────────────────────────────────────────────\n"
+        "Enter to select · Esc to\ncancel\n",
     ],
     ids=[
         "question",
@@ -191,6 +195,7 @@ def test_live_hook_protects_a_prompt_even_during_a_torn_capture(
         "permission-below-preview",
         "plan-approval",
         "exit-plan-mode",
+        "clipped-title-wrapped-decision-footer",
     ],
 )
 @pytest.mark.parametrize("operation", ["message", "settings"])

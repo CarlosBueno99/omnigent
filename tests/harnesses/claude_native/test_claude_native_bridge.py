@@ -4723,6 +4723,8 @@ def _run_unknown_command_injection(
     *,
     content: str,
     reject_name: str | None,
+    clipped_after_rejection: bool = False,
+    initially_clipped: bool = False,
 ) -> list[bytes]:
     """
     Drive ``inject_user_message`` against a fake TUI, optionally rejecting.
@@ -4736,6 +4738,8 @@ def _run_unknown_command_injection(
     :param monkeypatch: Pytest monkeypatch for subprocess + timeouts.
     :param content: User text to inject.
     :param reject_name: Command name the fake TUI rejects, or ``None``.
+    :param clipped_after_rejection: Hide the closing rule until the pane expands.
+    :param initially_clipped: Start with a pane too short to show a rejection above the box.
     :returns: The byte payloads delivered via ``load-buffer``, in order.
     """
     bridge_dir = tmp_path / "bridge"
@@ -4752,7 +4756,11 @@ def _run_unknown_command_injection(
     )
 
     loaded_payloads: list[bytes] = []
-    tui: dict[str, Any] = {"pane": _composer_pane(), "submits": 0}
+    tui: dict[str, Any] = {
+        "pane": _composer_pane(),
+        "submits": 0,
+        "clipped": initially_clipped,
+    }
 
     def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
         """
@@ -4764,7 +4772,18 @@ def _run_unknown_command_injection(
         """
         del kwargs
         if "capture-pane" in cmd:
+            if tui["clipped"]:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=("" if initially_clipped else f"● Unknown command: /{reject_name}\n")
+                    + "──────\n❯ \n",
+                    stderr="",
+                )
             return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
+        if "display-message" in cmd:
+            return SimpleNamespace(returncode=0, stdout="120 7 latest\n", stderr="")
+        if "resize-window" in cmd:
+            tui["clipped"] = cmd[cmd.index("-y") + 1] != "24"
         if "load-buffer" in cmd:
             loaded_payloads.append(Path(cmd[-1]).read_bytes())
         if "paste-buffer" in cmd:
@@ -4773,6 +4792,7 @@ def _run_unknown_command_injection(
             tui["submits"] += 1
             if reject_name is not None and tui["submits"] == 1:
                 tui["pane"] = _rejection_pane(reject_name)
+                tui["clipped"] = clipped_after_rejection
             else:
                 tui["pane"] = _composer_pane()
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -4782,9 +4802,11 @@ def _run_unknown_command_injection(
     return loaded_payloads
 
 
+@pytest.mark.parametrize("clipped", [False, True], ids=["normal", "clipped-after-rejection"])
 def test_unknown_command_rejection_redelivers_escaped(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    clipped: bool,
 ) -> None:
     """
     A message rejected as "Unknown command" is re-delivered escaped.
@@ -4800,6 +4822,7 @@ def test_unknown_command_rejection_redelivers_escaped(
         monkeypatch,
         content="/not-a-real-skill hello world",
         reject_name="not-a-real-skill",
+        clipped_after_rejection=clipped,
     )
     assert len(payloads) == 2, (
         f"Expected the rejected message to be pasted twice (raw, then escaped); "
@@ -4807,6 +4830,73 @@ def test_unknown_command_rejection_redelivers_escaped(
     )
     assert payloads[0].startswith(b"/not-a-real-skill")
     assert payloads[1].startswith(b" /not-a-real-skill hello world")
+
+
+def test_unknown_command_watch_keeps_the_recovered_pane_height(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Restoring a tiny pane before the rejection watch would hide the rejection."""
+    payloads = _run_unknown_command_injection(
+        tmp_path,
+        monkeypatch,
+        content="/not-a-real-skill hello world",
+        reject_name="not-a-real-skill",
+        initially_clipped=True,
+    )
+
+    assert payloads == [b"/not-a-real-skill hello world\r", b" /not-a-real-skill hello world\r"]
+
+
+@pytest.mark.parametrize("clipped", [False, True], ids=["normal", "clipped-after-rejection"])
+@pytest.mark.parametrize(
+    "terminal_draft", ["", "a new terminal draft"], ids=["empty", "new-draft"]
+)
+def test_unknown_command_fallback_preserves_a_new_terminal_draft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clipped: bool, terminal_draft: str
+) -> None:
+    """The fallback must not clear a terminal edit made after the rejected submit."""
+    content = "/not-a-real-skill hello world"
+    draft = ("\n" if clipped and terminal_draft else "") + terminal_draft
+    composer = _EditableComposer("", cursor=0)
+    composer.install(monkeypatch)
+    sizes: list[str] = []
+    fallback_keys: list[str] = []
+
+    def run_tmux(socket_path: str, *args: str, **kwargs: object) -> None:
+        if args[0] == "send-keys" and composer.submitted:
+            fallback_keys.append(args[-1])
+        if args[0] == "resize-window":
+            height = args[args.index("-y") + 1]
+            sizes.append(height)
+            composer._visible_rows = None if height == "24" else 1
+        else:
+            composer._run_tmux(socket_path, *args)
+            if args[-1] == "Enter" and len(composer.submitted) == 1:
+                composer._insert(draft)
+                composer._visible_rows = 1 if clipped else None
+
+    def capture_pane(*args: str) -> str:
+        rejection = "● Unknown command: /not-a-real-skill\n" if composer.submitted else ""
+        return rejection + composer._capture_pane(*args)
+
+    monkeypatch.setattr(claude_native_bridge, "_run_tmux", run_tmux)
+    monkeypatch.setattr(claude_native_bridge, "_capture_pane", capture_pane)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="120 7 latest\n", stderr=""),
+    )
+    if terminal_draft:
+        with pytest.raises(claude_native_bridge.ClaudeMessageNotAccepted, match="input changed"):
+            inject_user_message(_picker_bridge_dir(tmp_path), content=content)
+        assert composer.text == draft
+        assert composer.submitted == [content + "\n"]
+        assert fallback_keys == []
+    else:
+        inject_user_message(_picker_bridge_dir(tmp_path), content=content)
+        assert composer.submitted == [content + "\n", " " + content + "\n"]
+        assert fallback_keys == ["Enter"]
+    assert sizes == (["24", "7"] if clipped else [])
 
 
 def test_unknown_name_accepted_as_skill_is_not_redelivered(
@@ -4850,9 +4940,13 @@ def test_plain_text_skips_the_rejection_watch(
     assert len(payloads) == 1
 
 
+@pytest.mark.parametrize(
+    "initially_clipped", [False, True], ids=["visible", "revealed-by-recovery"]
+)
 def test_stale_rejection_in_scrollback_does_not_trigger_redelivery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    initially_clipped: bool,
 ) -> None:
     """
     A rejection of the same name already in scrollback is not "fresh".
@@ -4874,7 +4968,8 @@ def test_stale_rejection_in_scrollback_does_not_trigger_redelivery(
     stale = "● Unknown command: /my-skill\n"
 
     loaded_payloads: list[bytes] = []
-    tui = {"pane": stale + _composer_pane()}
+    tui: dict[str, Any] = {"pane": stale + _composer_pane(), "clipped": initially_clipped}
+    sizes: list[str] = []
 
     def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
         """
@@ -4886,7 +4981,15 @@ def test_stale_rejection_in_scrollback_does_not_trigger_redelivery(
         """
         del kwargs
         if "capture-pane" in cmd:
+            if tui["clipped"]:
+                return SimpleNamespace(returncode=0, stdout="──────\n❯ \n", stderr="")
             return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
+        if "display-message" in cmd:
+            return SimpleNamespace(returncode=0, stdout="120 7 latest\n", stderr="")
+        if "resize-window" in cmd:
+            height = cmd[cmd.index("-y") + 1]
+            sizes.append(height)
+            tui["clipped"] = height != "24"
         if "load-buffer" in cmd:
             loaded_payloads.append(Path(cmd[-1]).read_bytes())
         if "paste-buffer" in cmd:
@@ -4898,10 +5001,8 @@ def test_stale_rejection_in_scrollback_does_not_trigger_redelivery(
 
     monkeypatch.setattr("subprocess.run", _fake_run)
     inject_user_message(bridge_dir, content="/my-skill retry after typo fix")
-    assert len(loaded_payloads) == 1, (
-        f"A stale rejection must not trigger escaped re-delivery; "
-        f"got {len(loaded_payloads)} paste(s)."
-    )
+    assert loaded_payloads == [b"/my-skill retry after typo fix\r"]
+    assert sizes == (["24", "7"] if initially_clipped else [])
 
 
 def test_rejection_line_matching_ignores_message_echo() -> None:
@@ -9961,20 +10062,39 @@ _PANE_WIDE_TITLE = (
 _WRAPPED_BOX_FOOTER = "  ⏸ manual mode on · ? for shortcuts · ← for agents"
 
 
-@pytest.mark.parametrize(
-    ("opening_rows", "closing_rows"),
-    [
-        pytest.param([f" {_PANE_WIDE_TITLE[:54]} ─"], ["─" * 57], id="fills-the-row"),
-        pytest.param([f" {_PANE_WIDE_TITLE[:55]}", "─"], ["─" * 57, "─"], id="one-column-over"),
-        pytest.param([f" {_PANE_WIDE_TITLE[:56]}", "─"], ["─" * 57, "──"], id="two-columns-over"),
-        pytest.param([_PANE_WIDE_TITLE[:57], "─"], ["─" * 57, "───"], id="three-columns-over"),
-        pytest.param(
-            [f" {_PANE_WIDE_TITLE[:56]}", f"{_PANE_WIDE_TITLE[56:64]} ─"],
-            ["─" * 57, "─" * 10],
-            id="ten-columns-over",
-        ),
-    ],
-)
+_CLIPPED_TITLE_ROW = " Retry failed billing webhook deliveries with exponential backoff … ─"
+_TITLE_FRAME_ROWS = [
+    pytest.param([f" {_PANE_WIDE_TITLE[:54]} ─"], ["─" * 57], id="fills-the-row"),
+    pytest.param([f" {_PANE_WIDE_TITLE[:55]}", "─"], ["─" * 57, "─"], id="one-column-over"),
+    pytest.param([f" {_PANE_WIDE_TITLE[:56]}", "─"], ["─" * 57, "──"], id="two-columns-over"),
+    pytest.param([_PANE_WIDE_TITLE[:57], "─"], ["─" * 57, "───"], id="three-columns-over"),
+    pytest.param(
+        [f" {_PANE_WIDE_TITLE[:56]}", f"{_PANE_WIDE_TITLE[56:64]} ─"],
+        ["─" * 57, "─" * 10],
+        id="ten-columns-over",
+    ),
+    pytest.param(
+        [
+            " fix-the-billing-webhook-retry-backoff-path-and-document-",
+            "every-edge-case-we-hit-in-staging-this-week-before-the-re",
+            "lease-freeze ─",
+        ],
+        ["─" * 57, "─" * 57, "─" * 14],
+        id="long-ascii-title",
+    ),
+    pytest.param(
+        [
+            " 請求のWebhook再試行バックオフ経路を修正し、ステージング",
+            "で発生した全てのエッジケースを文書化する作業セッション ─",
+        ],
+        ["─" * 57, "─" * 55],
+        id="wide-character-title",
+    ),
+    pytest.param([_CLIPPED_TITLE_ROW], ["─" * 103], id="clipped-title"),
+]
+
+
+@pytest.mark.parametrize(("opening_rows", "closing_rows"), _TITLE_FRAME_ROWS)
 def test_claude_prompt_rendered_sees_prompt_under_title_overflowing_pane_by_a_few_columns(
     opening_rows: list[str], closing_rows: list[str]
 ) -> None:
@@ -10161,9 +10281,6 @@ def test_claude_prompt_rendered_ignores_a_menu_row_above_a_rule() -> None:
         ]
     )
     assert _claude_prompt_rendered(pane) is False
-
-
-_CLIPPED_TITLE_ROW = " Retry failed billing webhook deliveries with exponential backoff … ─"
 
 
 def _menu_under(row: str) -> str:
@@ -11866,6 +11983,7 @@ class _EditableComposer:
         visible_rows: int | None = None,
         pane_rows: int | None = None,
         unavailable_clear_captures: int = 0,
+        frame_rows: tuple[list[str], list[str]] | None = None,
     ) -> None:
         """
         :param draft: Text the person left in the box.
@@ -11880,6 +11998,7 @@ class _EditableComposer:
             too tall for it scrolls the opening rule and glyph row off the top.
         :param unavailable_clear_captures: Captures that fail after clearing
             starts; readiness captures remain readable.
+        :param frame_rows: Explicit opening and closing rows for a titled or wrapped box.
         """
         self.text = draft
         self.cursor = cursor
@@ -11887,6 +12006,7 @@ class _EditableComposer:
         self._pane_rows = pane_rows
         self._unavailable_clear_captures = unavailable_clear_captures
         self._clearing_started = False
+        self._frame_rows = frame_rows or ([self._RULE], [self._RULE])
         self.submitted: list[str] = []
         self._paste_buffer = ""
         self._actions = {
@@ -11937,7 +12057,8 @@ class _EditableComposer:
             # The rows take every line the pane has: no closing rule.
             clipped = "\n".join(rows[: self._visible_rows])
             return f"⏺ done\n{self._RULE}\n{clipped}\n"
-        screen = ["⏺ done", self._RULE, *rows, self._RULE, "  ? for shortcuts"]
+        opening, closing = self._frame_rows
+        screen = ["⏺ done", *opening, *rows, *closing, "  ? for shortcuts"]
         if self._pane_rows is not None:
             screen = screen[-self._pane_rows :]
         return "\n".join(screen[1:] if self._pane_rows is None else screen) + "\n"
@@ -11982,6 +12103,40 @@ _STALE_DRAFT_CURSORS = pytest.mark.parametrize(
 _BOX_GEOMETRIES = pytest.mark.parametrize(
     "visible_rows", [None, 2], ids=["whole-box-on-screen", "sliver-pane"]
 )
+
+
+@pytest.mark.parametrize(("opening_rows", "closing_rows"), _TITLE_FRAME_ROWS)
+@_STALE_DRAFT_CURSORS
+@pytest.mark.parametrize("slash", [False, True], ids=["web-message", "slash-command"])
+@pytest.mark.parametrize("rule_in_draft", [False, True], ids=["plain-draft", "rule-in-draft"])
+def test_delivery_clears_every_recognized_title_frame(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    opening_rows: list[str],
+    closing_rows: list[str],
+    cursor: int,
+    slash: bool,
+    rule_in_draft: bool,
+) -> None:
+    """Every ready title shape preserves all draft rows and delivers exactly once."""
+    draft = _STALE_MULTILINE_DRAFT
+    if rule_in_draft:
+        draft = draft.replace("STALE TWO", "─────────")
+    composer = _EditableComposer(draft, cursor=cursor, frame_rows=(opening_rows, closing_rows))
+    composer.install(monkeypatch)
+    pane = composer._capture_pane("", "")
+    assert _claude_prompt_rendered(pane) is True
+    expected_rows = ["❯ STALE ONE", "  " + draft.splitlines()[1], "  STALE THREE"]
+    assert claude_native_bridge._composer_rows(pane) == expected_rows
+    assert claude_native_bridge._composer_box(pane) == claude_native_bridge._ComposerBox(
+        expected_rows, framed=True
+    )
+    bridge_dir = _picker_bridge_dir(tmp_path)
+    if slash:
+        claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high")
+    else:
+        inject_user_message(bridge_dir, content="hello from the web")
+    assert composer.submitted == ["/effort high" if slash else "hello from the web\n"]
 
 
 @_BOX_GEOMETRIES
@@ -12479,6 +12634,10 @@ def test_composer_recovery_rechecks_the_surface_before_typing(
 
     assert composer.submitted == []
     assert not resized
+    if recovery == "resize":
+        assert claude_native_bridge.time.monotonic() < 2, (
+            "recovery must retain the caller's budget"
+        )
     assert redrawn == (recovery == "notice-redraw")
     if pane != _REVERSE_SEARCH_PANE:
         assert recovery_keys == []
