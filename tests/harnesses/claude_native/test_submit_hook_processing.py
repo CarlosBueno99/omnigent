@@ -13,7 +13,10 @@ import pytest
 
 from omnigent.harnesses.claude_native import bridge, delivery_diagnostics
 from omnigent.util.json_types import JsonObject
-from tests.harnesses.claude_native.test_claude_native_bridge import _composer_pane
+from tests.harnesses.claude_native.test_claude_native_bridge import (
+    _composer_pane,
+    _EditableComposer,
+)
 from tests.harnesses.claude_native.test_claude_native_bridge import (
     _trust_tmp_bridge_parent as _trust_tmp_bridge_parent,
 )
@@ -31,6 +34,8 @@ def _install_submit(
     hook_kind: str = "fresh",
     content: str = _CONTENT,
 ) -> SimpleNamespace:
+    composer = _EditableComposer("", cursor=0)
+    composer.install(monkeypatch)
     transcript = tmp_path / "native.jsonl"
     transcript.write_text('{"type":"system","content":"prefix"}\n')
     bridge.record_hook_event(
@@ -81,12 +86,15 @@ def _install_submit(
         after_submit=[],
         hook=hook,
         transcript=transcript,
+        composer=composer,
     )
 
     def sleep(seconds: float) -> None:
         state.elapsed += seconds
 
     def capture(*_args: object) -> str:
+        if not state.enters:
+            return composer._capture_pane("/unused/socket", "main")
         if state.enters and state.elapsed >= 30 and not state.completed:
             state.completed = True
             if outcome == "allow":
@@ -106,6 +114,7 @@ def _install_submit(
         return state.pane
 
     def run_tmux(_socket: str, *args: str) -> None:
+        composer._run_tmux(_socket, *args)
         state.commands.append(args)
         if state.enters:
             state.after_submit.append(args)
@@ -159,6 +168,7 @@ def test_slow_allowed_hook_waits_for_the_composer_without_repeating_enter(
     bridge.inject_user_message(tmp_path, content=_CONTENT)
     assert 30 <= state.elapsed < 31
     assert state.enters == 1
+    assert state.composer.submitted == [_CONTENT + "\n"]
 
 
 @pytest.mark.parametrize("outcome", ["block", "block-empty"])
