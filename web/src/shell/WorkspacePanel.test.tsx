@@ -1440,13 +1440,13 @@ describe("WorkspacePanel mobile side chats", () => {
 describe("WorkspacePanel sub-agent tabs", () => {
   const SUBAGENT_TAB = subagentTabId("conv_child");
 
-  function clientWithSubagent(title = "Research agent") {
+  function clientWithSubagent(title = "Research agent", labels: Record<string, string> = {}) {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     queryClient.setQueryData(["session", "conv_child"], {
       id: "conv_child",
       parentSessionId: "conv_ws",
       title,
-      labels: {},
+      labels,
     } as unknown as Session);
     return queryClient;
   }
@@ -1539,6 +1539,24 @@ describe("WorkspacePanel sub-agent tabs", () => {
     renderWorkspace({ rightRailTab: "sidechat", queryClient: clientWithSubagent() });
 
     expect(screen.getByTestId("side-chat-pane-stub")).toHaveAttribute("data-read-only", "true");
+  });
+
+  it("keeps a Claude Code sub-agent read-only, as its full-screen chat is", () => {
+    writeSessionWorkspaceState("conv_ws", {
+      chatTabs: [SUBAGENT_TAB],
+      selectedSideChatId: SUBAGENT_TAB,
+    });
+    renderWorkspace({
+      rightRailTab: "sidechat",
+      queryClient: clientWithSubagent("Explore", {
+        "omnigent.wrapper": "claude-code-native-ui-subagent",
+      }),
+    });
+
+    expect(screen.getByTestId("side-chat-pane-stub")).toHaveAttribute("data-read-only", "true");
+    expect(screen.getByTestId("subagent-tab-read-only")).toHaveTextContent(
+      "Claude Code sub-agents are read-only",
+    );
   });
 
   it("closes the tab without stopping the sub-agent", () => {

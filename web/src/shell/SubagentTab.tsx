@@ -2,8 +2,9 @@ import { useQueries } from "@tanstack/react-query";
 import { BotIcon, Maximize2Icon } from "lucide-react";
 import { SideChatPane } from "@/components/chat/SideChatPane";
 import { useCanEdit } from "@/hooks/usePermissions";
-import { sessionQueryOptions } from "@/hooks/useSession";
+import { sessionQueryOptions, useSession } from "@/hooks/useSession";
 import { Link, useLocation } from "@/lib/routing";
+import { readOnlyReasonForSessionLabels } from "@/lib/sessionCapabilities";
 import { sessionNavigationSearch } from "@/lib/sessionNavigation";
 import { subagentSessionIdFromTab } from "@/lib/subagentTabs";
 import { subAgentComposerLabel } from "./subagentLabel";
@@ -31,9 +32,14 @@ export function useSubagentTabLabels(tabIds: readonly string[]): Record<string, 
   return labels;
 }
 
-/** A sub-agent's full conversation in the parent's Workspace panel; read-only without edit access. */
+/**
+ * A sub-agent's full conversation in the parent's Workspace panel. Read-only
+ * without edit access, or when the full-screen chat would be (e.g. a Claude Code sub-agent).
+ */
 export function SubagentTabPane({ sessionId, label }: { sessionId: string; label: string }) {
   const canEdit = useCanEdit(sessionId);
+  const { session } = useSession(sessionId);
+  const readOnlyReason = readOnlyReasonForSessionLabels(session, null);
   const search = sessionNavigationSearch(useLocation().search);
   return (
     <div data-testid="subagent-tab-pane" className="flex h-full min-h-0 flex-1 flex-col">
@@ -51,8 +57,21 @@ export function SubagentTabPane({ sessionId, label }: { sessionId: string; label
         </Link>
       </div>
       <div className="min-h-0 flex-1">
-        <SideChatPane key={sessionId} childId={sessionId} fullSession readOnly={!canEdit} />
+        <SideChatPane
+          key={sessionId}
+          childId={sessionId}
+          fullSession
+          readOnly={!canEdit || readOnlyReason !== null}
+        />
       </div>
+      {readOnlyReason !== null && (
+        <p
+          data-testid="subagent-tab-read-only"
+          className="mx-3 mb-5 shrink-0 rounded-md border border-border bg-muted/40 px-3 py-2 text-center text-sm text-muted-foreground"
+        >
+          {readOnlyReason}
+        </p>
+      )}
     </div>
   );
 }

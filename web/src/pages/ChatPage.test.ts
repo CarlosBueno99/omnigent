@@ -1,3 +1,4 @@
+import { readOnlyReasonForSessionLabels } from "@/lib/sessionCapabilities";
 import { describe, expect, it, vi } from "vitest";
 import type { Bubble, RenderItem } from "@/lib/renderItems";
 import type { RoutingScope } from "@/lib/routingDecision";
@@ -26,7 +27,6 @@ import {
   isSubagentRoutingEligible,
   isUnboundCodingFork,
   mergePendingBubbles,
-  readOnlyReasonForSessionLabels,
   reorderCommittedRequestElicitations,
   shouldSendInitialPrompt,
   shouldShowAuthorBadge,
