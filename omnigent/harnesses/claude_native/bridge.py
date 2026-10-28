@@ -4323,25 +4323,19 @@ def inject_user_message(
     # through on the assumption it is a skill. Claude Code is the only
     # authority on that guess: when it does NOT recognize the name it
     # rejects the whole message ("Unknown command: /<name>") without ever
-    # calling the model, silently swallowing the user's text. Baseline the
-    # rejection count before submitting so a stale rejection already in
-    # scrollback (same name, earlier message) cannot masquerade as this
-    # message's rejection.
+    # calling the model, silently swallowing the user's text.
     unknown_name = _passthrough_slash_command_name(content)
     rejection_needle: str | None = None
-    rejection_baseline = 0
     if unknown_name is not None:
         rejection_needle = f"{_UNKNOWN_COMMAND_REJECTION_PREFIX}/{unknown_name}"
-        rejection_baseline = _count_unknown_command_rejections(
-            _capture_pane(socket_path, tmux_target), rejection_needle
-        )
-    _paste_and_submit(
+    rejection_baseline = _paste_and_submit(
         bridge_dir,
         socket_path,
         tmux_target,
         text=injected_text,
         needle=needle,
         ready_timeout_s=timeout_s,
+        rejection_needle=rejection_needle,
     )
     if rejection_needle is None:
         return
@@ -4381,7 +4375,8 @@ def _paste_and_submit(
     needle: str,
     preserve_draft: bool = False,
     ready_timeout_s: float = _TMUX_READY_TIMEOUT_S,
-) -> None:
+    rejection_needle: str | None = None,
+) -> int:
     r"""
     Deliver *text* into Claude's input box as one paste plus a verified Enter.
 
@@ -4399,7 +4394,8 @@ def _paste_and_submit(
         draft-visibility verification (blind submit).
     :param preserve_draft: Refuse to replace terminal edits during a fallback delivery.
     :param ready_timeout_s: Bound the readiness wait after recovering a clipped composer.
-    :returns: None.
+    :param rejection_needle: Rejection text to baseline in the prepared viewport.
+    :returns: Pre-paste rejection count, or zero when no rejection watch is needed.
     :raises ClaudeUserPromptPending: If a question or permission prompt is
         pending before the submit Enter; the message was not sent.
     :raises ClaudeComposerNotCleared: If a draft left in the input box could
@@ -4425,7 +4421,17 @@ def _paste_and_submit(
         preserve_draft=preserve_draft,
         ready_timeout_s=ready_timeout_s,
     ):
+        # Recovery can reveal older rejections. Baseline the same viewport
+        # retained through submission and the rejection watch.
+        rejection_baseline = (
+            _count_unknown_command_rejections(
+                _capture_pane(socket_path, tmux_target), rejection_needle
+            )
+            if rejection_needle is not None
+            else 0
+        )
         _paste_and_verify(bridge_dir, socket_path, tmux_target, text=text, needle=needle)
+        return rejection_baseline
 
 
 def _paste_and_verify(
