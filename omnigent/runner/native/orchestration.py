@@ -7697,11 +7697,8 @@ def _is_runner_owned_codex_terminal(
         process = getattr(backend, "proc", None)
         return process is None or process.returncode is None
     bridge_dir = codex_native_bridge_dir(resource.session_id)
-    state = read_bridge_state(bridge_dir)
     return (
-        state is not None
-        and state.session_id == resource.session_id
-        and read_bridge_startup_error(bridge_dir) is None
+        read_bridge_state(bridge_dir) is not None and read_bridge_startup_error(bridge_dir) is None
     )
 
 

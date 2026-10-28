@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import threading
 import uuid
@@ -1079,7 +1080,10 @@ async def test_ensure_terminal_route_recreates_dead_registered_pane(
         ("ready", False),
         ("detached", False),
         ("rotated", False),
-        ("foreign_bridge", True),
+        ("rotated_before_state_update", False),
+        ("rotated_during_link_update", False),
+        ("rotated_cancelled_link_update", False),
+        ("foreign_bridge", False),
     ],
 )
 async def test_message_recovers_a_live_codex_pane_with_no_backend(
@@ -1092,17 +1096,22 @@ async def test_message_recovers_a_live_codex_pane_with_no_backend(
     from omnigent.runner.native import orchestration
 
     session_id = uuid.uuid4().hex
-    source_session_id = uuid.uuid4().hex if backend_state == "rotated" else session_id
+    rotating = backend_state.startswith("rotated")
+    source_session_id = uuid.uuid4().hex if rotating else session_id
     monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "bridges")
     bridge_dir = codex_native_bridge.prepare_bridge_dir(source_session_id)
-    if backend_state in (
-        "ready",
-        "detached",
-        "dead_backend",
-        "dead_backend_close_failed",
-        "unowned_dead_backend",
-        "rotated",
-        "foreign_bridge",
+    if (
+        backend_state
+        in (
+            "ready",
+            "detached",
+            "dead_backend",
+            "dead_backend_close_failed",
+            "unowned_dead_backend",
+            "rotated",
+            "foreign_bridge",
+        )
+        or rotating
     ):
         codex_native_bridge.write_bridge_state(
             bridge_dir,
@@ -1118,13 +1127,16 @@ async def test_message_recovers_a_live_codex_pane_with_no_backend(
     if backend_state == "failed_startup":
         codex_native_bridge.record_app_server_stopped(bridge_dir)
     backend = None
-    if backend_state in (
-        "starting",
-        "ready",
-        "dead_backend",
-        "dead_backend_close_failed",
-        "unowned_dead_backend",
-        "rotated",
+    if (
+        backend_state
+        in (
+            "starting",
+            "ready",
+            "dead_backend",
+            "dead_backend_close_failed",
+            "unowned_dead_backend",
+        )
+        or rotating
     ):
         backend = SimpleNamespace(
             proc=SimpleNamespace(returncode=1 if "dead_backend" in backend_state else None),
@@ -1168,13 +1180,57 @@ async def test_message_recovers_a_live_codex_pane_with_no_backend(
         )
 
     monkeypatch.setattr(orchestration, "_auto_create_codex_terminal", launch)
+    message = {
+        "type": "message",
+        "role": "user",
+        "agent_id": "880b5afda28ad55ff74cbeb9b5fc67fb",
+        "harness": "codex-native",
+        "content": [{"type": "input_text", "text": "Continue the task"}],
+    }
+    link_started = asyncio.Event()
+    release_link = asyncio.Event()
+    hold_link = backend_state in ("rotated_during_link_update", "rotated_cancelled_link_update")
+    if hold_link:
+        original_link = instance.set_conversation_link
+
+        async def held_link(url: str) -> None:
+            link_started.set()
+            await release_link.wait()
+            await original_link(url)
+
+        monkeypatch.setattr(instance, "set_conversation_link", held_link)
+    if backend_state == "rotated_during_link_update":
+        from omnigent.runner import resource_routes
+
+        original_ensure = resource_routes._ensure_native_terminal
+
+        async def concurrent_ensure(*args: Any, **kwargs: Any) -> object:
+            release_link.set()
+            return await original_ensure(*args, **kwargs)
+
+        monkeypatch.setattr(resource_routes, "_ensure_native_terminal", concurrent_ensure)
     async with _runner_client(app) as client:
-        if backend_state == "rotated":
-            transferred = await client.post(
-                f"/v1/sessions/{source_session_id}/resources/terminals/terminal_codex_main/transfer",
-                json={"target_session_id": session_id},
+        message_task = None
+        if rotating:
+            transfer_task = asyncio.create_task(
+                client.post(
+                    f"/v1/sessions/{source_session_id}/resources/terminals/terminal_codex_main/transfer",
+                    json={"target_session_id": session_id},
+                )
             )
-            assert transferred.status_code == 200, transferred.text
+            if hold_link:
+                await asyncio.wait_for(link_started.wait(), timeout=5.0)
+            if backend_state == "rotated_cancelled_link_update":
+                transfer_task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await transfer_task
+            else:
+                if hold_link:
+                    message_task = asyncio.create_task(
+                        client.post(f"/v1/sessions/{session_id}/events", json=message)
+                    )
+                transferred = await asyncio.wait_for(transfer_task, timeout=5.0)
+                assert transferred.status_code == 200, transferred.text
             rejected_target = uuid.uuid4().hex
             rejected = await client.post(
                 f"/v1/sessions/{source_session_id}/resources/terminals/terminal_codex_main/transfer",
@@ -1182,20 +1238,16 @@ async def test_message_recovers_a_live_codex_pane_with_no_backend(
             )
             assert rejected.status_code == 404, rejected.text
             assert rejected_target not in orchestration._AUTO_CODEX_BRIDGE_DIRS
-            state = codex_native_bridge.read_bridge_state(bridge_dir)
-            assert state is not None
-            codex_native_bridge.write_bridge_state(
-                bridge_dir, replace(state, session_id=session_id)
-            )
-        response = await client.post(
-            f"/v1/sessions/{session_id}/events",
-            json={
-                "type": "message",
-                "role": "user",
-                "agent_id": "880b5afda28ad55ff74cbeb9b5fc67fb",
-                "harness": "codex-native",
-                "content": [{"type": "input_text", "text": "Continue the task"}],
-            },
+            if backend_state == "rotated":
+                state = codex_native_bridge.read_bridge_state(bridge_dir)
+                assert state is not None
+                codex_native_bridge.write_bridge_state(
+                    bridge_dir, replace(state, session_id=session_id)
+                )
+        response = (
+            await message_task
+            if message_task is not None
+            else await client.post(f"/v1/sessions/{session_id}/events", json=message)
         )
         assert response.status_code == 202, response.text
         await poll_until_async(lambda: bool(manager._client.posted_bodies), timeout_s=5.0)
@@ -1204,7 +1256,7 @@ async def test_message_recovers_a_live_codex_pane_with_no_backend(
     assert close.await_count == int(recreated)
     if backend is not None:
         assert backend.close.await_count == int(recreated)
-    if backend_state == "rotated":
+    if rotating:
         assert registry.get(session_id, "codex", "main") is instance
         assert orchestration._AUTO_CODEX_APP_SERVERS[source_session_id] is backend
         assert session_id not in orchestration._AUTO_CODEX_APP_SERVERS

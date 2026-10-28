@@ -9,6 +9,7 @@ import mimetypes
 import os
 import urllib.parse
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -829,11 +830,41 @@ def register_resource_routes(
                 },
             )
         try:
-            resource = await resource_registry.transfer_terminal(
-                source_session_id=session_id,
-                target_session_id=target_session_id,
-                terminal_id=terminal_id,
-            )
+            async with AsyncExitStack() as transfer_locks:
+                bridge_dir = None
+                source_instance = None
+                registry = resource_registry.terminal_registry
+                if terminal_id == terminal_resource_id("codex", "main"):
+                    for owner in sorted({session_id, target_session_id}):
+                        lock = _codex_terminal_ensure_locks.setdefault(owner, asyncio.Lock())
+                        await transfer_locks.enter_async_context(lock)
+                    if (
+                        registry is not None
+                        and resource_registry.terminal_resource_role(session_id, terminal_id)
+                        == CODEX_NATIVE_TERMINAL_ROLE
+                    ):
+                        from omnigent.runner.native.orchestration import codex_native_bridge_dir
+
+                        bridge_dir = codex_native_bridge_dir(session_id)
+                        source_instance = registry.get(session_id, "codex", "main")
+                try:
+                    resource = await resource_registry.transfer_terminal(
+                        source_session_id=session_id,
+                        target_session_id=target_session_id,
+                        terminal_id=terminal_id,
+                    )
+                finally:
+                    # The registry move precedes the awaited link update, which can be cancelled.
+                    if (
+                        bridge_dir is not None
+                        and source_instance is not None
+                        and registry is not None
+                        and registry.get(session_id, "codex", "main") is not source_instance
+                        and registry.get(target_session_id, "codex", "main") is source_instance
+                    ):
+                        from omnigent.runner.native.orchestration import _AUTO_CODEX_BRIDGE_DIRS
+
+                        _AUTO_CODEX_BRIDGE_DIRS[target_session_id] = bridge_dir
         except RuntimeError as exc:
             return JSONResponse(
                 status_code=409,
@@ -854,16 +885,6 @@ def register_resource_routes(
                     }
                 },
             )
-        if (
-            resource_registry.terminal_resource_role(target_session_id, terminal_id)
-            == CODEX_NATIVE_TERMINAL_ROLE
-        ):
-            from omnigent.runner.native.orchestration import (
-                _AUTO_CODEX_BRIDGE_DIRS,
-                codex_native_bridge_dir,
-            )
-
-            _AUTO_CODEX_BRIDGE_DIRS[target_session_id] = codex_native_bridge_dir(session_id)
         return JSONResponse(
             status_code=200,
             content=session_resource_view_to_dict(resource),
