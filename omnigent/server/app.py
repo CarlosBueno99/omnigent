@@ -269,7 +269,7 @@ def _resolve_extension_state(
     # Distribution metadata is an external installation boundary. Preserve the
     # rest of the server if global discovery itself fails before per-plugin
     # failure isolation can apply.
-    except Exception as exc:  # noqa: BLE001 -- broken extension discovery cannot stop startup
+    except Exception as exc:
         _logger.warning("could not discover installed extensions (%s)", exc, exc_info=True)
         return ExtensionPluginState(manifests=(), load_errors={"registry": str(exc)})
 
@@ -288,7 +288,7 @@ def _resolve_extension_assets(
                 ", ".join(sorted(overrides)),
             )
         return build_asset_index(state, overrides=overrides)
-    except Exception as exc:  # noqa: BLE001 -- broken extension assets cannot stop startup
+    except Exception as exc:
         _logger.warning("could not build extension asset index (%s)", exc, exc_info=True)
         return {}, {"registry": str(exc)}
 
@@ -1215,7 +1215,7 @@ def _ensure_default_acp_agents(
 
         configured = list(acp_agents())
         shadowed: frozenset[str] = shadowed_builtin_acp_rows(configured)
-    except Exception:  # noqa: BLE001 -- malformed optional ACP config cannot stop startup
+    except Exception:  # a malformed acp: block must never break startup
         _logger.debug("acp agent seeding skipped (config unreadable)", exc_info=True)
         configured = []
         shadowed = frozenset()
@@ -3477,7 +3477,7 @@ def create_app(
             try:
                 await asyncio.to_thread(permission_store.ensure_user, user_id)
                 await asyncio.to_thread(promote_if_listed, admin_list, permission_store, user_id)
-            except Exception:  # noqa: BLE001 -- best-effort promotion cannot break identity lookup
+            except Exception:
                 _logger.warning("Could not promote listed admin %s", user_id, exc_info=True)
         # Still report the list, so admin chrome shows even if promotion failed.
         return {"user_id": user_id, "is_admin": flagged or listed}
@@ -3921,7 +3921,7 @@ def create_app(
             return own
         try:
             return await asyncio.to_thread(routing_host_id, convs[0], conversation_store)
-        except Exception:  # noqa: BLE001 -- an unreadable ancestor leaves the host unknown
+        except Exception:  # an unreadable ancestor leaves the host unknown
             _logger.warning("Host lookup failed for session=%s", convs[0].id, exc_info=True)
             return None
 
@@ -3966,7 +3966,7 @@ def create_app(
         loop = asyncio.get_running_loop()
         started = loop.time()
         deadline = started + HOST_OFFLINE_HOLD_S
-        host_back = False
+        host_back_deadline: float | None = None
         outcome = "cancelled"
         for conv in held:
             _logger.info(
@@ -3983,10 +3983,13 @@ def create_app(
             )
         try:
             while True:
-                remaining = deadline - loop.time()
+                now = loop.time()
+                remaining = deadline - now
                 if remaining <= 0:
-                    outcome = "host_back_without_runner" if host_back else "expired"
+                    outcome = "expired"
                     break
+                if host_back_deadline is not None:
+                    remaining = min(remaining, max(0.0, host_back_deadline - now))
                 if (
                     await tunnel_registry.wait_for_runner(
                         runner_id, timeout_s=min(HOST_OFFLINE_RECHECK_S, remaining)
@@ -3999,10 +4002,16 @@ def create_app(
                     outcome = "server_shutdown"
                     break
                 # An unreadable host row keeps holding; only a live one ends it early.
-                if not host_back and await _host_offline(host_id) is False:
-                    # The host is back; give its runner one more grace to follow.
-                    host_back = True
-                    deadline = min(deadline, loop.time() + RUNNER_DISCONNECT_GRACE_S)
+                if await _host_offline(host_id) is False:
+                    now = loop.time()
+                    if host_back_deadline is None:
+                        host_back_deadline = min(deadline, now + RUNNER_DISCONNECT_GRACE_S)
+                    if now >= host_back_deadline:
+                        outcome = "host_back_without_runner"
+                        break
+                else:
+                    # A brief host return cannot end a sleeping host's absolute hold.
+                    host_back_deadline = None
         finally:
             for conv in held:
                 _logger.info(

@@ -817,7 +817,7 @@ class TunnelRegistry:
                             session.diagnostics.enqueued(
                                 frame, session.outbound_queue.qsize(), requested_at
                             )
-                        except Exception:  # noqa: BLE001 -- diagnostics cannot reject an accepted frame
+                        except Exception:  # recording failures are best-effort.
                             _logger.debug(
                                 "Runner %s outbound queue diagnostics failed",
                                 session.runner_id,
