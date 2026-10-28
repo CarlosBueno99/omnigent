@@ -116,7 +116,7 @@ _CLAUDE_CODE_MIN_THINKING_BUDGET_TOKENS = 1024
 _REPLAYED_HISTORY_WINDOW_SHARE = 0.5
 # Overcounts English and code tokens, and approximates one token per CJK character.
 _REPLAYED_HISTORY_BYTES_PER_TOKEN = 3
-# An image's or PDF's token cost does not follow its encoded size.
+# An image's token cost does not follow its encoded size; this also floors a PDF's estimate.
 _REPLAYED_ATTACHMENT_TOKEN_ESTIMATE = 2_000
 
 # Claude Code forwards the ANTHROPIC_CUSTOM_HEADERS value verbatim as
@@ -693,6 +693,11 @@ def _estimated_replay_tokens(blocks: list[_JsonObject]) -> int:
             text = block.get("text")
         elif isinstance(source, dict) and source.get("type") == "text":
             text = source.get("data")
+        elif block.get("type") == "document" and isinstance(source, dict):
+            # A PDF is billed per page, so its encoded size stands in for its page count.
+            payload_tokens = len(str(source.get("data", ""))) // _REPLAYED_HISTORY_BYTES_PER_TOKEN
+            tokens += max(_REPLAYED_ATTACHMENT_TOKEN_ESTIMATE, payload_tokens)
+            continue
         else:
             tokens += _REPLAYED_ATTACHMENT_TOKEN_ESTIMATE
             continue

@@ -470,6 +470,33 @@ class TestPromptExtraction(unittest.TestCase):
         self.assertIn("Keep this image.", text)
         self.assertNotIn("omitted", text)
 
+    def test_budgeted_replay_counts_a_pdf_by_its_encoded_size(self):
+        executor = self._make_executor()
+        pdf_payload = base64.b64encode(b"%PDF-1.7" + b"\0" * 300_000).decode("ascii")
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_file",
+                        "file_data": f"data:application/pdf;base64,{pdf_payload}",
+                    },
+                    {"type": "input_text", "text": "Read this report."},
+                ],
+            },
+            {"role": "assistant", "content": "Read."},
+            {"role": "user", "content": "What next?"},
+        ]
+
+        prompt = executor._build_prompt(
+            messages, resume_session=False, history_token_budget=100_000
+        )
+
+        self.assertIsInstance(prompt, str)
+        self.assertIn("[Earlier messages omitted to fit the model's context window: 1.]", prompt)
+        self.assertNotIn("Read this report.", prompt)
+        self.assertIn("assistant: Read.", prompt)
+
 
 # ---------------------------------------------------------------------------
 # Tests: Constructor and properties
@@ -6194,17 +6221,26 @@ async def test_malformed_window_override_replays_within_the_default_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
+    from omnigent.llms.context_window import DEFAULT_CONTEXT_WINDOW
 
     monkeypatch.setenv("AP_CONTEXT_WINDOW_OVERRIDE", "200k")
     fake_sdk = _make_recovery_fake_sdk()
     executor = ClaudeSDKExecutor(model="claude-sonnet-4-5")
-    messages = [*_long_prior_messages(), {"role": "user", "content": "What next?"}]
+    # Too large for half of the default window, but not for half of a 200k window.
+    oldest = {"role": "user", "content": "oldest " + "x" * (2 * DEFAULT_CONTEXT_WINDOW)}
+    messages = [
+        oldest,
+        {"role": "assistant", "content": "ok"},
+        *_long_prior_messages(),
+        {"role": "user", "content": "What next?"},
+    ]
     with patch("omnigent.inner.claude_sdk_executor._ensure_sdk", return_value=fake_sdk):
         events = [event async for event in executor.run_turn(messages, [], "")]
 
     assert not [event for event in events if isinstance(event, ExecutorError)]
     [prompt] = fake_sdk.created_clients[0].prompts
-    assert "Earlier messages omitted" not in prompt
+    assert "[Earlier messages omitted to fit the model's context window: 1.]" in prompt
+    assert "oldest" not in prompt
     assert "turn-0" in prompt
     assert "What next?" in prompt
 

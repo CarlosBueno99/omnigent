@@ -114,11 +114,14 @@ def test_long_claude_sdk_session_answers_after_runner_restart(
         stack.runner = None
         stack.start_runner(env=runner_env)
 
-        after = _ask(client, mock_url, session_id, f"after-restart-{uid}", "Still here.")
+        # Equal-length tokens let the mock route each turn by its newest token.
+        after = _ask(client, mock_url, session_id, f"restart-1-{uid}", "Still here.")
         assert after["status"] == "completed", (
             f"the first turn after the runner restart failed: {after['error']}"
         )
-        follow_up = _ask(client, mock_url, session_id, f"follow-up-{uid}", "Still here too.")
+        assert "Still here." in json.dumps(after["output"])
+        follow_up = _ask(client, mock_url, session_id, f"restart-2-{uid}", "Still here too.")
         assert follow_up["status"] == "completed", (
             f"the follow-up turn after the runner restart failed: {follow_up['error']}"
         )
+        assert "Still here too." in json.dumps(follow_up["output"])

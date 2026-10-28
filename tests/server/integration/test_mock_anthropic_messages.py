@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -91,3 +93,32 @@ async def test_nonstream_tool_use_has_decoded_input() -> None:
         assert message["stop_reason"] == "tool_use"
         assert message["content"][0]["name"] == "inspect"
         assert message["content"][0]["input"] == {"path": "synthetic.txt"}
+
+
+async def test_context_window_rejects_oversized_prompts_until_reset() -> None:
+    def message_body(content: str) -> bytes:
+        message = {"role": "user", "content": content}
+        return json.dumps(
+            {"model": "synthetic-model", "max_tokens": 8, "messages": [message]}
+        ).encode()
+
+    oversized, short = message_body("x" * 400), message_body("Short.")
+    headers = {"content-type": "application/json"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=mock_llm_server.app), base_url="http://mock"
+    ) as client:
+        configured = await client.post("/mock/configure", json={"responses": [{"text": "Fits."}]})
+        configured.raise_for_status()
+        limited = await client.post("/mock/context_window", json={"max_input_tokens": 100})
+        limited.raise_for_status()
+        rejected = await client.post("/v1/messages", content=oversized, headers=headers)
+        accepted = await client.post("/v1/messages", content=short, headers=headers)
+        (await client.post("/mock/reset")).raise_for_status()
+        after_reset = await client.post("/v1/messages", content=oversized, headers=headers)
+
+    assert rejected.status_code == 400
+    assert rejected.json()["error"]["message"].startswith("prompt is too long")
+    assert accepted.status_code == 200
+    assert accepted.json()["content"] == [{"type": "text", "text": "Fits."}]
+    assert accepted.json()["usage"]["input_tokens"] == len(short) // 4
+    assert after_reset.status_code == 200
