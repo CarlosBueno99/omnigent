@@ -3985,7 +3985,7 @@ def create_app(
         loop = asyncio.get_running_loop()
         started = loop.time()
         deadline = started + HOST_OFFLINE_HOLD_S
-        host_back = False
+        host_back_deadline: float | None = None
         outcome = "cancelled"
         for conv in held:
             _logger.info(
@@ -4002,13 +4002,16 @@ def create_app(
             )
         try:
             while True:
-                remaining = deadline - loop.time()
+                now = loop.time()
+                remaining = deadline - now
                 if remaining <= 0:
-                    outcome = "host_back_without_runner" if host_back else "expired"
+                    outcome = "expired"
                     break
+                if host_back_deadline is not None:
+                    remaining = min(remaining, max(0.0, host_back_deadline - now))
                 await _wait_for_runner_or_host(
                     runner_id,
-                    None if host_back else host_id,
+                    None if host_back_deadline is not None else host_id,
                     min(HOST_OFFLINE_RECHECK_S, remaining),
                 )
                 if tunnel_registry.get(runner_id) is not None:
@@ -4018,16 +4021,25 @@ def create_app(
                     outcome = "server_shutdown"
                     break
                 # An unreadable host row keeps holding; only a live one ends it early.
-                if not host_back and await _host_offline(host_id) is False:
-                    host_back = True
-                    # It registered after the hold began, so its hello lists the
-                    # runners alive now; one back elsewhere gets the full grace.
-                    host = host_registry.get(host_id)
-                    runner_lost = host is not None and runner_id not in host.hello.runners
-                    grace = (
-                        HOST_BACK_WITHOUT_RUNNER_S if runner_lost else RUNNER_DISCONNECT_GRACE_S
-                    )
-                    deadline = min(deadline, loop.time() + grace)
+                if await _host_offline(host_id) is False:
+                    now = loop.time()
+                    if host_back_deadline is None:
+                        # A returning host's hello lists its surviving runners;
+                        # a host on another replica still gets the full grace.
+                        host = host_registry.get(host_id)
+                        runner_lost = host is not None and runner_id not in host.hello.runners
+                        grace = (
+                            HOST_BACK_WITHOUT_RUNNER_S
+                            if runner_lost
+                            else RUNNER_DISCONNECT_GRACE_S
+                        )
+                        host_back_deadline = min(deadline, now + grace)
+                    if now >= host_back_deadline:
+                        outcome = "host_back_without_runner"
+                        break
+                else:
+                    # A brief host return cannot end a sleeping host's absolute hold.
+                    host_back_deadline = None
         finally:
             for conv in held:
                 _logger.info(
@@ -4086,21 +4098,12 @@ def create_app(
             runner_id, generation=connection.generation
         )
         await asyncio.gather(*cancelled, return_exceptions=True)
-        # Newest-wins guard: a superseded tunnel's teardown fires this
-        # hook after a fresh tunnel for the same ``runner_id`` already
-        # registered (``TunnelRegistry.register`` retires the old
-        # session, whose helper tasks then error out and run this
-        # teardown). Marking the runner's sessions ``failed`` here would
-        # clobber the live tunnel's recovery: reconnect-recovery
-        # (``_on_runner_connect`` -> ``_publish_runner_recovered_status``)
-        # may have just cleared a stale ``runner_disconnected`` failure,
-        # and this stale disconnect would silently re-fail the session.
-        # If a live tunnel is registered for this runner, the runner is
-        # NOT offline, so skip. Mirrors the registry's own
-        # generation-guarded ``deregister``.
-        if tunnel_registry.get(runner_id) is not None:
+        # Replaced tunnels still release their own initializers, but cannot
+        # cancel a newer outage or apply an old idle attestation to new work.
+        # The replacement may itself be gone before this cleanup finishes.
+        if connection.superseded or tunnel_registry.get(runner_id) is not None:
             _logger.info(
-                "Runner %s disconnect superseded by a live tunnel; skipping offline-marking",
+                "Runner %s disconnect superseded by a newer tunnel; skipping offline-marking",
                 runner_id,
             )
             return
