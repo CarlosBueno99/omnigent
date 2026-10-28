@@ -87,12 +87,13 @@ the header states are covered by `web/src/shell/ChatHeader.test.tsx`.
   including authenticated local single-user identity, then exercises Chat on the
   same executor. Reattachment uses the same observed terminal. Provider-native
   helper delegation and the legacy internal standalone launcher are not covered.
-  The public Codex CLI uses host-managed preparation; interactive CLI attachment
-  still needs its own process evidence.
+  The public Codex CLI uses host-managed preparation. A separate isolated
+  process drive at `d3b563fd6` verified typed owner delegation through the public
+  command with a preconnected host; first-time host onboarding remains unverified.
   Claude SDK rows require the lockfile SDK and pinned CLI inside a clean Linux
   container with loopback-only networking; they skip before probing Claude on
   an ordinary workstation. The isolated CLI 2.1.295 / SDK 0.2.121 rows passed
-  at `a61b68089` with a scripted provider, no external network and no host mounts.
+  at `d3b563fd6` with a scripted provider, no external network and no host mounts.
   A workstation skip is not Claude process validation; the SDK proof does not
   cover native Claude terminals or provider-created helpers.
   After a runner restart, repeat typed input in the existing Codex session.
@@ -129,6 +130,15 @@ the header states are covered by `web/src/shell/ChatHeader.test.tsx`.
   Pat's message during owner work, reduce Pat to read-only, and verify that old
   work does not gain owner authority. Repeat independent worker creation and
   check that a refused request leaves no new worker.
+- Public Codex CLI manual check: in an isolated environment with a connected
+  owned host and a scripted provider, run `omnigent codex --server <url>`.
+  Type a request to send a uniquely named task to an owned peer using
+  `sys_session_message`. Confirm the actual tool result is queued, the peer's
+  persisted input names the source session, and its reply arrives. Type `/quit`
+  and check exit status. Use the pinned CLI and retain the command and terminal
+  transcript. Do not substitute an HTTP prompt, direct terminal WebSocket write,
+  or initial `-p` argument for the interactive public entry point. This case
+  does not prove first-time onboarding, independent creation or multi-user CLI auth.
 - Requester compatibility matrix (implementation limits, not test results):
 
   | Entry point | Owner delegation | Required verification |
@@ -137,7 +147,7 @@ the header states are covered by `web/src/shell/ChatHeader.test.tsx`.
   | Codex native web Chat | Implemented | Pinned CLI consumption IDs, authenticated harness lookup, browser actions and destination history. |
   | Claude SDK Chat/API | Implemented | Raw provider UUID echoes and exact SDK control tasks retain input/tool lineage before typed parsing. Isolated pinned-process rows cover owner/editor/recovery, worker creation and kill switch; component tests cover delayed callbacks. |
   | Claude native Chat/terminal | Blocked | PTY input must bind its actual requester to consumed execution and retained calls. Typing remains available. |
-  | Codex host-managed terminal / default CLI attach | Implemented | Authenticated relay captures writers; the TUI proxy registers input before submission. Real terminal WebSocket send/create passes. Local CLI attach selection has component coverage. |
+  | Codex host-managed terminal / default CLI attach | Implemented | Authenticated relay captures writers; the TUI proxy registers input before submission. Real terminal WebSocket send/create passes. A separate public CLI drive proves typed owner send with a preconnected host and local single-user auth; first-time onboarding and multi-user CLI auth remain unverified. |
   | Legacy internal Codex standalone launcher | Delegation blocked | No in-tree production caller found; the public CLI uses host-managed preparation. Direct internal calls lack trusted input registration. |
   | Provider-native children/helpers | Incomplete | Preserve each input's requester through child creation, steering, queue consumption and wakes. Ordinary helper visibility is not proof. |
   | Legacy runner → updated server | Refused without requester | Private/shared sends and creates leave no new task or worker; ordinary child work keeps unknown origin. |
