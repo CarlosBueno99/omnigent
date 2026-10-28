@@ -6,6 +6,7 @@ import { Maximize2Icon, XIcon } from "lucide-react";
 import { SideChatPane } from "@/components/chat/SideChatPane";
 import { Button } from "@/components/ui/button";
 import { useBrowserAgentRelay } from "@/hooks/useBrowserAgentRelay";
+import { useUiOpenFile } from "@/hooks/useUiOpenFile";
 import { useChildSessions } from "@/hooks/useChildSessions";
 import { useConversationEntryState } from "@/hooks/useConversationEntryState";
 import { useCanEdit } from "@/hooks/usePermissions";
@@ -47,6 +48,7 @@ import {
 import type { RightRailTab } from "@/shell/railTabs";
 import type { ChangedSort } from "@/shell/FlatFileList";
 import { WorkspacePanel } from "@/shell/WorkspacePanel";
+import { citedFilePosition } from "@/shell/filePositionState";
 import { useGridSessions } from "./GridSessionsContext";
 
 export type GridWorkspacePanelProps = Pick<
@@ -212,9 +214,7 @@ export function GridSessionPane({
     (path: string, options?: OpenFileOptions) => {
       navigateWorkspace(path, options, () => {
         onOpenWorkspace();
-        setPosition(
-          options?.line === undefined ? undefined : { line: options.line, column: options.column },
-        );
+        setPosition(citedFilePosition(options));
         setWorkspace((previous) => ({
           ...previous,
           selectedFilePath: path,
@@ -227,6 +227,7 @@ export function GridSessionPane({
     },
     [navigateWorkspace, onOpenWorkspace],
   );
+  useUiOpenFile(sessionId, selected && canBrowse, openFile);
   const selectTab = useCallback(
     (rightRailTab: RightRailTab | null) => {
       navigateWorkspace("", undefined, () =>
