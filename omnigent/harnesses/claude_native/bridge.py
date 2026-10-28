@@ -6452,7 +6452,7 @@ def _clear_composer(socket_path: str, tmux_target: str) -> None:
     A successful tmux command does not prove the terminal handled its keys.
     Each clear ends with a space: Claude's empty-input hints disappear when
     the input is nonempty, so a later capture can verify that only whitespace
-    remains. Claude trims it before processing messages and slash commands.
+    remains. Remove the probe before typing the message or slash command.
     The capture must show the whole box (both rules on screen) with only its
     prompt glyph and blank rows before a paste is safe. A box with more text,
     or one the pane cut off (a draft taller than the pane, or a sliver-height
@@ -6484,6 +6484,7 @@ def _clear_composer(socket_path: str, tmux_target: str) -> None:
             and not any(row.strip() for row in box.rows[1:])
         )
         if cleared and round_no > 0:
+            _run_tmux(socket_path, "send-keys", "-t", tmux_target, "BSpace")
             return
         if round_no == _COMPOSER_CLEAR_MAX_ROUNDS:
             delivery_diagnostics.record_composer_not_cleared(

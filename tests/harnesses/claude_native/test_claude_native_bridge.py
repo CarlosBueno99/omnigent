@@ -4539,11 +4539,12 @@ def test_inject_user_message_pastes_content_then_submits(
     inject_user_message(bridge_dir, content=content)
 
     # Refocus, clear the composer, paste, and submit in order.
-    assert len(captured) == 5, f"Expected 5 tmux calls, got {len(captured)}."
-    refocus, clear, load, paste, submit = captured
+    assert len(captured) == 6, f"Expected 6 tmux calls, got {len(captured)}."
+    refocus, clear, remove_probe, load, paste, submit = captured
     assert refocus[-4:] == ["send-keys", "-t", "claude:0.0", "Space"]
     assert clear[3:8] == _LEAVE_COPY_MODE
     assert clear[-4:] == ["-l", "-t", "claude:0.0", _CLEAR_ONE_ROW_COMPOSER]
+    assert remove_probe[-4:] == ["send-keys", "-t", "claude:0.0", "BSpace"]
     # The buffer file carried the normalized content + trailing CR. A
     # missing trailing CR is the trailing-CR regression; a newline that stayed
     # \n (not CR) is the anthropics/claude-code#52126 multi-line collapse.
@@ -5047,16 +5048,15 @@ def test_inject_user_message_waits_for_claude_prompt_before_typing(
     monkeypatch.setattr("subprocess.run", _fake_run)
     inject_user_message(bridge_dir, content="hello")
 
-    # Gate polled until the third capture (prompt present), then the
-    # four delivery calls (composer clear, load-buffer, paste-buffer, Enter)
-    # fired.
+    # Delivery starts only after the prompt renders.
     assert capture_calls["n"] >= 3, (
         f"Expected >=3 capture-pane polls before the prompt rendered, got {capture_calls['n']}."
     )
-    assert len(send_keys) == 5, f"Expected 5 tmux calls, got {len(send_keys)}."
-    refocus, clear, load, paste, submit = send_keys
+    assert len(send_keys) == 6, f"Expected 6 tmux calls, got {len(send_keys)}."
+    refocus, clear, remove_probe, load, paste, submit = send_keys
     assert refocus[-1] == "Space"
     assert clear[-4:] == ["-l", "-t", "claude:0.0", _CLEAR_ONE_ROW_COMPOSER]
+    assert remove_probe[-4:] == ["send-keys", "-t", "claude:0.0", "BSpace"]
     # The paste fires after the gate via the buffer path. The exact
     # payload/flag assertions live in the dedicated paste test; here the
     # gate ordering is the claim.
@@ -6119,15 +6119,13 @@ def test_inject_slash_command_clears_draft_pastes_literal_then_enter(
     monkeypatch.setattr(claude_native_bridge, "time", _VirtualClock())
     claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high")
 
-    # Four keystroke calls in order: Space, composer clear, literal paste,
-    # Enter. A missing clear lets the draft concatenate.
+    # Clear and remove the probe before typing the command.
     # capture-pane calls (the delivery-verification polls) are not keystrokes.
     keystrokes = [cmd for cmd in captured if "send-keys" in cmd]
-    assert len(keystrokes) == 4, (
-        f"Expected 4 tmux send-keys calls (Space + clear + paste + Enter), got {len(keystrokes)}."
-    )
-    refocus, clear, paste, submit = keystrokes
+    assert len(keystrokes) == 5, f"Expected 5 tmux send-keys calls, got {len(keystrokes)}."
+    refocus, clear, remove_probe, paste, submit = keystrokes
     assert refocus[-1] == "Space"
+    assert remove_probe[-4:] == ["send-keys", "-t", "claude:0.0", "BSpace"]
     assert clear == [
         "tmux",
         "-S",
@@ -11510,6 +11508,9 @@ class _EditableComposer:
         elif args[0] == "send-keys" and args[-1] == "Space":
             self._clearing_started = True
             self._insert(" ")
+        elif args[0] == "send-keys" and args[-1] == "BSpace" and self.cursor:
+            self.text = self.text[: self.cursor - 1] + self.text[self.cursor :]
+            self.cursor -= 1
         elif args[0] == "send-keys" and args[-1] == "Enter":
             self.submitted.append(self.text)
             self.text, self.cursor = "", 0
@@ -11632,7 +11633,7 @@ def test_inject_slash_command_clears_every_line_of_a_leftover_draft(
 
     claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high")
 
-    assert [text.strip() for text in composer.submitted] == ["/effort high"]
+    assert composer.submitted == ["/effort high"]
 
 
 @pytest.mark.parametrize("slash", [False, True], ids=["web-message", "slash-command"])
@@ -12182,13 +12183,14 @@ def test_a_model_switch_types_the_argument_form_and_confirms(
     assert [args[-1] for args in sends] == [
         "Space",
         _CLEAR_ONE_ROW_COMPOSER,
+        "BSpace",
         "/model databricks-claude-sonnet-5",
         "Enter",
         # The "Switch model?" confirmation, once it actually rendered.
         "Enter",
     ]
     # The id must go through literally, not as a tmux key name.
-    assert sends[2] == [
+    assert sends[3] == [
         "send-keys",
         "-l",
         "-t",
@@ -12545,9 +12547,14 @@ def test_a_swallowed_slash_submit_enter_is_retried_while_the_draft_persists(
 
     claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high")
 
-    assert tails == ["Space", _CLEAR_ONE_ROW_COMPOSER, "/effort high", "Enter", "Enter"], (
-        f"Expected the swallowed submit Enter to be retried once; got {tails}."
-    )
+    assert tails == [
+        "Space",
+        _CLEAR_ONE_ROW_COMPOSER,
+        "BSpace",
+        "/effort high",
+        "Enter",
+        "Enter",
+    ], f"Expected the swallowed submit Enter to be retried once; got {tails}."
 
 
 def test_a_slash_command_stuck_in_the_composer_fails_loud(
@@ -12595,7 +12602,7 @@ def test_a_slash_command_draft_that_never_renders_submits_blind(
     claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high")
 
     tails = [args[-1] for args in sends]
-    assert tails == ["Space", _CLEAR_ONE_ROW_COMPOSER, "/effort high", "Enter"], (
+    assert tails == ["Space", _CLEAR_ONE_ROW_COMPOSER, "BSpace", "/effort high", "Enter"], (
         f"An unverifiable draft must submit blind exactly once; got {tails}."
     )
 
@@ -12678,6 +12685,7 @@ def test_an_effort_injection_with_no_dialog_completes_without_hanging(
     assert [args[-1] for args in sends] == [
         "Space",
         _CLEAR_ONE_ROW_COMPOSER,
+        "BSpace",
         "/effort high",
         "Enter",
         "Enter",
@@ -13285,6 +13293,7 @@ def test_inject_slash_command_restores_an_occupied_input_box_first(
         "Escape",
         "Space",
         _CLEAR_ONE_ROW_COMPOSER,
+        "BSpace",
         "/effort high",
         "Enter",
     ]
@@ -13328,6 +13337,8 @@ class _BootingClaudePane:
         self.sends.append((self.clock.monotonic(), args[-1]))
         if "-l" in args:
             self._draft = " " if args[-1] == _CLEAR_ONE_ROW_COMPOSER else args[-1]
+        elif args[-1] == "BSpace":
+            self._draft = self._draft[:-1]
         elif args[-1] == "Enter":
             self._draft = ""
 
@@ -13379,6 +13390,7 @@ def test_inject_slash_command_waits_for_a_booting_prompt_before_typing(
     assert [key for _, key in pane.composer_keys()] == [
         "Space",
         _CLEAR_ONE_ROW_COMPOSER,
+        "BSpace",
         "/effort high",
         "Enter",
     ]
@@ -13404,6 +13416,7 @@ def test_inject_slash_command_without_a_cap_waits_out_a_slow_boot_like_a_message
     assert [key for _, key in pane.composer_keys()] == [
         "Space",
         _CLEAR_ONE_ROW_COMPOSER,
+        "BSpace",
         "/effort high",
         "Enter",
     ]
@@ -13618,6 +13631,7 @@ def test_a_torn_frame_after_a_hinted_surface_does_not_refuse_the_slash_command(
     assert [args[-1] for args in sends] == [
         "Space",
         _CLEAR_ONE_ROW_COMPOSER,
+        "BSpace",
         "/effort high",
         "Enter",
     ]
@@ -13646,6 +13660,7 @@ def test_a_lowercase_escape_hint_still_marks_a_surface_dismissible(
         "Escape",
         "Space",
         _CLEAR_ONE_ROW_COMPOSER,
+        "BSpace",
         "/compact",
         "Enter",
     ]
@@ -13693,6 +13708,7 @@ def test_inject_slash_command_waits_out_scrollback_that_echoes_a_dialog_title(
     assert [key for _, key in pane.sends] == [
         "Space",
         _CLEAR_ONE_ROW_COMPOSER,
+        "BSpace",
         "/effort high",
         "Enter",
     ]
@@ -13749,6 +13765,7 @@ def test_inject_slash_command_confirms_a_surface_before_refusing_under_a_tiny_ca
     assert [args[-1] for args in sends] == [
         "Space",
         _CLEAR_ONE_ROW_COMPOSER,
+        "BSpace",
         "/effort high",
         "Enter",
     ]
@@ -13844,7 +13861,7 @@ def test_a_single_frame_without_a_composer_does_not_draw_an_escape(
 
     tails = [args[-1] for args in sends]
     assert "Escape" not in tails, f"A one-frame sighting must not draw an Escape; got {tails}."
-    assert tails == ["Space", _CLEAR_ONE_ROW_COMPOSER, "/effort high", "Enter"]
+    assert tails == ["Space", _CLEAR_ONE_ROW_COMPOSER, "BSpace", "/effort high", "Enter"]
 
 
 def test_the_shortcuts_panel_is_not_treated_as_an_occupied_input(
@@ -13870,6 +13887,7 @@ def test_the_shortcuts_panel_is_not_treated_as_an_occupied_input(
     assert [args[-1] for args in sends] == [
         "Space",
         _CLEAR_ONE_ROW_COMPOSER,
+        "BSpace",
         "/effort high",
         "Enter",
     ]

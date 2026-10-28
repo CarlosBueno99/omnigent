@@ -239,8 +239,10 @@ while True:
         ch, pending = pending[0], pending[1:]
         if ch == "\x15":
             draft = ""
+        elif ch == "\x7f":
+            draft = draft[:-1]
         elif ch == "\r":
-            lines.append(draft.strip())
+            lines.append(draft)
             draft = ""
             delivered.write_text(json.dumps(lines))
         elif ch >= " ":
