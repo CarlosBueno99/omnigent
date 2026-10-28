@@ -27,10 +27,12 @@ import type * as UseConversationsModule from "@/hooks/useConversations";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
+import { writeOpenSubagentsInPanel } from "@/lib/subagentPanelPreferences";
+import type { Session } from "@/lib/types";
 import { writeWorkspacePanelDefault } from "@/lib/workspacePanelPreferences";
 
 // Match the AppShell.test.tsx mocks except DO NOT mock SubagentsPanel —
@@ -83,7 +85,10 @@ vi.mock("@/hooks/useAgents", () => ({
   useUpdateMcpServer: () => ({ mutate: vi.fn(), isPending: false, error: null }),
   useDeleteMcpServer: () => ({ mutate: vi.fn(), isPending: false, error: null }),
 }));
-vi.mock("./Sidebar", () => ({ Sidebar: () => <div data-testid="sidebar" /> }));
+vi.mock("./Sidebar", () => ({
+  Sidebar: () => <div data-testid="sidebar" />,
+  isMobileViewport: () => false,
+}));
 vi.mock("./FilesPanel", () => ({
   FilesPanel: () => <div data-testid="files-panel" />,
 }));
@@ -107,6 +112,12 @@ vi.mock("./TerminalsPanel", () => ({
 }));
 vi.mock("@/components/icons/ClaudeIcon", () => ({
   ClaudeIcon: (props: Record<string, unknown>) => <svg {...props} data-icon="claude" />,
+}));
+// A sub-agent tab's transcript is covered by SideChatPane's own suite.
+vi.mock("@/components/chat/SideChatPane", () => ({
+  SideChatPane: ({ childId }: { childId: string }) => (
+    <div data-testid="side-chat-pane-stub">{childId}</div>
+  ),
 }));
 vi.mock("@/components/icons/NessieIcon", () => ({
   NessieIcon: (props: Record<string, unknown>) => <svg {...props} data-icon="nessie" />,
@@ -361,6 +372,87 @@ describe("click sub-agent in rail (real SubagentsPanel)", () => {
       );
     },
   );
+
+  it("opens a clicked sub-agent as a rail tab beside the parent when the setting is on", () => {
+    writeOpenSubagentsInPanel(true);
+    const children = [
+      {
+        id: "conv_child",
+        title: "researcher:auth",
+        task_summary: null,
+        tool: "researcher",
+        session_name: "auth",
+        current_task_status: null,
+        busy: false,
+        last_message_preview: null,
+        pending_elicitations_count: 0,
+      },
+    ];
+    vi.mocked(useChildSessions).mockImplementation((id) => ({
+      children: id === "conv_root" ? children : [],
+      isLoading: false,
+      error: null,
+    }));
+    const rootSession = {
+      id: "conv_root",
+      agentId: "ag",
+      agentName: null,
+      runnerId: null,
+      status: "idle",
+      createdAt: 0,
+      title: null,
+      labels: {},
+      items: [],
+      pendingElicitations: [],
+      permissionLevel: 4,
+      parentSessionId: null,
+      subAgentName: null,
+      kind: "default",
+    } satisfies Session;
+    vi.mocked(useSession).mockImplementation((id) => ({
+      session: id === "conv_root" ? rootSession : null,
+      isLoading: false,
+      error: null,
+    }));
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    qc.setQueryData(childSessionsQueryKey("conv_root"), children);
+    qc.setQueryData(["session", "conv_child"], {
+      ...rootSession,
+      id: "conv_child",
+      title: "researcher:auth",
+      parentSessionId: "conv_root",
+      kind: "sub_agent",
+    });
+    writeSessionWorkspaceState("conv_root", { rightRailTab: "subagents" });
+    function PathProbe() {
+      return <div data-testid="page">{useLocation().pathname}</div>;
+    }
+    render(
+      <QueryClientProvider client={qc}>
+        <SidebarDataProvider>
+          <TooltipProvider>
+            <MemoryRouter initialEntries={["/c/conv_root"]}>
+              <Routes>
+                <Route element={<AppShell />}>
+                  <Route path="c/:conversationId" element={<PathProbe />} />
+                </Route>
+              </Routes>
+            </MemoryRouter>
+          </TooltipProvider>
+        </SidebarDataProvider>
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(screen.getByTestId("subagent-row"));
+
+    expect(screen.getByTestId("page")).toHaveTextContent("/c/conv_root");
+    const rail = screen.getByRole("complementary", { name: "Workspace" });
+    expect(within(rail).getByRole("tab", { name: "auth" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(within(rail).getByTestId("side-chat-pane-stub")).toHaveTextContent("conv_child");
+  });
 
   it("restores a saved width while a cold-loaded session snapshot is unresolved", () => {
     vi.mocked(useChildSessions).mockReturnValue({

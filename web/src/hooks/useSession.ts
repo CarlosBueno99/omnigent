@@ -41,6 +41,16 @@ interface UseSessionResult {
   error: Error | null;
 }
 
+/** The shared ``["session", id]`` snapshot query; see {@link useSession}. */
+export function sessionQueryOptions(sessionId: string | null) {
+  return {
+    queryKey: ["session", sessionId] as const,
+    queryFn: () => getSessionSlim(sessionId as string, { refreshState: true }),
+    staleTime: Infinity,
+    retry: false,
+  };
+}
+
 /**
  * Read the cached single-session snapshot for a conversation, falling
  * back to ``GET /v1/sessions/{id}`` when nothing is cached yet.
@@ -66,11 +76,8 @@ export function useSession(conversationId: string | null | undefined): UseSessio
   // call site.
   const serverId = isTempConvId(conversationId) ? null : (conversationId ?? null);
   const { data, isLoading, error } = useQuery({
-    queryKey: serverId ? ["session", serverId] : ["session", null],
-    queryFn: () => getSessionSlim(serverId as string, { refreshState: true }),
+    ...sessionQueryOptions(serverId),
     enabled: serverId !== null,
-    staleTime: Infinity,
-    retry: false,
   });
   return {
     session: data ?? null,
