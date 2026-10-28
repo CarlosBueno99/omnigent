@@ -1,7 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
-import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  MAX_OPEN_FILES,
+  readSessionWorkspaceState,
+  writeSessionWorkspaceState,
+} from "@/lib/sessionWorkspaceState";
 import { newPendingSideChatId } from "@/lib/sideChat";
-import { subagentSessionIdFromTab } from "@/lib/subagentTabs";
+import { readChatTabOrder, subagentSessionIdFromTab, writeChatTabOrder } from "@/lib/subagentTabs";
 
 interface SideChatTabsState {
   /** Open side-chat child conversation ids, in open order. */
@@ -13,8 +17,8 @@ interface SideChatTabsState {
 function readSideChatTabsState(conversationId: string): SideChatTabsState {
   const saved = readSessionWorkspaceState(conversationId);
   const sideChats = saved.openSideChats ?? [];
-  // An older client may have changed `openSideChats` since `chatTabs` was written.
-  const ordered = (saved.chatTabs ?? []).filter(
+  // An older client may have changed `openSideChats` since the order was saved.
+  const ordered = readChatTabOrder(conversationId).filter(
     (id) => subagentSessionIdFromTab(id) !== null || sideChats.includes(id),
   );
   const tabs = [...ordered, ...sideChats.filter((id) => !ordered.includes(id))];
@@ -22,6 +26,24 @@ function readSideChatTabsState(conversationId: string): SideChatTabsState {
     tabs,
     selected: tabs.includes(saved.selectedSideChatId ?? "") ? saved.selectedSideChatId! : null,
   };
+}
+
+/**
+ * Keep at most `MAX_OPEN_FILES` tabs, never the selected one. Oldest sub-agent
+ * tabs go first, since a dropped side chat keeps running with no tab to close it.
+ */
+function capTabs(state: SideChatTabsState): SideChatTabsState {
+  const excess = state.tabs.length - MAX_OPEN_FILES;
+  if (excess <= 0) return state;
+  const droppable = state.tabs.filter((id) => id !== state.selected);
+  const isSubagent = (id: string) => subagentSessionIdFromTab(id) !== null;
+  const dropped = new Set(
+    [...droppable.filter(isSubagent), ...droppable.filter((id) => !isSubagent(id))].slice(
+      0,
+      excess,
+    ),
+  );
+  return { ...state, tabs: state.tabs.filter((id) => !dropped.has(id)) };
 }
 
 /**
@@ -40,24 +62,33 @@ function readSideChatTabsState(conversationId: string): SideChatTabsState {
  */
 export function useSideChats(conversationId: string) {
   const [state, setState] = useState(() => readSideChatTabsState(conversationId));
+  // Tab changes build on this, not on storage, so they still work when a write fails.
+  const latest = useRef({ conversationId, state });
   // WorkspacePanel isn't remounted when the user navigates to another
   // conversation (conversationId is a prop, not a key), so reload this
   // conversation's own tabs on change — otherwise the previous conversation's
   // side-chat tabs would linger in the new one's rail.
   useEffect(() => {
-    setState(readSideChatTabsState(conversationId));
+    const loaded = readSideChatTabsState(conversationId);
+    latest.current = { conversationId, state: loaded };
+    setState(loaded);
   }, [conversationId]);
   const update = useCallback(
     (mutate: (current: SideChatTabsState) => SideChatTabsState) => {
-      const next = mutate(readSideChatTabsState(conversationId));
+      const current =
+        latest.current.conversationId === conversationId
+          ? latest.current.state
+          : readSideChatTabsState(conversationId);
+      const next = capTabs(mutate(current));
+      latest.current = { conversationId, state: next };
       const sideChats = next.tabs.filter((id) => subagentSessionIdFromTab(id) === null);
+      // Older clients read only side chats, from the workspace store.
       writeSessionWorkspaceState(conversationId, {
         openSideChats: sideChats,
-        chatTabs: sideChats.length === next.tabs.length ? undefined : next.tabs,
         selectedSideChatId: next.selected,
       });
-      // Show what was saved: the tab cap may have trimmed `next`.
-      setState(readSideChatTabsState(conversationId));
+      writeChatTabOrder(conversationId, sideChats.length === next.tabs.length ? null : next.tabs);
+      setState(next);
     },
     [conversationId],
   );

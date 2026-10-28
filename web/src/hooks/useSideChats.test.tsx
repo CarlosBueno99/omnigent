@@ -1,11 +1,16 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
-import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
-import { subagentTabId } from "@/lib/subagentTabs";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  readSessionWorkspaceState,
+  SESSION_WORKSPACE_STATE_KEY,
+  writeSessionWorkspaceState,
+} from "@/lib/sessionWorkspaceState";
+import { readChatTabOrder, subagentTabId } from "@/lib/subagentTabs";
 import { useSideChats } from "./useSideChats";
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   localStorage.clear();
 });
 
@@ -114,28 +119,60 @@ describe("side-chat soft tabs", () => {
     act(() => first.result.current.open("conv_b"));
     expect(readSessionWorkspaceState("session-a")).toEqual({
       openSideChats: ["conv_a", "conv_b"],
-      chatTabs: ["conv_a", subagentTab, "conv_b"],
       selectedSideChatId: "conv_b",
     });
+    expect(readChatTabOrder("session-a")).toEqual(["conv_a", subagentTab, "conv_b"]);
     first.unmount();
 
     const restored = renderHook(() => useSideChats("session-a"));
     expect(restored.result.current.tabs).toEqual(["conv_a", subagentTab, "conv_b"]);
     act(() => restored.result.current.close(subagentTab));
-    expect(readSessionWorkspaceState("session-a")).toEqual({
-      openSideChats: ["conv_a", "conv_b"],
-      selectedSideChatId: "conv_b",
-    });
+    expect(readChatTabOrder("session-a")).toEqual([]);
   });
 
-  it("keeps side chats an older client opened or closed since the last write", () => {
+  it("keeps sub-agent tabs when an older client rewrites the workspace store", () => {
     const subagentTab = subagentTabId("conv_child");
-    writeSessionWorkspaceState("session-a", {
-      openSideChats: ["conv_a", "conv_new"],
-      chatTabs: ["conv_a", subagentTab, "conv_closed"],
+    const first = renderHook(() => useSideChats("session-a"));
+    act(() => first.result.current.open("conv_a"));
+    act(() => first.result.current.open(subagentTab));
+    act(() => first.result.current.open("conv_closed"));
+    first.unmount();
+
+    // An older client keeps only the fields it knows and rewrites every session.
+    const raw = JSON.parse(localStorage.getItem(SESSION_WORKSPACE_STATE_KEY)!) as {
+      id: string;
+      state: Record<string, unknown>;
+    }[];
+    const olderClientStore = raw.map(({ id, state }) => ({
+      id,
+      state: {
+        openSideChats: id === "session-a" ? ["conv_a", "conv_new"] : state.openSideChats,
+        selectedSideChatId: state.selectedSideChatId,
+      },
+    }));
+    localStorage.setItem(SESSION_WORKSPACE_STATE_KEY, JSON.stringify(olderClientStore));
+
+    // Its side-chat changes win; the sub-agent tab keeps its place.
+    const restored = renderHook(() => useSideChats("session-a"));
+    expect(restored.result.current.tabs).toEqual(["conv_a", subagentTab, "conv_new"]);
+  });
+
+  it("keeps opening, selecting and closing tabs when storage writes fail", () => {
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("Quota exceeded", "QuotaExceededError");
     });
+    const subagentTab = subagentTabId("conv_child");
     const { result } = renderHook(() => useSideChats("session-a"));
-    expect(result.current.tabs).toEqual(["conv_a", subagentTab, "conv_new"]);
+
+    act(() => result.current.open("conv_a"));
+    act(() => result.current.open(subagentTab));
+    expect(result.current.tabs).toEqual(["conv_a", subagentTab]);
+    expect(result.current.selected).toBe(subagentTab);
+    act(() => result.current.select("conv_a"));
+    expect(result.current.selected).toBe("conv_a");
+    act(() => result.current.close("conv_a"));
+    expect(result.current.tabs).toEqual([subagentTab]);
+    expect(result.current.selected).toBe(subagentTab);
   });
 
   it("keeps mixed tab order when the oldest tab is dropped at the cap", () => {

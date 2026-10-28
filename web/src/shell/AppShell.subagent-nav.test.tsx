@@ -32,6 +32,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
 import { writeOpenSubagentsInPanel } from "@/lib/subagentPanelPreferences";
+import { readChatTabOrder, subagentTabId } from "@/lib/subagentTabs";
 import type { Session } from "@/lib/types";
 import { writeWorkspacePanelDefault } from "@/lib/workspacePanelPreferences";
 
@@ -455,7 +456,22 @@ describe("click sub-agent in rail (real SubagentsPanel)", () => {
     expect(within(rail).getByTestId("side-chat-pane-stub")).toHaveTextContent("conv_child");
   });
 
-  it("navigates to an ancestor's row instead of opening it as a tab", async () => {
+  it.each([
+    {
+      name: "navigates to an ancestor instead of opening it as a tab",
+      page: "conv_grandchild",
+      clicked: "conv_child",
+      path: "/c/conv_child",
+      tabs: [],
+    },
+    {
+      name: "opens a sibling as a tab and stays on the chat on screen",
+      page: "conv_child",
+      clicked: "conv_sibling",
+      path: "/c/conv_child",
+      tabs: [subagentTabId("conv_sibling")],
+    },
+  ])("$name", async ({ page, clicked, path, tabs }) => {
     writeOpenSubagentsInPanel(true);
     const summary = (id: string, name: string) => ({
       id,
@@ -469,7 +485,7 @@ describe("click sub-agent in rail (real SubagentsPanel)", () => {
       pending_elicitations_count: 0,
     });
     const tree: Record<string, ReturnType<typeof summary>[]> = {
-      conv_root: [summary("conv_child", "auth")],
+      conv_root: [summary("conv_child", "auth"), summary("conv_sibling", "billing")],
       conv_child: [summary("conv_grandchild", "tokens")],
     };
     vi.mocked(useChildSessions).mockImplementation((id) => ({
@@ -497,6 +513,7 @@ describe("click sub-agent in rail (real SubagentsPanel)", () => {
     const sessions: Record<string, Session> = {
       conv_root: snapshot("conv_root", null),
       conv_child: snapshot("conv_child", "conv_root"),
+      conv_sibling: snapshot("conv_sibling", "conv_root"),
       conv_grandchild: snapshot("conv_grandchild", "conv_child"),
     };
     vi.mocked(useSession).mockImplementation((id) => ({
@@ -509,12 +526,12 @@ describe("click sub-agent in rail (real SubagentsPanel)", () => {
       qc.setQueryData(childSessionsQueryKey(id), children);
     }
     for (const [id, session] of Object.entries(sessions)) qc.setQueryData(["session", id], session);
-    writeSessionWorkspaceState("conv_grandchild", { rightRailTab: "subagents" });
+    writeSessionWorkspaceState(page, { rightRailTab: "subagents" });
     render(
       <QueryClientProvider client={qc}>
         <SidebarDataProvider>
           <TooltipProvider>
-            <MemoryRouter initialEntries={["/c/conv_grandchild"]}>
+            <MemoryRouter initialEntries={[`/c/${page}`]}>
               <Routes>
                 <Route element={<AppShell />}>
                   <Route path="c/:conversationId" element={<PathProbe />} />
@@ -527,17 +544,17 @@ describe("click sub-agent in rail (real SubagentsPanel)", () => {
     );
 
     // The rail re-roots at conv_root once the parent walk resolves.
-    const parentRow = await waitFor(() => {
+    const clickedRow = await waitFor(() => {
       const row = screen
         .getAllByTestId("subagent-row")
-        .find((candidate) => candidate.getAttribute("data-child-session-id") === "conv_child");
+        .find((candidate) => candidate.getAttribute("data-child-session-id") === clicked);
       expect(row).toBeDefined();
       return row!;
     });
-    fireEvent.click(parentRow);
+    fireEvent.click(clickedRow);
 
-    expect(screen.getByTestId("page")).toHaveTextContent("/c/conv_child");
-    expect(readSessionWorkspaceState("conv_grandchild").chatTabs).toBeUndefined();
+    expect(screen.getByTestId("page")).toHaveTextContent(path);
+    expect(readChatTabOrder(page)).toEqual(tabs);
   });
 
   it("restores a saved width while a cold-loaded session snapshot is unresolved", () => {

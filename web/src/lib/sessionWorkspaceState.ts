@@ -7,7 +7,6 @@
 // effect drops keys whose PTY has gone away once the terminal list loads.
 
 import type { RightRailTab } from "@/shell/railTabs";
-import { subagentSessionIdFromTab } from "./subagentTabs";
 import { parseTerminalSplitState, type TerminalSplitState } from "./terminalSplitLayout";
 import type { DefaultWorkspaceTab } from "./workspaceTabPreferences";
 
@@ -46,9 +45,6 @@ export interface SessionWorkspaceState {
   /** Ordered list of open side-chat tabs (child conversation ids). Browser-local
    *  by design: side chats are ephemeral and vanish when the app is closed. */
   openSideChats?: string[];
-  /** Side-chat and sub-agent tabs in display order, present only while a sub-agent
-   *  tab is open. Kept out of `openSideChats` so older clients never load one. */
-  chatTabs?: string[];
   /** The active side-chat tab (null = a file/scope/other view is active). */
   selectedSideChatId?: string | null;
   /** Split panes of the main terminal view; absent while unsplit. */
@@ -63,7 +59,7 @@ const MAX_SESSIONS = 100;
 // Cap the open-file tabs persisted per session so one session that churns
 // through many files can't bloat the store. Tabs are appended in open order, so
 // the most-recent (tail) entries are kept.
-const MAX_OPEN_FILES = 20;
+export const MAX_OPEN_FILES = 20;
 
 function isValidWidth(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
@@ -141,15 +137,6 @@ function sanitize(entry: unknown): SessionWorkspaceState {
       ),
     ];
   }
-  if (Array.isArray(record.chatTabs)) {
-    state.chatTabs = [
-      ...new Set(
-        record.chatTabs.filter(
-          (value): value is string => typeof value === "string" && value.length > 0,
-        ),
-      ),
-    ];
-  }
   if (record.selectedSideChatId === null || typeof record.selectedSideChatId === "string") {
     state.selectedSideChatId = record.selectedSideChatId;
   }
@@ -218,19 +205,6 @@ export function writeSessionWorkspaceState(
   // Same bound for side-chat tabs (also appended in open order).
   if (next.openSideChats && next.openSideChats.length > MAX_OPEN_FILES) {
     next.openSideChats = next.openSideChats.slice(-MAX_OPEN_FILES);
-  }
-  if (next.chatTabs && next.chatTabs.length > MAX_OPEN_FILES) {
-    // Evict sub-agent tabs first: unlike a dropped side chat, they leave nothing running unseen.
-    const excess = next.chatTabs.length - MAX_OPEN_FILES;
-    const evicted = new Set(
-      next.chatTabs
-        .filter((id) => subagentSessionIdFromTab(id) !== null && id !== next.selectedSideChatId)
-        .slice(0, excess),
-    );
-    const kept = next.chatTabs.filter((id) => !evicted.has(id)).slice(-MAX_OPEN_FILES);
-    next.chatTabs = kept;
-    // Drop the same side chats from both lists so a reload keeps the tab order.
-    next.openSideChats = next.openSideChats?.filter((id) => kept.includes(id));
   }
   // Drop any existing entry and re-append so the most-recently-touched session
   // moves to the end; pruning then evicts from the front (oldest-touched).

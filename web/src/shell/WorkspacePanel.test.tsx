@@ -15,7 +15,7 @@ import type * as UseTerminalsModule from "@/hooks/useTerminals";
 import { useCreateTerminal, useTerminals } from "@/hooks/useTerminals";
 import { writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
 import { browserViewId } from "@/lib/browserTabs";
-import { subagentTabId } from "@/lib/subagentTabs";
+import { subagentTabId, writeChatTabOrder } from "@/lib/subagentTabs";
 import type { Session } from "@/lib/types";
 import type { ChangedSort } from "./FlatFileList";
 import type { RightRailTab } from "./railTabs";
@@ -1468,9 +1468,9 @@ describe("WorkspacePanel sub-agent tabs", () => {
   });
 
   it("shows the sub-agent's whole session with a full-screen link", () => {
+    writeChatTabOrder("conv_ws", [SUBAGENT_TAB, "conv_side"]);
     writeSessionWorkspaceState("conv_ws", {
       openSideChats: ["conv_side"],
-      chatTabs: [SUBAGENT_TAB, "conv_side"],
       selectedSideChatId: SUBAGENT_TAB,
     });
     renderWorkspace({
@@ -1498,17 +1498,6 @@ describe("WorkspacePanel sub-agent tabs", () => {
       "href",
       "/c/conv_child?debug=1",
     );
-  });
-
-  it("keeps the tab read-only until the sub-agent's snapshot loads", () => {
-    vi.spyOn(sessionsApi, "getSessionSlim").mockReturnValue(new Promise(() => {}));
-    writeSessionWorkspaceState("conv_ws", {
-      chatTabs: [SUBAGENT_TAB],
-      selectedSideChatId: SUBAGENT_TAB,
-    });
-    renderWorkspace({ rightRailTab: "sidechat" });
-
-    expect(screen.getByTestId("side-chat-pane-stub")).toHaveAttribute("data-read-only", "true");
   });
 
   it("leaves a pending native side chat waiting for its own fork", async () => {
@@ -1549,8 +1538,8 @@ describe("WorkspacePanel sub-agent tabs", () => {
 
   it("shows the transcript read-only without edit access", () => {
     canEditMock.mockReturnValue(false);
+    writeChatTabOrder("conv_ws", [SUBAGENT_TAB]);
     writeSessionWorkspaceState("conv_ws", {
-      chatTabs: [SUBAGENT_TAB],
       selectedSideChatId: SUBAGENT_TAB,
     });
     renderWorkspace({ rightRailTab: "sidechat", queryClient: clientWithSubagent() });
@@ -1559,8 +1548,8 @@ describe("WorkspacePanel sub-agent tabs", () => {
   });
 
   it("keeps a Claude Code sub-agent read-only, as its full-screen chat is", () => {
+    writeChatTabOrder("conv_ws", [SUBAGENT_TAB]);
     writeSessionWorkspaceState("conv_ws", {
-      chatTabs: [SUBAGENT_TAB],
       selectedSideChatId: SUBAGENT_TAB,
     });
     renderWorkspace({
@@ -1578,8 +1567,8 @@ describe("WorkspacePanel sub-agent tabs", () => {
 
   it("closes the tab without stopping the sub-agent", () => {
     const stop = vi.spyOn(sessionsApi, "stopSession");
+    writeChatTabOrder("conv_ws", [SUBAGENT_TAB]);
     writeSessionWorkspaceState("conv_ws", {
-      chatTabs: [SUBAGENT_TAB],
       selectedSideChatId: SUBAGENT_TAB,
     });
     renderWorkspace({ rightRailTab: "sidechat", queryClient: clientWithSubagent() });
@@ -1591,17 +1580,19 @@ describe("WorkspacePanel sub-agent tabs", () => {
     expect(stop).not.toHaveBeenCalled();
   });
 
-  it("falls back to a generic label until the session loads", () => {
+  it("shows a generic label and no composer until the sub-agent's snapshot loads", () => {
     vi.spyOn(sessionsApi, "getSessionSlim").mockReturnValue(new Promise(() => {}));
-    writeSessionWorkspaceState("conv_ws", { chatTabs: [SUBAGENT_TAB] });
-    renderWorkspace();
+    writeChatTabOrder("conv_ws", [SUBAGENT_TAB]);
+    writeSessionWorkspaceState("conv_ws", { selectedSideChatId: SUBAGENT_TAB });
+    renderWorkspace({ rightRailTab: "sidechat" });
 
     expect(screen.getByRole("tab", { name: "Sub-agent" })).toBeInTheDocument();
+    expect(screen.getByTestId("side-chat-pane-stub")).toHaveAttribute("data-read-only", "true");
   });
 
   it("lists the sub-agent in the panel picker and the phone drawer", () => {
+    writeChatTabOrder("conv_ws", [SUBAGENT_TAB]);
     writeSessionWorkspaceState("conv_ws", {
-      chatTabs: [SUBAGENT_TAB],
       selectedSideChatId: SUBAGENT_TAB,
     });
     const { onRightRailTabChange } = renderWorkspace({ queryClient: clientWithSubagent() });
