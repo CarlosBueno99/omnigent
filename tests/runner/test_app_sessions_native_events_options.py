@@ -2980,7 +2980,7 @@ async def test_events_model_change_sends_no_key_past_its_budget(
     assert resp.json()["error"] == "claude_native_model_failed"
     keys = [key for _, key in tui.sent]
     clear_composer = "\x1b[107;5u" * 2 + "\x1b[117;5u" * 2 + " "
-    assert keys[:4] == ["Space", clear_composer, "/model claude-opus-4-7", "Enter"], keys
+    assert keys[:5] == ["Space", clear_composer, "BSpace", "/model claude-opus-4-7", "Enter"], keys
     late = [
         (round(at - started_at, 2), key) for at, key in tui.sent if at >= started_at + budget_s
     ]
