@@ -2113,23 +2113,20 @@ async def test_api_only_root_does_not_shadow_real_routes(
 
 
 @pytest.mark.asyncio
-async def test_health_derives_runner_online_from_fresh_row_stamp(
+async def test_health_derives_runner_online_from_fenced_heartbeat(
     db_uri: str,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A runner whose tunnel lives on ANOTHER replica reads online here.
+    """A fresh active fence reads online; stale, closed and legacy-only do not."""
+    from sqlalchemy import literal
 
-    Under host_id replica sharding, the replica holding a runner's tunnel
-    stamps ``conversations.runner_last_seen`` (on connect + each ping-loop
-    tick of that tunnel) and clears it on graceful disconnect. A replica
-    serving ``/health`` with an EMPTY tunnel registry — this app — must
-    derive ``runner_online`` from that stamp's freshness: fresh reads
-    online, past the TTL reads offline (the self-correcting path for an
-    ungraceful host/replica death), cleared reads offline immediately.
-    """
-    import time
+    from omnigent.stores.conversation_store import RUNNER_LIVENESS_TTL_S, sqlalchemy_store
 
-    from omnigent.stores.conversation_store import RUNNER_LIVENESS_TTL_S
+    database_now = [1000]
+    monkeypatch.setattr(
+        sqlalchemy_store, "database_epoch_seconds", lambda: literal(database_now[0])
+    )
 
     wired = _build_liveness_app(db_uri, tmp_path)
     app = wired.app
@@ -2138,15 +2135,20 @@ async def test_health_derives_runner_online_from_fresh_row_stamp(
     fresh = conversation_store.create_conversation(runner_id="rnr_remote_fresh")
     stale = conversation_store.create_conversation(runner_id="rnr_remote_stale")
     cleared = conversation_store.create_conversation(runner_id="rnr_remote_cleared")
-    now = int(time.time())
-    conversation_store.touch_runner_liveness(["rnr_remote_fresh"], now=now - 5)
-    conversation_store.touch_runner_liveness(
-        ["rnr_remote_stale"], now=now - RUNNER_LIVENESS_TTL_S - 5
-    )
-    conversation_store.touch_runner_liveness(["rnr_remote_cleared"], now=now - 5)
-    conversation_store.clear_runner_liveness("rnr_remote_cleared")
+    legacy = conversation_store.create_conversation(runner_id="rnr_remote_legacy")
+    for runner, stamp in (
+        ("rnr_remote_fresh", 995),
+        ("rnr_remote_stale", 1000 - RUNNER_LIVENESS_TTL_S - 5),
+        ("rnr_remote_cleared", 995),
+    ):
+        database_now[0] = stamp
+        conversation_store.claim_runner_connection(runner, "a" * 32)
+        assert conversation_store.activate_runner_connection(runner, "a" * 32)
+    assert conversation_store.close_runner_connection("rnr_remote_cleared", "a" * 32)
+    conversation_store.touch_runner_liveness(["rnr_remote_legacy"], now=10**12)
+    database_now[0] = 1000
 
-    ids = ",".join([fresh.id, stale.id, cleared.id])
+    ids = ",".join([fresh.id, stale.id, cleared.id, legacy.id])
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         resp = await c.get(f"/health?session_ids={ids}")
@@ -2156,6 +2158,7 @@ async def test_health_derives_runner_online_from_fresh_row_stamp(
     assert sessions[fresh.id]["runner_online"] is True
     assert sessions[stale.id]["runner_online"] is False
     assert sessions[cleared.id]["runner_online"] is False
+    assert sessions[legacy.id]["runner_online"] is False
 
 
 # ── debug router loading (out-of-tree diagnostic endpoints) ──────────

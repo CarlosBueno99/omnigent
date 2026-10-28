@@ -57,11 +57,17 @@ from omnigent.runner.transports.ws_tunnel.registry import (
     TunnelEnd,
     TunnelRegistry,
 )
+from omnigent.runtime import get_conversation_store
 from omnigent.server import managed_host_keepalive, session_live_state, shutdown_state
 from omnigent.server.auth import RESERVED_USER_LOCAL, AuthProvider
 from omnigent.server.host_registry import RunnerExitReports
 from omnigent.server.routes._auth_helpers import require_user
+from omnigent.server.runner_connection_admission import (
+    admit_runner_connection,
+    close_runner_connection,
+)
 from omnigent.server.tunnel_handshake import receive_tunnel_hello
+from omnigent.stores.conversation_store import ConversationStore
 
 _logger = logging.getLogger(__name__)
 
@@ -233,6 +239,7 @@ def _expected_runner_id_from_headers(
 def create_runner_tunnel_router(
     registry: TunnelRegistry,
     *,
+    conversation_store: ConversationStore | None = None,
     allowed_tunnel_tokens: frozenset[str] | None = None,
     on_runner_disconnect: Callable[[str, RunnerSession], Awaitable[None]] | None = None,
     on_runner_connect: Callable[[str, RunnerSession], Awaitable[None]] | None = None,
@@ -249,6 +256,7 @@ def create_runner_tunnel_router(
     :param registry: The server's :class:`TunnelRegistry` instance.
         Shared with the :class:`WSTunnelTransport` that routes
         requests through registered runners.
+    :param conversation_store: Shared connection authority; defaults to the runtime store.
     :param allowed_tunnel_tokens: Optional set of accepted binding
         tokens, e.g. ``frozenset({"uA6Zz..."})``. ``None`` keeps
         shared remote-server behavior by accepting any token-bound
@@ -526,6 +534,8 @@ def create_runner_tunnel_router(
 
         await ws.accept()
         session: RunnerSession | None = None
+        connection_store = conversation_store
+        connection_epoch: str | None = None
         ended_by: str | None = None
         peer_close_code: int | None = None
         owned: list[asyncio.Task[None]] = []
@@ -599,7 +609,30 @@ def create_runner_tunnel_router(
             #    rejected) before ``accept()`` above, so runner-binding
             #    checks can enforce ownership.
             try:
+                predecessor = registry.renewal_predecessor(runner_id, frame, owner=tunnel_owner)
+                if predecessor is not None and predecessor.connection_epoch is None:
+                    raise InvalidRenewalPermit(
+                        "renewal predecessor has no durable connection fence"
+                    )
+                try:
+                    if connection_store is None:
+                        connection_store = get_conversation_store()
+                    connection_epoch = await admit_runner_connection(
+                        connection_store,
+                        runner_id,
+                        expected_epoch=(predecessor.connection_epoch if predecessor else None),
+                    )
+                except Exception:
+                    _logger.warning(
+                        "Runner connection claim failed for %s", runner_id, exc_info=True
+                    )
+                    await ws.close(
+                        code=1013, reason="runner connection persistence unavailable; retry"
+                    )
+                    return
                 session = registry.register(runner_id, ws, frame, owner=tunnel_owner)
+                session.connection_epoch = connection_epoch
+                session_live_state.remember_runner_connection(runner_id, connection_epoch)
             except InvalidRenewalPermit:
                 await ws.close(
                     code=TUNNEL_RENEWAL_REJECTED_CLOSE_CODE,
@@ -643,7 +676,9 @@ def create_runner_tunnel_router(
                     name=f"tunnel-sender:{runner_id}",
                 )
                 ping_task = asyncio.create_task(
-                    _ping_loop(ws, session, runner_id, registry),
+                    _ping_loop(
+                        ws, session, runner_id, registry, connection_store=connection_store
+                    ),
                     name=f"tunnel-ping:{runner_id}",
                 )
                 keepalive_task = asyncio.create_task(
@@ -773,6 +808,8 @@ def create_runner_tunnel_router(
             for task in owned:
                 task.cancel()
             await asyncio.gather(*owned, return_exceptions=True)
+            if connection_epoch is not None and connection_store is not None:
+                await close_runner_connection(connection_store, runner_id, connection_epoch)
             if session is not None:
                 # Snapshot before deregister records its own cleanup close on the session.
                 session.ended = TunnelEnd(
@@ -1063,18 +1100,15 @@ async def _ping_loop(
     session: RunnerSession,
     runner_id: str,
     registry: TunnelRegistry,
+    *,
+    connection_store: ConversationStore | None = None,
 ) -> None:
     """Send pings every PING_INTERVAL_S; declare dead after misses.
 
-    Each tick that the runner is still alive also re-stamps
-    ``runner_last_seen`` (``session_live_state.touch_runner_liveness``)
-    so replicas that don't hold this tunnel keep deriving
-    ``runner_online`` from a fresh row instead of their own empty
-    registry. This runs from the per-connection ping loop — inside the
-    tunnel handler's ``workspace_scope`` — rather than a central lifespan
-    sweep, which would run context-free (default workspace) over a
-    workspace-blind registry and stamp no rows on a multi-tenant replica.
-    Mirrors the host tunnel's ``host_store.heartbeat`` refresh.
+    Each tick refreshes only this connection's active durable epoch. The worker
+    inherits this tunnel's workspace context; database time determines freshness.
+    A draining predecessor can still carry accepted replies, while its stale
+    heartbeat cannot extend a successor's persisted liveness.
 
     :param ws: Accepted Starlette WebSocket used only for timeout
         close.
@@ -1130,7 +1164,12 @@ async def _ping_loop(
         # freshness gate keeps the runner in the online set cross-replica.
         # Best-effort and deduplicated inside the chokepoint; the enqueue
         # inherits this handler's workspace scope via copy_context.
-        session_live_state.touch_runner_liveness([runner_id])
+        if session.connection_epoch is not None:
+            session_live_state.heartbeat_runner_connection(
+                runner_id,
+                session.connection_epoch,
+                store=connection_store,
+            )
         try:
             ping_ts = int(time.time() * 1000)
             await registry.send_text(

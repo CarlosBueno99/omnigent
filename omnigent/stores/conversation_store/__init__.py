@@ -272,6 +272,35 @@ class ConversationUpdateResult:
 
 
 @dataclass(frozen=True)
+class RunnerConnectionLiveness:
+    """A fenced connection and its heartbeat evidence observed on the DB clock."""
+
+    runner_id: str | None
+    epoch: str | None
+    heartbeat_epoch: str | None
+    active: bool
+    last_seen: int | None
+    last_connected: int | None
+    observed_at: int
+
+    @property
+    def online(self) -> bool:
+        """Whether this epoch is active with a fresh database heartbeat."""
+        return self.active and runner_seen_is_fresh(self.last_seen, self.observed_at)
+
+    def live_elsewhere(self, reference_epoch: str | None, *, retained: bool = False) -> bool:
+        """Recognize another epoch using current or bounded retained evidence."""
+        stamp = self.last_connected if retained else self.last_seen
+        epoch = self.heartbeat_epoch if retained else self.epoch
+        return (
+            epoch is not None
+            and epoch != reference_epoch
+            and (retained or self.active)
+            and runner_seen_is_fresh(stamp, self.observed_at)
+        )
+
+
+@dataclass(frozen=True)
 class SessionConnectivity:
     """
     The minimal session fields the sidebar's online-dot needs.
@@ -298,12 +327,10 @@ class SessionConnectivity:
         an imported transcript has no live executor anywhere, so it must
         launch a runner on a host before it can run — reporting it offline
         routes the first message into the resume picker.
-    :param runner_last_seen: Epoch seconds the bound runner's tunnel was
-        last observed alive, written by the replica holding the tunnel.
-        ``None`` when never observed (or cleared on graceful disconnect).
-        Lets a replica that does NOT hold the tunnel derive
-        ``runner_online`` from freshness (see
-        :func:`runner_seen_is_fresh`) instead of its own empty registry.
+    :param runner_last_seen: Legacy per-session heartbeat, retained for diagnostics.
+        It has no connection fence and must not establish shared ownership.
+    :param runner_online: Current active epoch has a fresh heartbeat, measured
+        against the database observation clock in the same read.
     """
 
     runner_id: str | None
@@ -311,9 +338,10 @@ class SessionConnectivity:
     needs_workspace: bool
     imported: bool = False
     runner_last_seen: int | None = None
+    runner_online: bool = False
 
 
-# Freshness window for ``omnigent_conversation_metadata.runner_last_seen``. The tunnel
+# Freshness window for shared runner heartbeat evidence. The tunnel
 # replica refreshes live runners every ~30s (the tunnel ping interval),
 # so 3 missed refreshes = offline — the same budget the tunnel's own
 # keepalive uses and the same shape as ``host_store.HOST_LIVENESS_TTL_S``.
@@ -622,6 +650,38 @@ class ConversationStore(ABC):
         ids are omitted; ids without a bound runner map to ``None``.
         """
         ...
+
+    def claim_runner_connection(
+        self,
+        runner_id: str,
+        epoch: str,
+        *,
+        expected_epoch: str | None = None,
+    ) -> None:
+        """Reserve a unique server epoch once, before admitting its tunnel."""
+        raise NotImplementedError
+
+    def activate_runner_connection(self, runner_id: str, epoch: str) -> bool:
+        """Activate only the exact reserved epoch, recording a DB-clock heartbeat."""
+        raise NotImplementedError
+
+    def heartbeat_runner_connection(self, runner_id: str, epoch: str) -> bool:
+        """Refresh only an existing active epoch; never claim or revive."""
+        raise NotImplementedError
+
+    def close_runner_connection(self, runner_id: str, epoch: str) -> bool:
+        """Close only this epoch while retaining its heartbeat evidence."""
+        raise NotImplementedError
+
+    def get_runner_connection(self, runner_id: str) -> RunnerConnectionLiveness | None:
+        """Read runner authority and database observation time together."""
+        raise NotImplementedError
+
+    def get_session_runner_connection(
+        self, conversation_id: str
+    ) -> RunnerConnectionLiveness | None:
+        """Join the session's current binding to runner-level authority."""
+        raise NotImplementedError
 
     @abstractmethod
     def get_runner_liveness(self, conversation_id: str) -> tuple[str | None, int | None] | None:

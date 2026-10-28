@@ -32,6 +32,7 @@ from sqlalchemy.sql.selectable import Subquery
 
 from omnigent._wrapper_labels import UI_MODE_LABEL_KEY, WRAPPER_LABEL_KEY
 from omnigent.db.account_authority import AccountAuthority, require_active_account
+from omnigent.db.clock import database_epoch_seconds
 from omnigent.db.compression import encode as compress_text
 from omnigent.db.converters import sql_agent_to_entity
 from omnigent.db.db_models import (
@@ -44,6 +45,7 @@ from omnigent.db.db_models import (
     SqlConversationMetadata,
     SqlPolicy,
     SqlProject,
+    SqlRunnerConnection,
     SqlSessionPermission,
     SqlUser,
     SqlUserDailyCost,
@@ -102,12 +104,14 @@ from omnigent.stores.conversation_store import (
     PENDING_INPUT_RESPONSE_ID,
     PINNED_LABEL_KEY,
     PROJECT_LABEL_KEY,
+    RUNNER_LIVENESS_TTL_S,
     ConversationAlreadyExistsError,
     ConversationNotFoundError,
     ConversationStore,
     ConversationUpdateResult,
     CreatedSession,
     DailyCostState,
+    RunnerConnectionLiveness,
     SessionConnectivity,
     pinned_label_key,
 )
@@ -1303,6 +1307,122 @@ class SqlAlchemyConversationStore(ConversationStore):
             ).all()
         return {row.id: row.runner_id for row in rows}
 
+    def claim_runner_connection(
+        self,
+        runner_id: str,
+        epoch: str,
+        *,
+        expected_epoch: str | None = None,
+    ) -> None:
+        """Reserve under a runner row lock; an insertion race rejects admission."""
+
+        def write(session: Session) -> None:
+            row = session.get(
+                SqlRunnerConnection, (current_workspace_id(), runner_id), with_for_update=True
+            )
+            if expected_epoch is not None and (row is None or row.epoch != expected_epoch):
+                raise RuntimeError("runner connection predecessor was superseded")
+            if row is None:
+                session.add(SqlRunnerConnection(runner_id=runner_id, epoch=epoch, state=0))
+            else:
+                if row.epoch == epoch:
+                    raise ValueError("connection epochs must be unique")
+                row.epoch = epoch
+                row.state = 0
+                row.last_seen = None
+
+        run_write_transaction(self._session_immediate, "claim_runner_connection", write)
+
+    def _write_runner_connection(self, runner_id: str, epoch: str, *, action: str) -> bool:
+        def write(session: Session) -> bool:
+            row = session.get(
+                SqlRunnerConnection, (current_workspace_id(), runner_id), with_for_update=True
+            )
+            if row is None or row.epoch != epoch:
+                return False
+            if action == "close":
+                row.state = 2
+                row.last_seen = None
+                return True
+            expected_state = 0 if action == "activate" else 1
+            if row.state != expected_state:
+                return False
+            now = session.execute(select(database_epoch_seconds())).scalar_one()
+            row.state = 1
+            row.last_seen = now
+            row.last_connected = now
+            row.heartbeat_epoch = epoch
+            return True
+
+        return run_write_transaction(self._session_immediate, f"{action}_runner_connection", write)
+
+    def activate_runner_connection(self, runner_id: str, epoch: str) -> bool:
+        return self._write_runner_connection(runner_id, epoch, action="activate")
+
+    def heartbeat_runner_connection(self, runner_id: str, epoch: str) -> bool:
+        return self._write_runner_connection(runner_id, epoch, action="heartbeat")
+
+    def close_runner_connection(self, runner_id: str, epoch: str) -> bool:
+        return self._write_runner_connection(runner_id, epoch, action="close")
+
+    @staticmethod
+    def _connection_liveness(row: Any) -> RunnerConnectionLiveness:
+        return RunnerConnectionLiveness(
+            runner_id=row.runner_id,
+            epoch=row.epoch,
+            heartbeat_epoch=row.heartbeat_epoch,
+            active=row.state == 1,
+            last_seen=row.last_seen,
+            last_connected=row.last_connected,
+            observed_at=row.observed_at,
+        )
+
+    def get_runner_connection(self, runner_id: str) -> RunnerConnectionLiveness | None:
+        with self._session("get_runner_connection") as session:
+            row = session.execute(
+                select(
+                    SqlRunnerConnection.runner_id,
+                    SqlRunnerConnection.epoch,
+                    SqlRunnerConnection.heartbeat_epoch,
+                    SqlRunnerConnection.state,
+                    SqlRunnerConnection.last_seen,
+                    SqlRunnerConnection.last_connected,
+                    database_epoch_seconds().label("observed_at"),
+                ).where(
+                    SqlRunnerConnection.workspace_id == current_workspace_id(),
+                    SqlRunnerConnection.runner_id == runner_id,
+                )
+            ).one_or_none()
+            return self._connection_liveness(row) if row is not None else None
+
+    def get_session_runner_connection(
+        self, conversation_id: str
+    ) -> RunnerConnectionLiveness | None:
+        with self._session("get_session_runner_connection") as session:
+            row = session.execute(
+                select(
+                    SqlConversationMetadata.runner_id,
+                    SqlRunnerConnection.epoch,
+                    SqlRunnerConnection.heartbeat_epoch,
+                    SqlRunnerConnection.state,
+                    SqlRunnerConnection.last_seen,
+                    SqlRunnerConnection.last_connected,
+                    database_epoch_seconds().label("observed_at"),
+                )
+                .outerjoin(
+                    SqlRunnerConnection,
+                    and_(
+                        SqlRunnerConnection.workspace_id == SqlConversationMetadata.workspace_id,
+                        SqlRunnerConnection.runner_id == SqlConversationMetadata.runner_id,
+                    ),
+                )
+                .where(
+                    SqlConversationMetadata.workspace_id == current_workspace_id(),
+                    SqlConversationMetadata.id == conversation_id,
+                )
+            ).one_or_none()
+            return self._connection_liveness(row) if row is not None else None
+
     def get_runner_liveness(self, conversation_id: str) -> tuple[str | None, int | None] | None:
         """Keep the connectivity contract independent of retained heartbeat evidence."""
         row = self.get_runner_disconnect_liveness(conversation_id)
@@ -1355,7 +1475,18 @@ class SqlAlchemyConversationStore(ConversationStore):
                     SqlConversationMetadata.runner_id,
                     SqlConversationMetadata.host_id,
                     SqlConversationMetadata.runner_last_seen,
-                ).where(
+                    SqlRunnerConnection.last_seen.label("fenced_last_seen"),
+                    SqlRunnerConnection.state,
+                    database_epoch_seconds().label("observed_at"),
+                )
+                .outerjoin(
+                    SqlRunnerConnection,
+                    and_(
+                        SqlRunnerConnection.workspace_id == SqlConversationMetadata.workspace_id,
+                        SqlRunnerConnection.runner_id == SqlConversationMetadata.runner_id,
+                    ),
+                )
+                .where(
                     SqlConversationMetadata.workspace_id == current_workspace_id(),
                     SqlConversationMetadata.id.in_(unique_ids),
                 )
@@ -1388,6 +1519,9 @@ class SqlAlchemyConversationStore(ConversationStore):
                 needs_workspace=row.id in needs_workspace_ids,
                 imported=row.id in imported_ids,
                 runner_last_seen=row.runner_last_seen,
+                runner_online=row.state == 1
+                and row.fenced_last_seen is not None
+                and row.fenced_last_seen >= row.observed_at - RUNNER_LIVENESS_TTL_S,
             )
             for row in meta_rows
         }
@@ -4096,9 +4230,28 @@ class SqlAlchemyConversationStore(ConversationStore):
         )
 
     def settle_orphaned_live_status(self, conversation_id: str, stale_before: int) -> bool:
-        """Settle a stale running row with one conditional update."""
+        """Settle only against locked, expired fenced evidence on the DB clock."""
+        del stale_before  # Legacy caller clocks cannot classify shared liveness.
 
         def write(session: Session) -> bool:
+            meta = session.get(SqlConversationMetadata, (current_workspace_id(), conversation_id))
+            if meta is None or meta.runner_id is None:
+                return False
+            runner_id = meta.runner_id
+            connection = session.get(
+                SqlRunnerConnection,
+                (current_workspace_id(), runner_id),
+                with_for_update=True,
+            )
+            # A missing row or incomplete claim cannot establish lost accepted work.
+            if connection is None or connection.state == 0:
+                return False
+            now = session.execute(select(database_epoch_seconds())).scalar_one()
+            if (
+                connection.last_connected is not None
+                and connection.last_connected >= now - RUNNER_LIVENESS_TTL_S
+            ):
+                return False
             result = cast(
                 _RowCountResult,
                 session.execute(
@@ -4106,19 +4259,15 @@ class SqlAlchemyConversationStore(ConversationStore):
                     .where(
                         SqlConversationMetadata.workspace_id == current_workspace_id(),
                         SqlConversationMetadata.id == conversation_id,
-                        SqlConversationMetadata.runner_id.is_not(None),
+                        SqlConversationMetadata.runner_id == runner_id,
                         SqlConversationMetadata.live_status.in_(
                             [
                                 encode_session_live_status("running"),
                                 encode_session_live_status("waiting"),
                             ]
                         ),
-                        or_(
-                            SqlConversationMetadata.runner_last_seen.is_(None),
-                            SqlConversationMetadata.runner_last_seen < stale_before,
-                        ),
                     )
-                    .values(live_status=encode_session_live_status("idle"))
+                    .values(live_status=encode_session_live_status("idle")),
                 ),
             )
             return result.rowcount == 1

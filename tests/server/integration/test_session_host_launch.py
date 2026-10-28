@@ -1729,20 +1729,22 @@ async def test_message_relaunch_classifies_replacement_runner_liveness(
     old_runner_id = session["runner_id"]
     store = SqlAlchemyConversationStore(db_uri)
     store.set_labels(session_id, {"omnigent.wrapper": wrapper})
-    old_stamp = int(time.time())
-    store.touch_runner_liveness([old_runner_id], old_stamp)
-    own_stamps = {old_runner_id: old_stamp}
-    monkeypatch.setattr(routes_events, "last_liveness_stamp", own_stamps.get)
+    old_epoch = "a" * 32
+    store.claim_runner_connection(old_runner_id, old_epoch)
+    assert store.activate_runner_connection(old_runner_id, old_epoch)
+    own_epochs = {old_runner_id: old_epoch}
+    monkeypatch.setattr(routes_events, "runner_connection_epoch", own_epochs.get)
     waited_for: list[str] = []
 
     async def _replacement_connect_miss(*_args: Any, runner_id: str, **_kwargs: Any) -> None:
         assert runner_id != old_runner_id
         waited_for.append(runner_id)
         if liveness_source != "missing":
-            stamp = int(time.time())
-            store.touch_runner_liveness([runner_id], stamp)
+            epoch = "b" * 32
+            store.claim_runner_connection(runner_id, epoch)
+            assert store.activate_runner_connection(runner_id, epoch)
             if liveness_source == "local":
-                own_stamps[runner_id] = stamp
+                own_epochs[runner_id] = epoch
 
     monkeypatch.setattr(sessions_module, "_wait_for_runner_client", _replacement_connect_miss)
     set_runner_client(None)

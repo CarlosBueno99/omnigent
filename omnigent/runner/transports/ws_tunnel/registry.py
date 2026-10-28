@@ -154,6 +154,7 @@ class RunnerSession:
     owner: str | None
     last_frame_monotonic: float = field(default_factory=time.monotonic, kw_only=True)
     generation: int = field(default_factory=lambda: next(_connection_generations))
+    connection_epoch: str | None = None
     in_flight: dict[str, RequestState] = field(default_factory=dict)
     # Per-channel state for tunneled WebSocket attaches.  Keys are
     # 8-char hex channel ids; values hold the inbound queue consumed
@@ -306,6 +307,29 @@ class TunnelRegistry:
 
     # ── Session lifecycle ────────────────────────────────
 
+    def renewal_predecessor(
+        self,
+        runner_id: str,
+        hello: HelloFrame,
+        *,
+        owner: str | None = None,
+    ) -> RunnerSession | None:
+        """Validate planned renewal without consuming its permit or changing admission."""
+        with self._lock:
+            if hello.renewal_permit is None:
+                return None
+            old = self._sessions.get(runner_id)
+            if (
+                old is None
+                or runner_id in self._draining
+                or old.owner != owner
+                or TUNNEL_RENEWAL_CAPABILITY not in hello.capabilities
+                or not _token_matches(old.renewal_permit, hello.renewal_permit)
+                or not _token_matches(old.continuity_token, hello.continuity_token)
+            ):
+                raise InvalidRenewalPermit("renewal predecessor is not current on this replica")
+            return old
+
     def register(
         self,
         runner_id: str,
@@ -352,15 +376,7 @@ class TunnelRegistry:
             old = self._sessions.get(runner_id)
             predecessor = self._draining.get(runner_id)
             planned = hello.renewal_permit is not None
-            if planned and (
-                old is None
-                or predecessor is not None
-                or old.owner != owner
-                or session.renewal_ready is None
-                or not _token_matches(old.renewal_permit, hello.renewal_permit)
-                or not _token_matches(old.continuity_token, hello.continuity_token)
-            ):
-                raise InvalidRenewalPermit("renewal predecessor is not current on this replica")
+            self.renewal_predecessor(runner_id, hello, owner=owner)
             continuity = (
                 predecessor is not None
                 and predecessor.owner == owner

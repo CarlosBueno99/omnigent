@@ -36,7 +36,8 @@ def unavailable_when_armed(method):
     return read
 
 for name in (
-    'get_conversation', 'get_runner_liveness', 'get_runner_disconnect_liveness'
+    'get_conversation', 'get_runner_liveness', 'get_runner_disconnect_liveness',
+    'get_runner_connection', 'get_session_runner_connection'
 ):
     setattr(SqlAlchemyConversationStore, name,
             unavailable_when_armed(getattr(SqlAlchemyConversationStore, name)))

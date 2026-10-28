@@ -83,6 +83,7 @@ _last_pending: WorkspaceScopedCache[str, int] = WorkspaceScopedCache()
 # Never erased by clear_runner_liveness — only configure() resets it.
 # custom-lint: disable-next=workspace-scoped-cache -- keyed by globally-unique runner_id
 _last_liveness_stamp: dict[str, int] = {}
+_connection_epochs: WorkspaceScopedCache[str, str] = WorkspaceScopedCache()
 
 
 def configure(
@@ -105,6 +106,7 @@ def configure(
     _last_status_at.clear()
     _last_pending.clear()
     _last_liveness_stamp.clear()
+    _connection_epochs.clear()
 
 
 def conversation_store() -> ConversationStore | None:
@@ -388,3 +390,25 @@ def clear_runner_liveness(runner_id: str) -> None:
         runner_id,
         last_liveness_stamp(runner_id),
     )
+
+
+def remember_runner_connection(runner_id: str, epoch: str) -> None:
+    """Remember only a successfully activated connection for local comparisons."""
+    _connection_epochs[runner_id] = epoch
+
+
+def runner_connection_epoch(runner_id: str) -> str | None:
+    """Return this replica's latest admitted epoch, including after close."""
+    return _connection_epochs.get(runner_id)
+
+
+def heartbeat_runner_connection(
+    runner_id: str,
+    epoch: str,
+    *,
+    store: ConversationStore | None = None,
+) -> None:
+    """Queue a heartbeat carrying the exact connection epoch."""
+    target = store if store is not None else _store
+    if target is not None:
+        submit("runner_connection_heartbeat", target.heartbeat_runner_connection, runner_id, epoch)

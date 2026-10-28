@@ -1623,10 +1623,6 @@ async def test_runner_disconnect_grace_defers_failed_marking(
     # Bind via the store (no relay) to a runner whose WS this test owns.
     runner_id = "runner-grace-timer"
     get_conversation_store().replace_runner_id(session_id, runner_id)
-    cleared_runners: list[str] = []
-    monkeypatch.setattr(
-        "omnigent.server.session_live_state.clear_runner_liveness", cleared_runners.append
-    )
 
     communicator = await _connect_runner_tunnel(ap_app, runner_id)
     await _send_hello_and_wait(communicator, ap_app, runner_id, harnesses=[_TEST_HARNESS_NAME])
@@ -1639,7 +1635,8 @@ async def test_runner_disconnect_grace_defers_failed_marking(
         # failed flip must not have happened yet.
         await communicator.send_input({"type": "websocket.disconnect", "code": 1000})
         await communicator.wait(timeout=budget(2.0))
-        assert runner_id in cleared_runners
+        connection = get_conversation_store().get_runner_connection(runner_id)
+        assert connection is not None and not connection.active and connection.last_seen is None
         assert sessions_module._session_status_cache.get(session_id) != "failed", (
             "session failed immediately on disconnect — the grace window "
             "is not deferring the failed-marking"
@@ -1880,12 +1877,9 @@ async def test_runner_disconnect_grace_spares_runner_live_on_another_replica(
 ) -> None:
     """A dropped runner that re-tunnelled to another replica is not failed.
 
-    This replica's registry only knows its own tunnels. When the runner's row
-    carries a stamp newer than this replica's own last write, another replica
-    wrote it — the runner is live there, so the grace timer must leave the
-    mid-turn session alone. The ``blip`` case clears the sibling's
-    ``runner_last_seen`` and keeps only the never-cleared connect stamp, so this
-    holds even across the sibling's own transient reconnect blip.
+    A distinct durable epoch identifies the sibling even within the same
+    database second. The ``blip`` case closes that epoch and keeps its bounded
+    retained heartbeat, so a transient reconnect does not fail accepted work.
     """
 
     from omnigent.runtime import get_conversation_store
@@ -1915,10 +1909,6 @@ async def test_runner_disconnect_grace_spares_runner_live_on_another_replica(
     runner_id = "runner-live-elsewhere"
     store = get_conversation_store()
     store.replace_runner_id(session_id, runner_id)
-    # No pinning: the real recorder tracks this replica's own last stamp, so
-    # only a strictly newer row stamp reads as another replica's write. A
-    # reference pinned in the past would let the hello's own stamp qualify
-    # and prove nothing.
 
     communicator = await _connect_runner_tunnel(ap_app, runner_id)
     await _send_hello_and_wait(communicator, ap_app, runner_id, harnesses=[_TEST_HARNESS_NAME])
@@ -1927,17 +1917,17 @@ async def test_runner_disconnect_grace_spares_runner_live_on_another_replica(
     try:
         await communicator.send_input({"type": "websocket.disconnect", "code": 1000})
         await communicator.wait(timeout=budget(2.0))
-        # Let this replica's own disconnect-time liveness write land first,
-        # then stamp the row the way the replica now holding the tunnel does.
+        # Let this replica close, then claim as the sibling would.
         await asyncio.sleep(0.1)
         if foreign_write != "none":
-            own = session_live_state.last_liveness_stamp(runner_id)
-            assert own is not None, "the hello did not record this replica's own stamp"
-            store.touch_runner_liveness([runner_id], own + 1)
+            own = session_live_state.runner_connection_epoch(runner_id)
+            assert own is not None
+            sibling = "b" * 32
+            assert sibling != own
+            store.claim_runner_connection(runner_id, sibling)
+            assert store.activate_runner_connection(runner_id, sibling)
             if foreign_write == "blip":
-                # The sibling's tunnel then blips: its heartbeat clears but the
-                # never-cleared connect stamp still proves the runner is live there.
-                store.clear_runner_liveness(runner_id)
+                assert store.close_runner_connection(runner_id, sibling)
         await asyncio.sleep(grace * 3)
         cached = sessions_module._session_status_cache.get(session_id)
         if foreign_write != "none":
@@ -1971,7 +1961,7 @@ async def test_server_initiated_close_never_fails_the_turn(
     while its surviving runner reconnects.
     """
     from omnigent.runtime import get_conversation_store
-    from omnigent.server import session_live_state, shutdown_state
+    from omnigent.server import shutdown_state
     from omnigent.server.routes import sessions as sessions_module
 
     ap_client = tunnel_three_layer_stack.ap_client
@@ -1997,21 +1987,17 @@ async def test_server_initiated_close_never_fails_the_turn(
     runner_id = "runner-server-close"
     store = get_conversation_store()
     store.replace_runner_id(session_id, runner_id)
-    cleared_runners: list[str] = []
-    monkeypatch.setattr(session_live_state, "clear_runner_liveness", cleared_runners.append)
-    touched_runners: list[str] = []
-    monkeypatch.setattr(session_live_state, "touch_runner_liveness", touched_runners.extend)
 
     communicator = await _connect_runner_tunnel(ap_app, runner_id)
     await _send_hello_and_wait(communicator, ap_app, runner_id, harnesses=[_TEST_HARNESS_NAME])
     sessions_module._session_status_cache[session_id] = "running"
-    touched_runners.clear()
     try:
         await communicator.send_input({"type": "websocket.disconnect", "code": 1012})
         await communicator.wait(timeout=budget(2.0))
         assert shutdown_state.server_shutting_down(), "a 1012 close did not mark server shutdown"
-        assert runner_id not in cleared_runners
-        assert runner_id in touched_runners
+        connection = store.get_runner_connection(runner_id)
+        assert connection is not None and not connection.active
+        assert connection.last_seen is None and connection.last_connected is not None
 
         # Well past the grace: the timer has fired and must have skipped the marking.
         await asyncio.sleep(grace * 3)
@@ -2039,7 +2025,7 @@ async def test_server_retired_tunnel_never_fails_the_turn(
     grace runs out. The mark clears when the runner tunnels back here.
     """
     from omnigent.runtime import get_conversation_store
-    from omnigent.server import session_live_state, shutdown_state
+    from omnigent.server import shutdown_state
     from omnigent.server.routes import sessions as sessions_module
 
     ap_client = tunnel_three_layer_stack.ap_client
@@ -2065,28 +2051,20 @@ async def test_server_retired_tunnel_never_fails_the_turn(
     runner_id = "runner-server-retired"
     store = get_conversation_store()
     store.replace_runner_id(session_id, runner_id)
-    cleared_runners: list[str] = []
-    monkeypatch.setattr(session_live_state, "clear_runner_liveness", cleared_runners.append)
-    touched_runners: list[str] = []
-    monkeypatch.setattr(session_live_state, "touch_runner_liveness", touched_runners.extend)
 
     communicator = await _connect_runner_tunnel(ap_app, runner_id)
     await _send_hello_and_wait(communicator, ap_app, runner_id, harnesses=[_TEST_HARNESS_NAME])
     sessions_module._session_status_cache[session_id] = "running"
-    touched_runners.clear()
     reconnect_communicator: ApplicationCommunicator | None = None
     try:
         assert ap_app.state.tunnel_registry.deregister(runner_id) is not None
 
-        async def _disconnect_hook_ran() -> None:
-            while runner_id not in touched_runners and runner_id not in cleared_runners:
-                await asyncio.sleep(0.02)
-
-        await asyncio.wait_for(_disconnect_hook_ran(), timeout=budget(2.0))
+        await communicator.wait(timeout=budget(2.0))
         assert shutdown_state.runner_handoff_reason(runner_id) == "tunnel_retired"
         assert not shutdown_state.server_shutting_down()
-        assert runner_id not in cleared_runners
-        assert runner_id in touched_runners
+        connection = store.get_runner_connection(runner_id)
+        assert connection is not None and not connection.active
+        assert connection.last_seen is None and connection.last_connected is not None
 
         # Well past the grace: the timer has fired and must have skipped the marking.
         await asyncio.sleep(grace * 3)
@@ -2228,28 +2206,13 @@ def _drain_session_live_state() -> None:
     assert drained.wait(5.0), "session live-state worker did not drain"
 
 
-def _runner_last_seen(session_id: str) -> int | None:
-    """Read the session's persisted ``runner_last_seen`` stamp."""
-    from omnigent.runtime import get_conversation_store
-
-    connectivity = get_conversation_store().get_session_connectivity([session_id])
-    return connectivity[session_id].runner_last_seen
-
-
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_isolated_session_status_cache")
-async def test_server_initiated_close_keeps_runner_liveness_stamp(
+async def test_server_initiated_close_retains_fenced_heartbeat(
     tunnel_three_layer_stack: _TunnelStack,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A tunnel THIS server closed (code 1012) leaves ``runner_last_seen`` intact.
-
-    A genuine drop clears the stamp so other replicas flip the runner offline
-    at once. A server closing tunnels on its own way down must not: the runner
-    is alive and re-tunnels to the replacement replica, whose orphan backstop
-    would read a cleared stamp as a dead runner and settle the runner's
-    mid-turn sessions to ``idle`` before it reconnects.
-    """
+    """Closed epochs retain bounded evidence while rejecting late heartbeats."""
     from omnigent.runtime import get_conversation_store
     from omnigent.server import shutdown_state
 
@@ -2274,47 +2237,50 @@ async def test_server_initiated_close_keeps_runner_liveness_stamp(
     assert create_resp.status_code == 201, create_resp.text
     session_id = create_resp.json()["session_id"]
     runner_id = "runner-server-close-stamp"
-    get_conversation_store().replace_runner_id(session_id, runner_id)
+    store = get_conversation_store()
+    store.replace_runner_id(session_id, runner_id)
 
     try:
-        # Baseline: a genuine drop clears the stamp the connect hook wrote.
+        # Both genuine and server-initiated closes fence delayed writes.
         communicator = await _connect_runner_tunnel(ap_app, runner_id)
         await _send_hello_and_wait(communicator, ap_app, runner_id, harnesses=[_TEST_HARNESS_NAME])
         _drain_session_live_state()
-        assert _runner_last_seen(session_id) is not None
+        connection = store.get_session_runner_connection(session_id)
+        assert connection is not None and connection.online
         await communicator.send_input({"type": "websocket.disconnect", "code": 1006})
         await communicator.wait(timeout=budget(2.0))
         _drain_session_live_state()
-        assert _runner_last_seen(session_id) is None
+        connection = store.get_session_runner_connection(session_id)
+        assert connection is not None and not connection.online and connection.last_seen is None
 
-        # Server-initiated close: the reconnect re-stamps and the close keeps it.
+        # Server shutdown retains the reconnect's exact heartbeat epoch.
         communicator = await _connect_runner_tunnel(ap_app, runner_id)
         await _send_hello_and_wait(communicator, ap_app, runner_id, harnesses=[_TEST_HARNESS_NAME])
         _drain_session_live_state()
-        assert _runner_last_seen(session_id) is not None
+        connection = store.get_session_runner_connection(session_id)
+        assert connection is not None and connection.online
         await communicator.send_input({"type": "websocket.disconnect", "code": 1012})
         await communicator.wait(timeout=budget(2.0))
         assert shutdown_state.server_shutting_down(), "a 1012 close did not mark server shutdown"
         _drain_session_live_state()
-        assert _runner_last_seen(session_id) is not None
+        closed = store.get_session_runner_connection(session_id)
+        assert closed is not None and not closed.online and closed.last_seen is None
+        assert closed.heartbeat_epoch == connection.epoch
+        assert closed.last_connected == connection.last_connected
+        assert not store.heartbeat_runner_connection(runner_id, connection.epoch)
     finally:
         shutdown_state.reset_for_tests()
 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_isolated_session_status_cache")
-async def test_patch_rebind_stamps_runner_liveness(
+async def test_patch_rebind_joins_existing_runner_fence(
     tunnel_three_layer_stack: _TunnelStack,
 ) -> None:
-    """Binding a session to an already-connected runner stamps ``runner_last_seen``.
+    """Binding after connect sees runner authority without a per-session heartbeat."""
+    from omnigent.runtime import get_conversation_store
 
-    The connect hook stamps only the sessions bound when the tunnel opened,
-    and the ping loop refreshes them every 30s. A session bound in between
-    would carry no stamp until that next ping, so a server recycle inside the
-    window would let the replacement replica's orphan backstop settle its
-    turn to ``idle``. The runner acknowledging the session's relay stream is
-    the moment it provably rides a live tunnel, so that stamps too.
-    """
+    store = get_conversation_store()
     ap_client = tunnel_three_layer_stack.ap_client
 
     create_resp = await ap_client.post(
@@ -2330,7 +2296,7 @@ async def test_patch_rebind_stamps_runner_liveness(
     )
     assert create_resp.status_code == 201, create_resp.text
     session_id = create_resp.json()["session_id"]
-    assert _runner_last_seen(session_id) is None
+    assert not store.get_session_runner_connection(session_id).online
 
     patch_resp = await ap_client.patch(
         f"/v1/sessions/{session_id}",
@@ -2339,7 +2305,7 @@ async def test_patch_rebind_stamps_runner_liveness(
     assert patch_resp.status_code == 200, patch_resp.text
 
     _drain_session_live_state()
-    assert _runner_last_seen(session_id) is not None
+    assert store.get_session_runner_connection(session_id).online
 
 
 @pytest.mark.asyncio
@@ -2584,10 +2550,13 @@ async def test_runner_disconnect_holds_turn_while_host_offline(
         if scenario == "remote_blip":
             from omnigent.server import session_live_state
 
-            stamp = session_live_state.last_liveness_stamp(runner_id)
-            assert stamp is not None
-            store.touch_runner_liveness([runner_id], now=stamp + 1)
-            store.clear_runner_liveness(runner_id)
+            own = session_live_state.runner_connection_epoch(runner_id)
+            assert own is not None
+            sibling = "b" * 32
+            assert sibling != own
+            store.claim_runner_connection(runner_id, sibling)
+            assert store.activate_runner_connection(runner_id, sibling)
+            assert store.close_runner_connection(runner_id, sibling)
             host_row[0] = False
 
             async def relinquished() -> None:

@@ -47,6 +47,7 @@ from omnigent.runner.transports.ws_tunnel.registry import TunnelRegistry
 from omnigent.runner.transports.ws_tunnel.serve import serve_tunnel
 from omnigent.runner.transports.ws_tunnel.transport import WSTunnelTransport
 from omnigent.server.routes.runner_tunnel import create_runner_tunnel_router
+from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from tests._helpers.live_server import find_free_port
 
 _PEER_LIFETIME_S = 6.0
@@ -140,6 +141,7 @@ async def _registered_server(app: FastAPI):
 )
 async def test_planned_renewal_preserves_an_accepted_pending_command(
     destination: str,
+    db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -147,8 +149,11 @@ async def test_planned_renewal_preserves_an_accepted_pending_command(
     monkeypatch.setenv(_RENEWAL_INTERVAL_ENV, "1")
     registry = TunnelRegistry()
     other_registry = TunnelRegistry()
+    store = SqlAlchemyConversationStore(db_uri)
     server_app = FastAPI()
-    server_app.include_router(create_runner_tunnel_router(registry), prefix="/v1")
+    server_app.include_router(
+        create_runner_tunnel_router(registry, conversation_store=store), prefix="/v1"
+    )
     ingested: list[str] = []
     event_received = asyncio.Event()
     release_event_ack = asyncio.Event()
@@ -162,7 +167,7 @@ async def test_planned_renewal_preserves_an_accepted_pending_command(
 
     server_app.state.runner_event_ingest = ingest
     other_app = FastAPI()
-    other_router = create_runner_tunnel_router(other_registry)
+    other_router = create_runner_tunnel_router(other_registry, conversation_store=store)
     if destination == "legacy_replica":
         other_router.routes[:] = [
             route for route in other_router.routes if not route.path.endswith("/renewal")
@@ -249,6 +254,16 @@ async def test_planned_renewal_preserves_an_accepted_pending_command(
                     await asyncio.sleep(2.5)
                     current = registry.get("runner_pending")
                     assert current is not None
+                    authority = store.get_runner_connection("runner_pending")
+                    assert authority is not None and authority.online
+                    assert authority.epoch == current.connection_epoch
+                    if current is not first:
+                        assert not store.heartbeat_runner_connection(
+                            "runner_pending", first.connection_epoch
+                        )
+                        assert not store.close_runner_connection(
+                            "runner_pending", first.connection_epoch
+                        )
                     assert not request.done()
                     assert outcomes == ["accepted"]
                     assert not pending_event.done()
@@ -367,10 +382,17 @@ async def test_planned_renewal_preserves_an_accepted_pending_command(
             await asyncio.gather(*dispatcher._workers, return_exceptions=True)
 
 
-async def test_a_different_runner_process_still_replaces_both_generations(tmp_path: Path) -> None:
+async def test_a_different_runner_process_still_replaces_both_generations(
+    tmp_path: Path, db_uri: str
+) -> None:
     registry = TunnelRegistry()
     app = FastAPI()
-    app.include_router(create_runner_tunnel_router(registry), prefix="/v1")
+    app.include_router(
+        create_runner_tunnel_router(
+            registry, conversation_store=SqlAlchemyConversationStore(db_uri)
+        ),
+        prefix="/v1",
+    )
     async with (
         _registered_server(app) as url,
         _runner_process(url, tmp_path / "first", "1") as (first_proc, marker),
@@ -404,10 +426,15 @@ async def test_a_different_runner_process_still_replaces_both_generations(tmp_pa
                 await asyncio.gather(request, return_exceptions=True)
 
 
-async def test_legacy_client_gets_no_renewal_frames_and_keeps_serving() -> None:
+async def test_legacy_client_gets_no_renewal_frames_and_keeps_serving(db_uri: str) -> None:
     registry = TunnelRegistry()
     app = FastAPI()
-    app.include_router(create_runner_tunnel_router(registry), prefix="/v1")
+    app.include_router(
+        create_runner_tunnel_router(
+            registry, conversation_store=SqlAlchemyConversationStore(db_uri)
+        ),
+        prefix="/v1",
+    )
     async with _registered_server(app) as url:
         async with websockets.connect(
             url.replace("http://", "ws://") + "/v1/runners/legacy/tunnel"

@@ -8691,3 +8691,145 @@ def test_get_conversation_keeps_distinct_query_names(
         "omnigent.conversation_store.select_conversation_metadata_by_id",
         "omnigent.conversation_store.select_conversation_labels",
     ], names
+
+
+def test_runner_connection_epoch_fences_stale_writers_and_keeps_retained_evidence(
+    conversation_store: SqlAlchemyConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy import literal
+
+    from omnigent.stores.conversation_store import sqlalchemy_store
+
+    database_now = [1000]
+    monkeypatch.setattr(
+        sqlalchemy_store, "database_epoch_seconds", lambda: literal(database_now[0])
+    )
+    store = conversation_store
+    runner_id = "runner-fenced"
+    first_epoch, next_epoch = "a" * 32, "b" * 32
+    assert not store.heartbeat_runner_connection(runner_id, first_epoch)
+    assert not store.close_runner_connection(runner_id, first_epoch)
+    store.claim_runner_connection(runner_id, first_epoch)
+    reserved = store.get_runner_connection(runner_id)
+    assert reserved is not None and not reserved.online and reserved.last_connected is None
+    assert store.activate_runner_connection(runner_id, first_epoch)
+    first = store.get_runner_connection(runner_id)
+    assert first is not None and first.online and first.last_seen == 1000
+    store.claim_runner_connection(runner_id, next_epoch)
+    reserved = store.get_runner_connection(runner_id)
+    assert reserved is not None and not reserved.online
+    assert reserved.live_elsewhere(None, retained=True)
+    assert not reserved.live_elsewhere(first_epoch, retained=True)
+    assert not store.activate_runner_connection(runner_id, first_epoch)
+    assert not store.heartbeat_runner_connection(runner_id, first_epoch)
+    assert not store.close_runner_connection(runner_id, first_epoch)
+    # A delayed planned successor cannot reserve against a replaced predecessor.
+    with pytest.raises(RuntimeError, match="predecessor was superseded"):
+        store.claim_runner_connection(runner_id, "c" * 32, expected_epoch=first_epoch)
+    # Same-second connections have different ownership even with identical clocks.
+    assert store.activate_runner_connection(runner_id, next_epoch)
+    current = store.get_runner_connection(runner_id)
+    assert current is not None and current.online
+    assert current.live_elsewhere(first_epoch)
+    assert current.last_seen == first.last_seen
+    assert store.close_runner_connection(runner_id, next_epoch)
+    assert not store.activate_runner_connection(runner_id, next_epoch)
+    assert not store.heartbeat_runner_connection(runner_id, next_epoch)
+    closed = store.get_runner_connection(runner_id)
+    assert closed is not None and not closed.online and closed.last_seen is None
+    assert closed.epoch == next_epoch and closed.last_connected == 1000
+    assert closed.live_elsewhere(first_epoch, retained=True)
+    database_now[0] += 91
+    assert not store.get_runner_connection(runner_id).live_elsewhere(first_epoch, retained=True)
+    # Tombstones are never removed and a third claim never reuses the old epoch.
+    store.claim_runner_connection(runner_id, "c" * 32)
+    assert not store.heartbeat_runner_connection(runner_id, next_epoch)
+    assert not store.activate_runner_connection(runner_id, next_epoch)
+
+
+def test_runner_connection_binding_clock_and_orphan_controls(
+    conversation_store: SqlAlchemyConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy import literal
+
+    from omnigent.stores.conversation_store import sqlalchemy_store
+
+    database_now = [1000]
+    monkeypatch.setattr(
+        sqlalchemy_store, "database_epoch_seconds", lambda: literal(database_now[0])
+    )
+    store = conversation_store
+    epoch = "a" * 32
+    store.claim_runner_connection("runner-first", epoch)
+    assert store.activate_runner_connection("runner-first", epoch)
+    conv = store.create_conversation(runner_id="runner-first")
+    assert store.get_session_runner_connection(conv.id).online
+    assert store.get_session_connectivity([conv.id])[conv.id].runner_online
+    store.set_session_live_status(conv.id, "running")
+    # An ahead/behind caller cannot settle a connection fresh on the DB clock.
+    for local_cutoff in (0, 10**12):
+        assert not store.settle_orphaned_live_status(conv.id, local_cutoff)
+    store.close_runner_connection("runner-first", epoch)
+    assert not store.get_session_connectivity([conv.id])[conv.id].runner_online
+    assert not store.settle_orphaned_live_status(conv.id, 10**12)
+    database_now[0] += 91
+    assert store.settle_orphaned_live_status(conv.id, 0)
+    store.replace_runner_id(conv.id, "runner-second")
+    store.heartbeat_runner_connection("runner-first", epoch)
+    conn = store.get_session_runner_connection(conv.id)
+    assert conn.runner_id == "runner-second" and not conn.online
+    store.set_session_live_status(conv.id, "running")
+    assert not store.settle_orphaned_live_status(conv.id, 10**12)
+    store.claim_runner_connection("runner-second", "b" * 32)
+    assert not store.settle_orphaned_live_status(conv.id, 10**12)
+    # Legacy metadata writes cannot invent fenced connectivity.
+    store.touch_runner_liveness(["runner-second"], now=10**12)
+    assert not store.get_session_connectivity([conv.id])[conv.id].runner_online
+
+
+def test_runner_connection_fence_is_workspace_scoped(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    from omnigent.db.db_models import workspace_scope
+
+    store = conversation_store
+    for workspace, epoch in ((1, "a" * 32), (2, "b" * 32)):
+        with workspace_scope(workspace):
+            store.claim_runner_connection("runner", epoch)
+            assert store.activate_runner_connection("runner", epoch)
+            assert store.get_runner_connection("runner").epoch == epoch
+    with workspace_scope(1):
+        assert not store.close_runner_connection("runner", "b" * 32)
+        assert store.get_runner_connection("runner").online
+    assert store.get_runner_connection("runner") is None
+
+
+def test_concurrent_planned_connection_claims_have_one_fenced_winner(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    store = conversation_store
+    initial = "a" * 32
+    store.claim_runner_connection("runner-racing", initial)
+    assert store.activate_runner_connection("runner-racing", initial)
+    barrier = threading.Barrier(2)
+
+    def claim(epoch: str) -> str | None:
+        barrier.wait(timeout=10)
+        try:
+            store.claim_runner_connection("runner-racing", epoch, expected_epoch=initial)
+        except RuntimeError:
+            return None
+        assert store.activate_runner_connection("runner-racing", epoch)
+        return epoch
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(claim, ("b" * 32, "c" * 32)))
+    [winner] = [epoch for epoch in outcomes if epoch is not None]
+    connection = store.get_runner_connection("runner-racing")
+    assert connection is not None and connection.online and connection.epoch == winner
+    assert not store.close_runner_connection("runner-racing", initial)

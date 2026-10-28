@@ -414,7 +414,6 @@ from omnigent.stores.conversation_store import (
     ConversationNotFoundError,
     NameAlreadyExistsError,
     pinned_label_key,
-    runner_seen_is_fresh,
 )
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.host_store import Host, HostStore, host_is_live
@@ -4034,7 +4033,7 @@ async def _mark_runner_sessions_offline_impl(
     so the departure reaches every child bound to it — marking the idle
     ones ``failed`` painted a whole Agents rail red for sub-agents that had
     completed successfully. The runner's absence is already carried by
-    liveness (``clear_runner_liveness``), which is what drives the
+    the closed connection fence, which is what drives the
     reconnect affordances, so a session that was not mid-turn needs no
     status edge at all.
 
@@ -8396,54 +8395,24 @@ def _relinquish_session_live_state(session_id: str) -> None:
     session_live_state.forget_live_status(session_id)
 
 
-def _runner_stamp_is_live_elsewhere(
-    *,
-    stamp: int | None,
-    reference_stamp: int | None,
-) -> bool:
-    """Return whether *stamp* is fresh evidence written by another replica."""
-    return (
-        stamp is not None
-        and runner_seen_is_fresh(stamp)
-        and (reference_stamp is None or stamp > reference_stamp)
-    )
-
-
-def _newest_liveness_stamp(seen: int | None, connected: int | None) -> int | None:
-    """Return the freshest of the two liveness stamps, ignoring missing ones."""
-    stamps = [stamp for stamp in (seen, connected) if stamp is not None]
-    return max(stamps) if stamps else None
-
-
 def _runner_live_on_another_replica_from_conversations(
     conversations: Sequence[Conversation],
     runner_id: str,
-    reference_stamp: int | None,
+    reference_epoch: str | None,
     *,
+    conversation_store: ConversationStore | None = None,
     for_disconnect_decision: bool = False,
 ) -> bool:
-    """Check already-loaded runner-bound rows for a fresher replica's stamp.
-
-    The "should this mid-turn runner be failed?" decision passes
-    ``for_disconnect_decision=True`` to use the freshest of ``runner_last_seen``
-    and the never-cleared ``runner_last_connected``. A sibling's reconnect blip
-    clears only ``runner_last_seen``; an older replica that predates the connect
-    stamp refreshes only ``runner_last_seen``. Taking the newest of both keeps
-    the runner's liveness visible in either case. The message re-addressing path
-    leaves it ``False``, so it requires a currently-live tunnel (a fresh
-    ``runner_last_seen``) before bouncing a message to a sibling.
-    """
-    return any(
-        conv.runner_id == runner_id
-        and _runner_stamp_is_live_elsewhere(
-            stamp=(
-                _newest_liveness_stamp(conv.runner_last_seen, conv.runner_last_connected)
-                if for_disconnect_decision
-                else conv.runner_last_seen
-            ),
-            reference_stamp=reference_stamp,
-        )
-        for conv in conversations
+    """Read fenced DB-clock evidence only for the expected runner binding."""
+    if not any(conv.runner_id == runner_id for conv in conversations):
+        return False
+    store = conversation_store or session_live_state.conversation_store()
+    if store is None:
+        return False
+    connection = store.get_runner_connection(runner_id)
+    return connection is not None and connection.live_elsewhere(
+        reference_epoch,
+        retained=for_disconnect_decision,
     )
 
 
@@ -8678,51 +8647,30 @@ async def _runner_disconnect_requires_failure(
 async def _relay_runner_live_elsewhere(
     session_id: str,
     conversation_store: ConversationStore,
-) -> bool:
-    """
-    Check this relay's bound runner using shared runner metadata.
-
-    A full-conversation read can depend on unrelated backends; their outage
-    must not hide a fresh stamp from another replica. Prefer the active
-    relay's runner binding, falling back to the metadata binding when called
-    without a registered relay.
-
-    Uses the freshest of ``runner_last_seen`` and the never-cleared
-    ``runner_last_connected`` so a sibling's reconnect blip or an older replica
-    that writes only ``runner_last_seen`` still counts as live.
-
-    :param session_id: Session/conversation identifier.
-    :param conversation_store: Store used to read runner metadata.
-    :returns: ``True`` when the bound runner is confirmed live on
-        another replica; ``False`` when unbound, unreadable, or not.
-    """
+) -> bool | None:
+    """Check current binding and bounded retained evidence using connection epochs."""
     try:
-        lookup = getattr(
-            conversation_store,
-            "get_runner_disconnect_liveness",
-            conversation_store.get_runner_liveness,
-        )
-        liveness = await asyncio.to_thread(lookup, session_id)
-    except Exception:  # noqa: BLE001 — fall through to the mid-turn check instead
-        _logger.warning(
-            "Relay: runner liveness lookup failed for session=%s",
+        connection = await asyncio.to_thread(
+            conversation_store.get_session_runner_connection,
             session_id,
-            exc_info=True,
-            extra={"session_id": session_id},
         )
+    except Exception:  # noqa: BLE001 — unreadable ownership preserves accepted work
+        _logger.warning(
+            "Relay: fenced runner lookup failed for session=%s", session_id, exc_info=True
+        )
+        return None
+    if connection is None or connection.runner_id is None:
         return False
-    if liveness is None:
-        return False
-    bound_runner_id, runner_last_seen, *retained = liveness
-    runner_last_connected = retained[0] if retained else None
     handle = _runner_relay_tasks.get(session_id)
-    runner_id = handle.runner_id if handle is not None else bound_runner_id
-    if runner_id is None:
-        return False
-    reference_stamp = session_live_state.last_liveness_stamp(runner_id)
-    return bound_runner_id == runner_id and _runner_stamp_is_live_elsewhere(
-        stamp=_newest_liveness_stamp(runner_last_seen, runner_last_connected),
-        reference_stamp=reference_stamp,
+    runner_id = handle.runner_id if handle is not None else connection.runner_id
+    reference_epoch = (
+        handle.connection_epoch
+        if handle is not None
+        else session_live_state.runner_connection_epoch(runner_id)
+    )
+    return connection.runner_id == runner_id and connection.live_elsewhere(
+        reference_epoch,
+        retained=True,
     )
 
 
@@ -8915,8 +8863,13 @@ async def _relay_runner_stream(
             elif shutdown_state.runner_handoff_reason(outage_runner_id) is not None:
                 # See _runner_disconnect_requires_failure.
                 decision = "handed_off"
-            elif await _relay_runner_live_elsewhere(session_id, conversation_store):
-                decision = "live_elsewhere"
+            elif (
+                remote_liveness := await _relay_runner_live_elsewhere(
+                    session_id,
+                    conversation_store,
+                )
+            ) is not False:
+                decision = "live_elsewhere" if remote_liveness else "liveness_unavailable"
             elif outage_bound_elsewhere and await _relay_session_rebound(
                 session_id, conversation_store, outage_runner_id
             ):
@@ -8997,7 +8950,7 @@ async def _relay_runner_stream(
                     outage_runner_id,
                     extra={"session_id": session_id},
                 )
-            elif decision == "held_host_offline":
+            elif decision in ("held_host_offline", "liveness_unavailable"):
                 # The disconnect task holds the turn; the reconnect restarts the relay.
                 pass
             elif decision == "idle_no_failure":
@@ -10002,7 +9955,11 @@ def _ensure_runner_relay(
         else None
     )
     handle = _RelayHandle(
-        runner_id=runner_id, task=task, ready=ready, status_snapshot=status_snapshot
+        runner_id=runner_id,
+        task=task,
+        ready=ready,
+        status_snapshot=status_snapshot,
+        connection_epoch=session_live_state.runner_connection_epoch(runner_id),
     )
     _runner_relay_tasks[session_id] = handle
 
@@ -10083,11 +10040,6 @@ async def _ensure_runner_relay_ready_impl(
             "Timed out waiting for runner stream relay to subscribe",
             code=ErrorCode.RUNNER_UNAVAILABLE,
         ) from exc
-    # The runner just acknowledged this session's stream. A session bound after
-    # the tunnel connected has no ``runner_last_seen`` until the next ping; stamp
-    # it here so a server recycle in that window cannot read it as orphaned.
-    if runner_id is not None:
-        session_live_state.touch_runner_liveness([runner_id])
     return handle
 
 
@@ -13540,7 +13492,7 @@ async def _get_session_snapshot(
         exit_error = runner_exit_reports.get(conv.runner_id)
         runner_ran = (
             runner_exit_reports.was_connected(conv.runner_id)
-            or session_live_state.last_liveness_stamp(conv.runner_id) is not None
+            or session_live_state.runner_connection_epoch(conv.runner_id) is not None
         )
         # A cause recorded by a previous runner attempt is stale once a new
         # runner is bound; surface that runner's exit instead of hiding it.
