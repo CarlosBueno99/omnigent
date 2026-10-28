@@ -77,7 +77,7 @@ export function SshConnectForm({
           list={listId}
           value={destination}
           onChange={(event) => setDestination(event.target.value)}
-          placeholder="my-ec2 or user@host"
+          placeholder="host alias or user@host"
           autoComplete="off"
           spellCheck={false}
           componentId="new_chat.ssh_connect.destination"
