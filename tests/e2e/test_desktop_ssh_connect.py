@@ -185,8 +185,8 @@ def test_ssh_connect_signs_in_through_forward_and_starts_host(tmp_path: Path) ->
             "  IdentitiesOnly yes\n  IdentityAgent none\n"
             f"  UserKnownHostsFile {laptop / 'known_hosts'}\n"
             "  StrictHostKeyChecking ask\n"
-            # The laptop browser reaches the workspace; here, through this connection.
-            f"  LocalForward {workspace_port} 127.0.0.1:{workspace_port}\n"
+            # A user's config may clear forwards; the app's own must still work.
+            "  ClearAllForwardings yes\n"
         )
         ssh_config.chmod(0o600)
         laptop_env = {
@@ -216,6 +216,7 @@ def test_ssh_connect_signs_in_through_forward_and_starts_host(tmp_path: Path) ->
                     "box",
                     str(ssh_config),
                     str(_BUSY_LAPTOP_PORT),
+                    workspace_port,
                 ],
                 env=laptop_env,
                 capture_output=True,

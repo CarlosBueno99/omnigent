@@ -518,7 +518,11 @@ describe("createSshSession", () => {
     await session.open();
     await session.forwardLocal(8021);
     await session.holdRemote(8020);
+    await session.exec("true").promise;
 
+    // The user's config reaches the connection and commands, but never its
+    // forwards; control requests skip the config so it can't empty theirs.
+    const control = ["ssh", "-F", "/dev/null", "-S", "/tmp/s/m", "-O"];
     assert.deepEqual(spawned, [
       [
         "ssh",
@@ -528,15 +532,18 @@ describe("createSshSession", () => {
         "-o",
         "ControlPersist=no",
         "-o",
+        "ClearAllForwardings=yes",
+        "-o",
         "ServerAliveInterval=30",
         "-o",
         "ConnectTimeout=20",
         "-N",
         "my-ec2",
       ],
-      ["ssh", "-S", "/tmp/s/m", "-O", "check", "my-ec2"],
-      ["ssh", "-S", "/tmp/s/m", "-O", "forward", "-L", "8021:127.0.0.1:8021", "my-ec2"],
-      ["ssh", "-S", "/tmp/s/m", "-O", "forward", "-R", "8020:127.0.0.1:9", "my-ec2"],
+      [...control, "check", "my-ec2"],
+      [...control, "forward", "-L", "8021:127.0.0.1:8021", "my-ec2"],
+      [...control, "forward", "-R", "8020:127.0.0.1:9", "my-ec2"],
+      ["ssh", "-S", "/tmp/s/m", "-o", "ClearAllForwardings=yes", "-T", "my-ec2", "sh -c 'true'"],
     ]);
   });
 });

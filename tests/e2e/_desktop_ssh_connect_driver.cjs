@@ -11,7 +11,7 @@ const { createSshSession, startSshConnect } = require(
   path.join(__dirname, "..", "..", "web", "electron", "src", "ssh_connect.js"),
 );
 
-const [serverUrl, destination, sshConfig, busyPort] = process.argv.slice(2);
+const [serverUrl, destination, sshConfig, busyPort, workspacePort] = process.argv.slice(2);
 const emit = (event) => process.stdout.write(`${JSON.stringify(event)}\n`);
 
 async function main() {
@@ -40,7 +40,16 @@ async function main() {
       emit({ browser: response.status, landedPort: new URL(response.url).port });
     },
     readInstallScript: () => null,
-    createSession: (options) => createSshSession({ ...options, sshArgs: ["-F", sshConfig] }),
+    createSession: (options) => {
+      const session = createSshSession({ ...options, sshArgs: ["-F", sshConfig] });
+      // The laptop's browser reaches the test workspace through the same connection.
+      const open = async () => {
+        await session.open();
+        const forward = await session.forwardLocal(Number(workspacePort));
+        if (forward.code !== 0) throw new Error(`workspace forward failed: ${forward.stderr}`);
+      };
+      return { ...session, open };
+    },
     log: (message) => process.stderr.write(`${message}\n`),
   });
   const result = await promise;

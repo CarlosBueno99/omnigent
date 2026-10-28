@@ -337,14 +337,17 @@ function createSshSession(options) {
    * Spawn one ssh client over the shared connection. `stdin` is written and
    * closed; `holdStdin` keeps it open until the remote command ends.
    */
-  function client(args, { stdin = null, holdStdin = false, timeoutMs, onStdout, onStderr } = {}) {
+  function client(
+    args,
+    { stdin = null, holdStdin = false, timeoutMs, onStdout, onStderr, baseArgs = sshArgs } = {},
+  ) {
     let child;
     let timedOut = false;
     let stdout = "";
     let stderr = "";
     const promise = new Promise((resolve) => {
       try {
-        child = spawnFn(sshPath, [...sshArgs, "-S", socketPath, ...args], {
+        child = spawnFn(sshPath, [...baseArgs, "-S", socketPath, ...args], {
           stdio: [stdin === null && !holdStdin ? "ignore" : "pipe", "pipe", "pipe"],
           env,
         });
@@ -382,7 +385,12 @@ function createSshSession(options) {
     return { promise, cancel: () => child?.kill() };
   }
 
-  const control = (op, spec) => client(["-O", op, ...(spec ? spec : []), destination]).promise;
+  // Control requests only talk to the master, so they skip the user's ssh
+  // config: its forwards would ride along, and ClearAllForwardings there
+  // would silently empty the ones asked for here.
+  const control = (op, spec) =>
+    client(["-O", op, ...(spec ? spec : []), destination], { baseArgs: ["-F", "/dev/null"] })
+      .promise;
 
   return {
     destination,
@@ -410,6 +418,10 @@ function createSshSession(options) {
               socketPath,
               "-o",
               "ControlPersist=no",
+              // Forwards from the user's config belong to their own sessions
+              // and can clash with them; this connection makes its own.
+              "-o",
+              "ClearAllForwardings=yes",
               "-o",
               "ServerAliveInterval=30",
               "-o",
@@ -469,7 +481,11 @@ function createSshSession(options) {
      * @param {{ stdin?: string | null, holdStdin?: boolean, timeoutMs?: number, onStdout?: (t: string) => void, onStderr?: (t: string) => void }} [opts]
      */
     exec(script, opts = {}) {
-      return client(["-T", destination, remoteCommand(script)], opts);
+      // A shared-connection client would otherwise re-request the config's forwards.
+      return client(
+        ["-o", "ClearAllForwardings=yes", "-T", destination, remoteCommand(script)],
+        opts,
+      );
     },
 
     forwardLocal: (port) => control("forward", ["-L", `${port}:127.0.0.1:${port}`]),
