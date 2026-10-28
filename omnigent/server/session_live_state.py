@@ -149,7 +149,7 @@ def submit(description: str, fn, *args, on_failure=None) -> Future[Any]:  # type
     def _run() -> Any:
         try:
             return fn(*args)
-        except Exception:  # noqa: BLE001 -- live state writes are best-effort
+        except Exception:
             _logger.warning("session live-state write failed (%s)", description, exc_info=True)
             if on_failure is not None:
                 on_failure()
