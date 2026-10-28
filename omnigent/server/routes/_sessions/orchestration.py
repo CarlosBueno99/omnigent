@@ -12355,9 +12355,9 @@ async def _child_session_summaries_from_conversations(
         return []
     child_ids = [child.id for child in children]
     agent_ids = list({child.agent_id for child in children if child.agent_id is not None})
-    message_items_by_child, agents_by_id = await asyncio.gather(
+    message_items_by_child, agent_names = await asyncio.gather(
         asyncio.to_thread(conv_store.list_latest_message_items_for_conversations, child_ids, 10),
-        asyncio.to_thread(agent_store.get_many, agent_ids),
+        asyncio.to_thread(agent_store.get_names, agent_ids),
     )
     previews = {
         child_id: _latest_message_preview(message_items)
@@ -12368,9 +12368,7 @@ async def _child_session_summaries_from_conversations(
             child,
             parent_session_id,
             previews.get(child.id),
-            agent_name=(
-                agents_by_id[child.agent_id].name if child.agent_id in agents_by_id else None
-            ),
+            agent_name=agent_names.get(child.agent_id) if child.agent_id else None,
         )
         for child in children
     ]

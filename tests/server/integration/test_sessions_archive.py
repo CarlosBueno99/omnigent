@@ -408,27 +408,43 @@ async def test_archive_idle_session(
     mock_stop.assert_not_awaited()
 
 
+_HOST_ID = "a1b2c3d4e5f61234567890abcdef0123"
+_PARENT_RUNNER_ID = "b1b2c3d4e5f61234567890abcdef0123"
+_CHILD_RUNNER_ID = "c1b2c3d4e5f61234567890abcdef0123"
+
+
 @pytest.mark.parametrize(
-    ("closed", "expect_release"),
+    ("closed", "child_runner_id", "stop_acknowledged", "expect_stop", "expect_release"),
     [
-        pytest.param(True, True, id="closed"),
-        pytest.param(False, False, id="archived-only"),
+        pytest.param(True, None, True, False, True, id="closed-unbound"),
+        pytest.param(True, _PARENT_RUNNER_ID, True, False, True, id="closed-shared-runner"),
+        pytest.param(True, _CHILD_RUNNER_ID, True, True, False, id="closed-owned-runner-stopped"),
+        pytest.param(True, _CHILD_RUNNER_ID, False, True, True, id="closed-owned-stop-failed"),
+        pytest.param(False, _PARENT_RUNNER_ID, True, False, False, id="archived-only"),
     ],
 )
 async def test_archive_idle_closed_child_releases_runner_session(
     client: httpx.AsyncClient,
     db_uri: str,
     closed: bool,
+    child_runner_id: str | None,
+    stop_acknowledged: bool,
+    expect_stop: bool,
     expect_release: bool,
 ) -> None:
-    """Closing an idle shared-runner child deletes its runner session; archiving alone does not."""
+    """Closing an idle child deletes its runner session unless its own runner was stopped."""
     session = await create_test_session(client, name="archive-closed-child")
     conv_store = SqlAlchemyConversationStore(db_uri)
+    conv_store.set_host_id(session["id"], _HOST_ID, workspace="/tmp/archive-ws")
+    conv_store.set_runner_id(session["id"], _PARENT_RUNNER_ID)
     child = conv_store.create_conversation(
         kind="sub_agent",
         title="LeakRepro",
         parent_conversation_id=session["id"],
         agent_id=session["agent_id"],
+        host_id=_HOST_ID if child_runner_id else None,
+        workspace="/tmp/archive-ws" if child_runner_id else None,
+        runner_id=child_runner_id,
     )
     runner_requests: list[tuple[str, str]] = []
 
@@ -439,20 +455,26 @@ async def test_archive_idle_closed_child_releases_runner_session(
     runner_client = httpx.AsyncClient(
         transport=httpx.MockTransport(_runner), base_url="http://runner"
     )
+    host_stop = AsyncMock(return_value=stop_acknowledged)
     patch_body: dict[str, object] = {"archived": True}
     if closed:
         patch_body["title"] = f"LeakRepro:closed:{child.id}"
         patch_body["labels"] = {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE}
     try:
-        with patch.object(
-            _sessions_facade, "_get_runner_client", AsyncMock(return_value=runner_client)
+        with (
+            patch.object(
+                _sessions_facade, "_get_runner_client", AsyncMock(return_value=runner_client)
+            ),
+            patch.object(_sessions_facade, "_stop_session_host_runner", host_stop),
         ):
             resp = await client.patch(f"/v1/sessions/{child.id}", json=patch_body)
             await _drain_detached_stops()
     finally:
         await runner_client.aclose()
+        _sessions_common._intentional_stop_sessions.pop(child.id, None)
     assert resp.status_code == 200
     assert resp.json()["archived"] is True
+    assert host_stop.await_count == (1 if expect_stop else 0)
     release = ("DELETE", f"/v1/sessions/{child.id}")
     assert (release in runner_requests) is expect_release
 
