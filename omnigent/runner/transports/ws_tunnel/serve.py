@@ -40,9 +40,11 @@ from omnigent.cli_invocation import cli_invocation
 from omnigent.debug_logging import debug_event, runner_primary_session_id
 from omnigent.runner.identity import (
     OMNIGENT_INTERNAL_WS_ORIGIN,
+    RUNNER_CREDENTIAL_PENDING_WAIT_S,
     RUNNER_SIGN_IN_PENDING_WAIT_S,
     RUNNER_SLICE_KEY_ENV_VAR,
     RUNNER_TUNNEL_TOKEN_HEADER,
+    mark_credential_pending,
     mark_sign_in_pending,
     touch_connect_marker,
 )
@@ -133,6 +135,9 @@ _REFRESHABLE_HTTP_STATUSES = {401, 403}
 # it reaches the server) and exiting would kill every conversation on the
 # runner. Mirrors the host tunnel's status classification.
 _HTTP_AUTH_REJECTION_FATAL_ATTEMPTS = 3
+# A never-connected runner with no credential to send keeps re-minting for this long
+# before it exits as signed out; a transient mint failure clears within the window.
+_NO_CREDENTIAL_FATAL_WINDOW_S = RUNNER_CREDENTIAL_PENDING_WAIT_S
 # Routine server-initiated recycles, NOT errors: 1012 "service restart" and
 # 1001 "going away" (and a 502 upgrade rejection) are how the Databricks Apps
 # ingress cycles long-lived WebSockets out from under a healthy app. The
@@ -458,6 +463,8 @@ async def serve_tunnel(
     login_redirect_streak = 0
     # Consecutive HTTP 401/403 rejections; reset by a successful upgrade.
     http_auth_rejection_streak = 0
+    # When the current rejection streak began (``time.monotonic()``).
+    http_auth_rejection_started: float | None = None
     connected_this_attempt = False
     connect_monotonic: float | None = None
     # Debug-log correlation: the attempt ordinal within the current reconnect
@@ -476,14 +483,17 @@ async def serve_tunnel(
         nonlocal ever_connected
         nonlocal login_redirect_streak
         nonlocal http_auth_rejection_streak
+        nonlocal http_auth_rejection_started
         nonlocal connect_monotonic
         record_websocket_connected("runner", reconnect=reconnecting)
         # Tell the launching host's connect watchdog this runner made it.
         touch_connect_marker()
+        mark_credential_pending(runner_id, None)
         connected_this_attempt = True
         ever_connected = True
         login_redirect_streak = 0
         http_auth_rejection_streak = 0
+        http_auth_rejection_started = None
         connect_monotonic = time.monotonic()
 
     # Set by the per-connection suspend watcher (in _serve_tunnel_once) when it
@@ -660,6 +670,7 @@ async def serve_tunnel(
                     raise
                 if not ever_connected and not sign_in_wait_ended:
                     if pending and sign_in_wait_started is None:
+                        mark_credential_pending(runner_id, None)
                         sign_in_wait_started = time.monotonic()
                         mark_sign_in_pending(
                             runner_id, sign_in_wait_started + _SIGN_IN_PENDING_WAIT_S
@@ -699,6 +710,8 @@ async def serve_tunnel(
                                 waited_s=round(waited_s, 1),
                             ),
                         )
+            if auth_token is not None or ever_connected:
+                mark_credential_pending(runner_id, None)
             reconnecting = ever_connected and not renewal_cutover and planned_permit is None
             renewal_cutover = False
             retry_reason = "connection closed cleanly"
@@ -862,9 +875,10 @@ async def serve_tunnel(
                         http_status = _websocket_http_status(exc)
                         if http_status is not None and http_status in _REFRESHABLE_HTTP_STATUSES:
                             http_auth_rejection_streak += 1
-                            if (
-                                not ever_connected
-                                and auth_token is None
+                            if http_auth_rejection_streak == 1:
+                                http_auth_rejection_started = time.monotonic()
+                            no_credential_to_send = (
+                                auth_token is None
                                 and auth_token_factory is not None
                                 and (
                                     not getattr(auth_token_factory, "declined", False)
@@ -872,21 +886,35 @@ async def serve_tunnel(
                                         auth_token_factory, "declined_without_proxy_bearer", False
                                     )
                                 )
+                            )
+                            if not ever_connected and no_credential_to_send:
+                                assert http_auth_rejection_started is not None
+                                mark_credential_pending(
+                                    runner_id,
+                                    http_auth_rejection_started + _NO_CREDENTIAL_FATAL_WINDOW_S,
+                                )
+                            else:
+                                mark_credential_pending(runner_id, None)
+                            if (
+                                not ever_connected
+                                and no_credential_to_send
                                 and http_auth_rejection_streak
                                 >= _HTTP_AUTH_REJECTION_FATAL_ATTEMPTS
                             ):
-                                # Same streak as the rejection below: a transient mint
-                                # failure (factory returned None) still gets the loop-top
-                                # re-mint; only the message names the local cause.
-                                raise RunnerTunnelAuthRejectedError(
-                                    f"{RUNNER_TUNNEL_NO_CREDENTIAL_PREFIX}"
-                                    f"(HTTP {http_status} persisted across "
-                                    f"{http_auth_rejection_streak} unauthenticated attempts; the "
-                                    "credential source returned no token, e.g. the host "
-                                    "credential service's grant expired or was rejected); "
-                                    f"{_reauth_hint(server_url)}"
-                                ) from exc
-                            if (
+                                # Missing tokens keep the original mint-recovery window;
+                                # rejected credentials retain the ordinary fatal streak.
+                                waited_s = time.monotonic() - (http_auth_rejection_started or 0.0)
+                                if waited_s >= _NO_CREDENTIAL_FATAL_WINDOW_S:
+                                    raise RunnerTunnelAuthRejectedError(
+                                        f"{RUNNER_TUNNEL_NO_CREDENTIAL_PREFIX}"
+                                        f"(HTTP {http_status} persisted across "
+                                        f"{http_auth_rejection_streak} unauthenticated attempts "
+                                        f"over {int(waited_s)} s; the credential source returned "
+                                        "no token, "
+                                        "e.g. the host credential service's grant expired or was "
+                                        f"rejected); {_reauth_hint(server_url)}"
+                                    ) from exc
+                            elif (
                                 not ever_connected
                                 and http_auth_rejection_streak
                                 >= _HTTP_AUTH_REJECTION_FATAL_ATTEMPTS
@@ -897,12 +925,7 @@ async def serve_tunnel(
                                     f"{http_auth_rejection_streak} attempts); "
                                     f"{_reauth_hint(server_url)}"
                                 ) from exc
-                            # Invalidate the cached token so the loop-top _refresh_auth_token
-                            # fetches a fresh one on the next attempt. The loop-top call is
-                            # already guarded against transient factory errors (OSError etc.),
-                            # so we don't call the factory directly here. Also clear a
-                            # 5xx-latched mint decline: the rejection proves the server
-                            # requires auth, so the next refresh must re-mint.
+                            # Drop credentials and recoverable mint declines after rejection.
                             await asyncio.to_thread(_prepare_auth_retry, auth_token_factory)
                             retry_reason = f"HTTP {http_status}; retrying with refreshed token"
                             if ever_connected:
@@ -1114,6 +1137,7 @@ async def serve_tunnel(
             if not recycle:
                 delay_s = min(delay_s * 2, _MAX_RECONNECT_DELAY_S)
     finally:
+        mark_credential_pending(runner_id, None)
         # Reap any superseded connection still draining when the loop
         # exits, including on a fatal auth or protocol rejection.
         await _drain_superseded(cancel=True)
