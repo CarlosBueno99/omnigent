@@ -359,11 +359,10 @@ def test_inbox_lists_the_prompt_its_badge_counts_after_restart_without_runner(
     request: pytest.FixtureRequest,
     live_server: str,
     mock_llm_server_url: str,
-    tmp_path_factory: pytest.TempPathFactory,
     _recover_shared_runner: Callable[[], None],
 ) -> None:
     """The Inbox badge and Needs response tag must not count a prompt the Inbox cannot list."""
-    respawned_runner = _ensure_runner_online(live_server, tmp_path_factory)
+    _recover_shared_runner()
     restart = _server_state.get("restart_server")
     if not callable(restart):
         pytest.skip("requires the locally spawned restartable server")
@@ -456,10 +455,3 @@ def test_inbox_lists_the_prompt_its_badge_counts_after_restart_without_runner(
     finally:
         _recover_shared_runner()
         httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
-        if respawned_runner is not None:
-            respawned_runner.terminate()
-            try:
-                respawned_runner.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                respawned_runner.kill()
-                respawned_runner.wait(timeout=5)
