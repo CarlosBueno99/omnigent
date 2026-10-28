@@ -28,6 +28,7 @@ from omnigent.server.routes._sessions import orchestration as _sessions_orchestr
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
 )
+from omnigent.util.session_lifecycle import CLOSED_LABEL_KEY, CLOSED_LABEL_VALUE
 from tests.server.helpers import create_test_session
 
 pytestmark = pytest.mark.asyncio
@@ -405,6 +406,55 @@ async def test_archive_idle_session(
     assert resp.status_code == 200
     assert resp.json()["archived"] is True
     mock_stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("closed", "expect_release"),
+    [
+        pytest.param(True, True, id="closed"),
+        pytest.param(False, False, id="archived-only"),
+    ],
+)
+async def test_archive_idle_closed_child_releases_runner_session(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    closed: bool,
+    expect_release: bool,
+) -> None:
+    """Closing an idle shared-runner child deletes its runner session; archiving alone does not."""
+    session = await create_test_session(client, name="archive-closed-child")
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    child = conv_store.create_conversation(
+        kind="sub_agent",
+        title="LeakRepro",
+        parent_conversation_id=session["id"],
+        agent_id=session["agent_id"],
+    )
+    runner_requests: list[tuple[str, str]] = []
+
+    def _runner(request: httpx.Request) -> httpx.Response:
+        runner_requests.append((request.method, request.url.path))
+        return httpx.Response(200, json={})
+
+    runner_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(_runner), base_url="http://runner"
+    )
+    patch_body: dict[str, object] = {"archived": True}
+    if closed:
+        patch_body["title"] = f"LeakRepro:closed:{child.id}"
+        patch_body["labels"] = {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE}
+    try:
+        with patch.object(
+            _sessions_facade, "_get_runner_client", AsyncMock(return_value=runner_client)
+        ):
+            resp = await client.patch(f"/v1/sessions/{child.id}", json=patch_body)
+            await _drain_detached_stops()
+    finally:
+        await runner_client.aclose()
+    assert resp.status_code == 200
+    assert resp.json()["archived"] is True
+    release = ("DELETE", f"/v1/sessions/{child.id}")
+    assert (release in runner_requests) is expect_release
 
 
 async def test_unarchive_skips_stop(

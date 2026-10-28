@@ -431,6 +431,7 @@ from omnigent.telemetry.surface import classify_surface as _classify_surface
 from omnigent.util.session_lifecycle import (
     CLOSED_LABEL_KEY,
     CLOSED_LABEL_VALUE,
+    is_session_closed,
     labels_with_closed_status,
     title_without_closed_marker,
 )
@@ -943,7 +944,9 @@ async def _archive_stop(
     alone leaves a host-spawned session's dedicated runner connected,
     which keeps ``runner_online`` true and hangs a later message on
     "working" against a dead pane — the failure
-    :func:`_stop_session_host_runner` exists to prevent.
+    :func:`_stop_session_host_runner` exists to prevent. A closed
+    session whose runner stays up instead has its runner session
+    deleted, which frees its terminal and harness bridge.
 
     Every step is best-effort: a wedged, offline, or already-stopped
     runner must not leave the session un-archived.
@@ -1001,11 +1004,12 @@ async def _archive_stop(
     _pending_archive_stops.pop(session_id, None)
 
     await _facade._best_effort_stop(session_id, conversation_store, runner_router)
+    runner_stopped = False
     if conv.host_id and conv.runner_id:
         try:
             # A sub-agent riding an ancestor's runner leaves it up for the owner.
             if await _owns_host_runner(conv, conversation_store):
-                await _stop_host_runner_intentionally(
+                runner_stopped = await _stop_host_runner_intentionally(
                     session_id,
                     conv.host_id,
                     conv.runner_id,
@@ -1015,6 +1019,23 @@ async def _archive_stop(
         except Exception:  # noqa: BLE001
             _logger.debug(
                 "Archive host-runner teardown failed for %s",
+                session_id,
+                exc_info=True,
+                extra={"session_id": session_id},
+            )
+    if not runner_stopped and is_session_closed(conv.labels, conv.title):
+        # An idle closed session gets no stop, and a shared runner stays up, so
+        # release the session's own harness resources; the transcript is kept.
+        try:
+            runner_client = await _get_runner_client(session_id, runner_router)
+            if runner_client is not None:
+                cleanup_resp = await runner_client.delete(
+                    f"/v1/sessions/{session_id}", timeout=60.0
+                )
+                cleanup_resp.raise_for_status()
+        except Exception:  # noqa: BLE001
+            _logger.warning(
+                "Archive resource release failed for closed session %s",
                 session_id,
                 exc_info=True,
                 extra={"session_id": session_id},
