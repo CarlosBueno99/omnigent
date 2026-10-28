@@ -68,13 +68,17 @@ def _contain_host_codex_home_links(policy: SandboxPolicy, codex_home: Path) -> S
     if memories.is_symlink():
         memories.unlink()
     login = codex_home / "auth.json"
-    if not (login.is_symlink() and login.is_file()):
+    if not login.is_symlink():
+        return policy
+    host_login = login.parent / login.readlink()
+    host_login = host_login.parent.resolve() / host_login.name
+    # A sandboxed session may have replaced the host login with a link; never grant its target.
+    if host_login.is_symlink() or not host_login.is_file():
         return policy
     # Codex refreshes the login in place; link straight to the granted file.
-    target = login.resolve()
     login.unlink()
-    login.symlink_to(target)
-    return with_additional_write_files(policy, [target])
+    login.symlink_to(host_login)
+    return with_additional_write_files(policy, [host_login])
 
 
 def prepare_codex_catalog_probe(

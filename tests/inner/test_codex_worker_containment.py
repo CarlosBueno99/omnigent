@@ -218,17 +218,22 @@ def test_worker_grants_only_selected_skills_directory_read_only(
         worker.close()
 
 
-@pytest.mark.parametrize("linked_codex_home", [False, True])
-def test_worker_grants_host_login_and_detaches_host_memories(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, linked_codex_home: bool
+@pytest.mark.parametrize("layout", ["plain", "linked_codex_home", "linked_login"])
+def test_worker_grants_plain_host_login_and_detaches_host_memories(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, layout: str
 ) -> None:
-    """Only the bridged login file is granted; the shared memories DB stays on the host."""
+    """Only a plain host login file is granted; the shared memories DB stays on the host."""
     host_codex = tmp_path / "host-codex"
     host_codex.mkdir()
-    (host_codex / "auth.json").write_text('{"auth_mode": "chatgpt"}')
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"auth_mode": "chatgpt"}')
+    if layout == "linked_login":
+        (host_codex / "auth.json").symlink_to(outside)
+    else:
+        (host_codex / "auth.json").write_text('{"auth_mode": "chatgpt"}')
     (host_codex / "memories_1.sqlite").write_bytes(b"host memories")
     source = host_codex
-    if linked_codex_home:
+    if layout == "linked_codex_home":
         source = tmp_path / "dotfiles-codex"
         source.symlink_to(host_codex)
     codex_home = tmp_path / "codex-home"
@@ -256,14 +261,16 @@ def test_worker_grants_host_login_and_detaches_host_memories(
         spawn_env_names=["PATH", "CODEX_HOME"],
     )
     try:
-        login = (host_codex / "auth.json").resolve()
+        login = host_codex.resolve() / "auth.json"
+        granted = [] if layout == "linked_login" else [login]
         for policy in (
             backend.wrap_launcher_argv.call_args.args[1],
             create_launcher.call_args.args[1],
         ):
-            assert policy.write_files == [login]
+            assert policy.write_files == granted
             assert policy.write_roots == [codex_home.resolve()]
-        assert os.readlink(codex_home / "auth.json") == str(login)
+        if granted:
+            assert os.readlink(codex_home / "auth.json") == str(login)
         assert not os.path.lexists(codex_home / "memories_1.sqlite")
         assert (host_codex / "memories_1.sqlite").read_bytes() == b"host memories"
     finally:
@@ -770,7 +777,8 @@ async def test_real_bwrap_worker_refreshes_host_login_without_host_memories(
         "login = home / 'auth.json'\n"
         "login.write_text(json.dumps({**json.loads(login.read_text()), 'refreshed': True}))\n"
         "memories = sqlite3.connect(home / 'memories_1.sqlite')\n"
-        "memories.execute('PRAGMA journal_mode=WAL')\n"
+        "mode = memories.execute('PRAGMA journal_mode=WAL').fetchone()[0]\n"
+        "pathlib.Path('journal-mode').write_text(mode)\n"
         "memories.execute('CREATE TABLE session_memory (note TEXT)')\n"
         "memories.commit()\n"
         "for line in sys.stdin:\n"
@@ -798,6 +806,7 @@ async def test_real_bwrap_worker_refreshes_host_login_without_host_memories(
     finally:
         await session.close()
 
+    assert (workspace / "journal-mode").read_text() == "wal"
     assert json.loads((host_codex / "auth.json").read_text()) == {
         "auth_mode": "chatgpt",
         "refreshed": True,
