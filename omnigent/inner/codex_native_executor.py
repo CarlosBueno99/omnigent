@@ -765,7 +765,7 @@ class CodexNativeExecutor(Executor):
                         "turn/interrupt",
                         {"threadId": state.thread_id, "turnId": ""},
                     )
-                except Exception:  # the local cancel above already took effect.
+                except Exception:
                     _logger.warning("Codex native MCP startup interrupt failed", exc_info=True)
                 _logger.info("Codex native MCP startup cancelled: %s", ", ".join(pending))
             if state.active_turn_id is not None:
@@ -843,7 +843,9 @@ class CodexNativeExecutor(Executor):
             )
         )
         if not input_items:
-            yield ExecutorError(message="Codex native turn had no user input to send")
+            yield ExecutorError(
+                message="Codex native turn had no user input to send", undelivered=True
+            )
             return
         # Wait for the bridge to boot OUTSIDE the injection lock. Poll quickly
         # during the expected startup window, then back off. Once state exists,
