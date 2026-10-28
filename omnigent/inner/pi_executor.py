@@ -57,9 +57,11 @@ from typing import Any, NotRequired, Protocol, TypeAlias, TypedDict, cast
 from urllib.parse import urlparse as _urlparse
 
 from omnigent.databricks_ai_gateway import PI_AGENT, gateway_attribution_headers, is_ug_route
+from omnigent.debug_logging import debug_event
 from omnigent.harnesses.pi_native.credentials import (
     _databricks_workspace_url_for_gateway,
     _is_databricks_ai_gateway_url,
+    global_pi_agent_dir,
 )
 from omnigent.inner.agent_env import clean_agent_env
 from omnigent.inner.native_attachments import parse_data_uri
@@ -68,11 +70,13 @@ from omnigent.models import model_catalog
 from omnigent.models.model_metadata import ModelWireAPI
 from omnigent.models.pi_model_compatibility import (
     SYSTEM_AI_RESPONSES_KEYWORDS,
+    PiModelEntry,
     databricks_model_aliases,
     enrich_databricks_model_catalog,
     pi_generic_model_json_entry,
     pi_model_is_reasoning,
     pi_model_json_entry,
+    pi_model_with_thinking_defaults,
     unsupported_in_pi,
 )
 from omnigent.onboarding.provider_config import CHAT_WIRE_API, RESPONSES_WIRE_API
@@ -115,6 +119,9 @@ _GATEWAY_AUTH_REFRESH_MS = 900_000
 # Leave time for the bridge round trip within Pi's 10-second command deadline.
 _GATEWAY_AUTH_TIMEOUT_S = 7
 _GATEWAY_BRIDGE_TIMEOUT_S = 8
+# Tool arguments can include files; match the other adapters' bounded stream limit.
+_TOOL_REQUEST_LIMIT = 16 * 1024 * 1024
+_TOOL_REQUEST_DRAIN_TIMEOUT_S = 2
 
 
 class _GatewayAuthError(OSError):
@@ -297,6 +304,7 @@ class _ToolServer:
             self._handle_client,
             "127.0.0.1",
             0,
+            limit=_TOOL_REQUEST_LIMIT,
         )
         addr = self._server.sockets[0].getsockname()
         self.port = addr[1]
@@ -324,7 +332,31 @@ class _ToolServer:
         self._clients.add(task)
         try:
             while True:
-                raw = await reader.readline()
+                try:
+                    raw = await reader.readline()
+                except ValueError:
+                    logger.warning(
+                        "Pi tool request exceeded the frame limit",
+                        extra=debug_event(
+                            "pi_tool_request_rejected",
+                            request_limit_bytes=_TOOL_REQUEST_LIMIT,
+                        ),
+                    )
+                    writer.write(
+                        json.dumps(
+                            {"error": f"tool request exceeds {_TOOL_REQUEST_LIMIT}-byte limit"}
+                        ).encode()
+                        + b"\n"
+                    )
+                    await writer.drain()
+                    writer.write_eof()
+                    # Unread input can reset the socket and discard the error response.
+                    with contextlib.suppress(TimeoutError):
+                        async with asyncio.timeout(_TOOL_REQUEST_DRAIN_TIMEOUT_S):
+                            while chunk := await reader.read(64 * 1024):
+                                if b"\n" in chunk:
+                                    break
+                    break
                 if not raw:
                     break
                 line = raw.decode("utf-8", errors="replace").strip()
@@ -869,7 +901,10 @@ def _build_models_json(
             registered_model = replace(catalog_model, id=model)
         # ``JsonObject`` is the open bag this builder assembles; a TypedDict is
         # not assignable to it (dict value types are invariant), so copy.
-        entry: _JsonObject = dict(pi_model_json_entry(registered_model))
+        model_entry: PiModelEntry = pi_model_json_entry(registered_model)
+        if provider_name == "databricks-anthropic":
+            model_entry = pi_model_with_thinking_defaults(model_entry)
+        entry: _JsonObject = dict(model_entry)
         provider_models[provider_name].append(entry)
     config: _PiModelsConfig = {
         "providers": {
@@ -964,11 +999,17 @@ def _build_models_json(
                 url == provider["baseUrl"] and not _is_databricks_gateway_base_url(url)
                 for url in (base_urls or {}).values()
             ):
-                entry = dict(pi_generic_model_json_entry(model))
+                model_entry = pi_generic_model_json_entry(model)
             else:
-                entry = {"id": model, "input": ["text", "image"]}
-                if pi_model_is_reasoning(model):
-                    entry["reasoning"] = True
+                model_entry = {"id": model, "input": ["text", "image"]}
+                if pi_model_is_reasoning(model) or (
+                    provider["api"] == "anthropic-messages"
+                    and model_catalog.model_family_token(model) == "claude"
+                ):
+                    model_entry["reasoning"] = True
+            if provider["api"] == "anthropic-messages":
+                model_entry = pi_model_with_thinking_defaults(model_entry)
+            entry = dict(model_entry)
             provider["models"] = [*provider["models"], entry]
     for provider_config in config["providers"].values():
         if _is_databricks_ai_gateway_url(provider_config["baseUrl"]):
@@ -2568,6 +2609,9 @@ class PiExecutor(Executor):
             prepare_managed_pi_agent_dir(
                 pathlib.Path(tmp_dir),
                 overlay=self._retry_policy.pi.settings(),
+                global_agent_dir=global_pi_agent_dir(
+                    env=self._env, workspace=pathlib.Path(self._cwd) if self._cwd else None
+                ),
             )
             from omnigent.inner.pi_gateway import pi_gateway_extension_args
 
