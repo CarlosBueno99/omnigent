@@ -286,7 +286,7 @@ function connectContext(session, overrides = {}) {
 }
 
 describe("runSshConnect", () => {
-  it("holds the laptop's busy ports, forwards the CLI's port before opening the link, then starts the host", async () => {
+  it("holds the laptop's busy ports, takes the CLI's port before it starts, then starts the host", async () => {
     const session = fakeSession({
       logins: [{ lines: ["Signing in", authorizeLink(8021)], code: 0 }],
     });
@@ -304,8 +304,8 @@ describe("runSshConnect", () => {
     assert.deepEqual(session.calls, [
       "open",
       "holdRemote 8020",
-      "exec login",
       "forwardLocal 8021",
+      "exec login",
       `open-browser ${authorizeLink(8021)}`,
       "cancelLocal 8021",
       "releaseRemote 8020",
@@ -320,7 +320,7 @@ describe("runSshConnect", () => {
     ]);
   });
 
-  it("opens a server's own sign-in link without forwarding anything", async () => {
+  it("opens a server's own sign-in link as is", async () => {
     const link = `${SERVER}/auth/cli?t=1`;
     const session = fakeSession({
       logins: [
@@ -334,7 +334,11 @@ describe("runSshConnect", () => {
 
     assert.equal((await runSshConnect(ctx)).ok, true);
     assert.deepEqual(opened, [link]);
-    assert.ok(!session.calls.some((call) => call.startsWith("forwardLocal")));
+    // Only the port taken up front, released once sign-in ends.
+    assert.deepEqual(
+      session.calls.filter((call) => /^(forward|cancel)Local/.test(call)),
+      ["forwardLocal 8020", "cancelLocal 8020"],
+    );
     assert.ok(statuses.includes("waiting-for-browser"));
   });
 
@@ -348,12 +352,10 @@ describe("runSshConnect", () => {
     const { ctx, statuses } = connectContext(session);
 
     assert.equal((await runSshConnect(ctx)).ok, true);
-    assert.deepEqual(session.calls.slice(0, 4), [
-      "open",
-      "exec login",
-      "exec install stdin=INSTALLER",
-      "exec login",
-    ]);
+    assert.deepEqual(
+      session.calls.filter((call) => call.startsWith("exec")),
+      ["exec login", "exec install stdin=INSTALLER", "exec login", "exec host"],
+    );
     assert.ok(statuses.includes("installing"));
   });
 
@@ -369,9 +371,36 @@ describe("runSshConnect", () => {
     assert.equal(session.calls.at(-1), "close");
   });
 
-  it("stops sign-in when the link's port is busy on the laptop", async () => {
+  it("keeps the port it took when another tool forwards the CLI's port mid sign-in", async () => {
     let probes = 0;
     const session = fakeSession({ logins: [{ lines: [authorizeLink(8020)], code: 0 }] });
+    const { ctx, opened } = connectContext(session, {
+      // Free during the busy-port scan, then held (by this connect) when the link arrives.
+      isPortFree: async () => {
+        probes += 1;
+        return probes <= 21;
+      },
+    });
+
+    assert.equal((await runSshConnect(ctx)).ok, true);
+    assert.deepEqual(opened, [authorizeLink(8020)]);
+  });
+
+  it("moves the forward when the CLI skips a port taken on the remote machine", async () => {
+    const session = fakeSession({ logins: [{ lines: [authorizeLink(8021)], code: 0 }] });
+    const { ctx, opened } = connectContext(session);
+
+    assert.equal((await runSshConnect(ctx)).ok, true);
+    assert.deepEqual(opened, [authorizeLink(8021)]);
+    assert.deepEqual(
+      session.calls.filter((call) => /^(forward|cancel)Local/.test(call)),
+      ["forwardLocal 8020", "cancelLocal 8020", "forwardLocal 8021", "cancelLocal 8021"],
+    );
+  });
+
+  it("stops sign-in when the CLI's moved-to port is busy on the laptop", async () => {
+    let probes = 0;
+    const session = fakeSession({ logins: [{ lines: [authorizeLink(8021)], code: 0 }] });
     const { ctx, opened } = connectContext(session, {
       // Free during the busy-port scan, taken by the time the link arrives.
       isPortFree: async () => {
@@ -383,7 +412,7 @@ describe("runSshConnect", () => {
     const result = await runSshConnect(ctx);
 
     assert.equal(result.ok, false);
-    assert.match(result.error, /Port 8020 became busy/);
+    assert.match(result.error, /Port 8021 became busy/);
     assert.deepEqual(opened, []);
     assert.ok(session.calls.includes("cancel-exec"));
   });

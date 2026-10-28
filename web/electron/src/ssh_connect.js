@@ -548,10 +548,13 @@ async function signIn(ctx) {
   // A port the remote machine already uses can't be held, but the CLI skips it anyway.
   const holds = await Promise.all(busy.map((port) => session.holdRemote(port)));
   const held = busy.filter((_, index) => holds[index].code === 0);
+  // Take the port the CLI should pick before it starts: tools that forward new
+  // remote listeners to this computer (Arca Companion, VS Code) would grab it first.
+  const expected = ports.find((_, index) => free[index]);
+  let forwarded = (await session.forwardLocal(expected)).code === 0 ? expected : null;
 
   onStatus({ step: "signing-in" });
   const notes = [];
-  let forwarded = null;
   let opened = false;
   let problem = null;
   let queue = Promise.resolve();
@@ -567,7 +570,12 @@ async function signIn(ctx) {
       if (clean && !/https?:\/\//.test(clean)) notes.push(clean);
       return;
     }
-    if (link.port !== null) {
+    if (link.port !== null && link.port !== forwarded) {
+      // The remote machine had the expected port in use, so the CLI moved on.
+      if (forwarded !== null) {
+        await session.cancelLocal(forwarded);
+        forwarded = null;
+      }
       if (!(await portFree(link.port))) {
         problem = `Port ${link.port} became busy on this computer during sign-in. Try again.`;
         run.cancel();
