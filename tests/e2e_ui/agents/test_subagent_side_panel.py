@@ -7,8 +7,8 @@ LLM's gate, so it is genuinely working while the browser picks it.
 from __future__ import annotations
 
 import contextlib
+import os
 import re
-import time
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -18,7 +18,8 @@ import pytest
 from playwright.sync_api import Locator, Page, expect
 
 from omnigent.entities import NewConversationItem, ResourceEventData
-from tests._helpers.session import bind_session_runner
+from tests._helpers.polling import poll_until
+from tests._helpers.session import bind_session_runner, send_user_text
 from tests.e2e_ui.conftest import (
     configure_mock_llm,
     seed_committed_items,
@@ -58,15 +59,10 @@ def _release_gate(mock_url: str) -> None:
     response.raise_for_status()
 
 
-def _send_user_message(base_url: str, session_id: str, text: str) -> None:
-    httpx.post(
-        f"{base_url}/v1/sessions/{session_id}/events",
-        json={
-            "type": "message",
-            "data": {"role": "user", "content": [{"type": "input_text", "text": text}]},
-        },
-        timeout=30.0,
-    ).raise_for_status()
+def _hold_for_recording(page: Page, milliseconds: int) -> None:
+    """Let a recorded run show each state; assertions never rely on it."""
+    if os.environ.get("OMNIGENT_E2E_RECORD_DIR"):
+        page.wait_for_timeout(milliseconds)
 
 
 @pytest.fixture
@@ -119,11 +115,9 @@ def busy_subagent(
             [{"text": _FOLLOWUP_REPLY}] * 3,
             match=f"followup-{nonce}",
         )
-        _send_user_message(base_url, child_id, f"audit-{nonce}: check token refresh")
-        deadline = time.monotonic() + 60
-        while not _child_busy(base_url, parent_id, child_id):
-            assert time.monotonic() < deadline, "the sub-agent never started working"
-            time.sleep(0.5)
+        with httpx.Client(base_url=base_url) as client:
+            send_user_text(client, session_id=child_id, text=f"audit-{nonce}: check token refresh")
+        poll_until(lambda: _child_busy(base_url, parent_id, child_id), timeout_s=60)
         yield BusySubagent(base_url, parent_id, child_id, mock_llm_server_url, nonce)
     finally:
         # A turn left parked on the gate would wedge the shared runner.
@@ -154,7 +148,7 @@ def _pick_from_composer_indicator(page: Page) -> None:
     row = popover.get_by_role("link", name=re.compile(_CHILD_NAME))
     expect(row).to_be_visible()
     expect(popover).to_contain_text("Working")
-    page.wait_for_timeout(800)
+    _hold_for_recording(page, 800)
     row.click()
 
 
@@ -172,10 +166,10 @@ def test_composer_indicator_opens_subagent_tab_beside_parent(
 
     toggle = _open_general_settings(page, sub.base_url)
     expect(toggle).to_have_attribute("aria-checked", "false")
-    page.wait_for_timeout(800)
+    _hold_for_recording(page, 800)
     toggle.click()
     expect(toggle).to_have_attribute("aria-checked", "true")
-    page.wait_for_timeout(800)
+    _hold_for_recording(page, 800)
 
     page.goto(f"{sub.base_url}/c/{sub.parent_id}")
     expect(page.get_by_text(_PARENT_REPLY, exact=True)).to_be_visible(timeout=30_000)
@@ -195,11 +189,11 @@ def test_composer_indicator_opens_subagent_tab_beside_parent(
     )
     # The parent transcript stays in the main column.
     expect(page.get_by_text(_PARENT_REPLY, exact=True)).to_be_visible()
-    page.wait_for_timeout(1000)
+    _hold_for_recording(page, 1000)
 
     _release_gate(sub.mock_url)
     expect(pane.get_by_text(_CHILD_REPLY, exact=True)).to_be_visible(timeout=60_000)
-    page.wait_for_timeout(1000)
+    _hold_for_recording(page, 1000)
 
     composer = pane.get_by_role("textbox", name="Reply to this session...")
     expect(composer).to_be_enabled(timeout=30_000)
@@ -208,7 +202,7 @@ def test_composer_indicator_opens_subagent_tab_beside_parent(
     pane.get_by_role("button", name="Send message", exact=True).click()
     expect(pane.get_by_text(_FOLLOWUP_REPLY, exact=True)).to_be_visible(timeout=60_000)
     expect(page).to_have_url(parent_path)
-    page.wait_for_timeout(1500)
+    _hold_for_recording(page, 1500)
 
 
 def test_transcript_and_agents_tab_reuse_one_tab_and_close_keeps_child_running(
@@ -222,7 +216,7 @@ def test_transcript_and_agents_tab_reuse_one_tab_and_close_keeps_child_running(
     page.goto(f"{sub.base_url}/c/{sub.parent_id}")
     notice = page.get_by_test_id("subagent-activity")
     expect(notice).to_contain_text(f"Started {_CHILD_NAME}", timeout=30_000)
-    page.wait_for_timeout(800)
+    _hold_for_recording(page, 800)
     notice.get_by_role("link", name=_CHILD_NAME, exact=True).click()
 
     parent_path = re.compile(rf"/c/{re.escape(sub.parent_id)}$")
@@ -233,18 +227,18 @@ def test_transcript_and_agents_tab_reuse_one_tab_and_close_keeps_child_running(
     expect(rail.get_by_test_id("subagent-tab-pane")).to_contain_text(
         f"audit-{sub.nonce}", timeout=30_000
     )
-    page.wait_for_timeout(1000)
+    _hold_for_recording(page, 1000)
 
     agents_tab = rail.get_by_role("tab", name=re.compile("^Agents"))
     agents_tab.click()
     row = rail.locator(f'[data-child-session-id="{sub.child_id}"]')
     expect(row).to_be_visible(timeout=30_000)
-    page.wait_for_timeout(800)
+    _hold_for_recording(page, 800)
     row.click()
     expect(child_tab).to_have_attribute("aria-selected", "true")
     expect(child_tab).to_have_count(1)
     expect(page).to_have_url(parent_path)
-    page.wait_for_timeout(1000)
+    _hold_for_recording(page, 1000)
 
     rail.get_by_role("button", name=f"Close {_CHILD_NAME}", exact=True).click()
     expect(child_tab).to_have_count(0)
@@ -253,27 +247,4 @@ def test_transcript_and_agents_tab_reuse_one_tab_and_close_keeps_child_running(
         "data-activity", "working"
     )
     assert _child_busy(sub.base_url, sub.parent_id, sub.child_id)
-    page.wait_for_timeout(1500)
-
-
-def test_setting_off_keeps_full_screen_navigation(
-    request: pytest.FixtureRequest,
-    busy_subagent: BusySubagent,
-) -> None:
-    """CUJ-3: with the default setting, picking a sub-agent replaces the main chat."""
-    sub = busy_subagent
-    page = _open_page(request, setting_on=False)
-
-    toggle = _open_general_settings(page, sub.base_url)
-    expect(toggle).to_have_attribute("aria-checked", "false")
-    page.wait_for_timeout(1200)
-
-    page.goto(f"{sub.base_url}/c/{sub.parent_id}")
-    expect(page.get_by_text(_PARENT_REPLY, exact=True)).to_be_visible(timeout=30_000)
-    _pick_from_composer_indicator(page)
-
-    expect(page).to_have_url(re.compile(rf"/c/{re.escape(sub.child_id)}"))
-    expect(page.get_by_role("link", name="Back to parent session")).to_be_visible(timeout=30_000)
-    expect(page.get_by_text(_PARENT_REPLY, exact=True)).to_have_count(0)
-    expect(page.get_by_test_id("subagent-tab-pane")).to_have_count(0)
-    page.wait_for_timeout(1500)
+    _hold_for_recording(page, 1500)

@@ -163,6 +163,10 @@ beforeEach(() => {
   } as never);
 });
 
+function PathProbe() {
+  return <div data-testid="page">{useLocation().pathname}</div>;
+}
+
 describe("click sub-agent in rail (real SubagentsPanel)", () => {
   it("keeps the Agents tab and rail width across root, child, and sibling navigation", async () => {
     const children = [
@@ -424,9 +428,6 @@ describe("click sub-agent in rail (real SubagentsPanel)", () => {
       kind: "sub_agent",
     });
     writeSessionWorkspaceState("conv_root", { rightRailTab: "subagents" });
-    function PathProbe() {
-      return <div data-testid="page">{useLocation().pathname}</div>;
-    }
     render(
       <QueryClientProvider client={qc}>
         <SidebarDataProvider>

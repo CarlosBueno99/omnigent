@@ -65,12 +65,13 @@ vi.mock("@/hooks/useSession", () => ({
 }));
 
 function CurrentPath() {
-  return <output data-testid="current-path">{useLocation().pathname}</output>;
+  const location = useLocation();
+  return <output data-testid="current-path">{location.pathname + location.search}</output>;
 }
 
-function renderGraph(opener: (id: string) => boolean) {
+function renderGraph(opener: (id: string) => boolean, initialEntry = "/c/conv_root") {
   render(
-    <MemoryRouter initialEntries={["/c/conv_root"]}>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <SubagentPanelOpenerContext.Provider value={opener}>
         <SubagentsGraphView conversationId="conv_root" rootSessionId="conv_root" />
       </SubagentPanelOpenerContext.Provider>
@@ -109,10 +110,12 @@ describe("SubagentsGraphView node clicks", () => {
   it("keeps the root node as navigation even with the setting on", () => {
     writeOpenSubagentsInPanel(true);
     const opener = vi.fn(() => true);
-    renderGraph(opener);
+    // Navigating to the root drops the file viewer param, so the URL shows the click landed.
+    renderGraph(opener, "/c/conv_root?file=notes.md");
 
     fireEvent.click(screen.getByRole("button", { name: "conv_root" }));
 
     expect(opener).not.toHaveBeenCalled();
+    expect(screen.getByTestId("current-path").textContent).toBe("/c/conv_root");
   });
 });

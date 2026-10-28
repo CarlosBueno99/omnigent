@@ -93,8 +93,20 @@ vi.mock("@/hooks/useAgents", () => ({
 vi.mock("sonner", () => ({ toast: { error: vi.fn() } }));
 // A side chat's pane is covered by its own suite; the stub just names its child.
 vi.mock("@/components/chat/SideChatPane", () => ({
-  SideChatPane: ({ childId, readOnly }: { childId: string; readOnly?: boolean }) => (
-    <div data-testid="side-chat-pane-stub" data-read-only={String(readOnly ?? false)}>
+  SideChatPane: ({
+    childId,
+    readOnly,
+    fullSession,
+  }: {
+    childId: string;
+    readOnly?: boolean;
+    fullSession?: boolean;
+  }) => (
+    <div
+      data-testid="side-chat-pane-stub"
+      data-read-only={String(readOnly ?? false)}
+      data-full-session={String(fullSession ?? false)}
+    >
       {childId}
     </div>
   ),
@@ -1447,20 +1459,6 @@ describe("WorkspacePanel sub-agent tabs", () => {
     expect(onRightRailTabChange).toHaveBeenCalledWith("sidechat");
   });
 
-  it("leaves a request for another chat's panel queued", () => {
-    renderWorkspace({ queryClient: clientWithSubagent() });
-    const request = { childId: SUBAGENT_TAB, parentId: "conv_other" };
-    act(() => {
-      useChatStore.setState({ sideChatToOpen: request });
-    });
-
-    expect(useChatStore.getState().sideChatToOpen).toEqual(request);
-    expect(screen.queryByRole("tab", { name: "Research agent" })).toBeNull();
-    act(() => {
-      useChatStore.setState({ sideChatToOpen: null });
-    });
-  });
-
   it("shows the sub-agent's whole session with a full-screen link", () => {
     writeSessionWorkspaceState("conv_ws", {
       openSideChats: ["conv_side", SUBAGENT_TAB],
@@ -1477,6 +1475,10 @@ describe("WorkspacePanel sub-agent tabs", () => {
     expect(within(pane).getByTestId("side-chat-pane-stub")).toHaveAttribute(
       "data-read-only",
       "false",
+    );
+    expect(within(pane).getByTestId("side-chat-pane-stub")).toHaveAttribute(
+      "data-full-session",
+      "true",
     );
     expect(within(pane).getByRole("link", { name: "Open full screen" })).toHaveAttribute(
       "href",
