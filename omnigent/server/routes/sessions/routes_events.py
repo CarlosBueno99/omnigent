@@ -163,6 +163,7 @@ from omnigent.server.routes._sessions.common import (
     _INTERRUPT_TYPE,
     _MCP_ELICITATION_TYPE,
     _RETRY_SESSION_TYPE,
+    _RUNNER_STOP_FORWARD_TIMEOUT_S,
     _SLASH_COMMAND_TYPE,
     _SNAPSHOT_RUNNER_TIMEOUT_S,
     _STOP_SESSION_TYPE,
@@ -213,6 +214,7 @@ from omnigent.server.routes._sessions.helpers import (
     _persist_external_subagent_start,
     _persist_policy_deny_sentinel,
     _persist_session_status_error_labels,
+    _post_runner_session_event,
     _prune_session_read_state,
     _publish_btw_sidechat,
     _publish_compaction_completed,
@@ -1772,13 +1774,14 @@ def register_events_routes(
             interrupt_delivered = False
             if runner_client is not None:
                 try:
-                    interrupt_resp = await runner_client.post(
-                        f"/v1/sessions/{target_session_id}/events",
-                        json=interrupt_payload,
-                        timeout=5.0,
+                    interrupt_resp = await _post_runner_session_event(
+                        runner_client,
+                        target_session_id,
+                        interrupt_payload,
+                        timeout_s=_RUNNER_STOP_FORWARD_TIMEOUT_S,
                     )
                     interrupt_delivered = 200 <= interrupt_resp.status_code < 300
-                except (httpx.HTTPError, ConnectionError):
+                except (httpx.HTTPError, ConnectionError, TimeoutError):
                     # WSTunnelTransport raises bare ConnectionError on tunnel close.
                     _logger.exception(
                         "Interrupt forward failed for %r",

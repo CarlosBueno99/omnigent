@@ -17,7 +17,7 @@ import json
 import math
 import threading
 import uuid
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +53,7 @@ from omnigent.stores.conversation_store.sqlalchemy_store import (
 )
 from omnigent.stores.host_store import HostStore
 from omnigent.tools.builtins.load_skill import format_skill_meta_text
+from tests.budgets import budget
 from tests.debug_log_helpers import capture_debug_rows
 from tests.server.helpers import create_test_agent
 
@@ -146,7 +147,7 @@ def _route_to_runner(monkeypatch: pytest.MonkeyPatch, runner: httpx.AsyncClient)
 
 @asynccontextmanager
 async def _runtime_runner(
-    handler: Callable[[httpx.Request], httpx.Response],
+    handler: Callable[[httpx.Request], httpx.Response | Awaitable[httpx.Response]],
 ) -> AsyncIterator[httpx.AsyncClient]:
     """Scope a legacy fixed runner and close its transport even when a test fails."""
     from omnigent.runtime import get_runner_client, set_runner_client
@@ -10043,10 +10044,13 @@ async def test_stop_session_forwards_stop_session_event_to_runner(
         "runner_503",
         # WS tunnel closed mid-POST: a BARE ConnectionError, not an httpx.HTTPError.
         "bare_connection_error",
+        # Runner never answers; the tunnel transport ignores httpx timeouts.
+        "runner_stalled",
     ],
 )
 async def test_stop_session_surfaces_runner_failure_as_error(
     client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
     failure_mode: str,
 ) -> None:
     """
@@ -10065,10 +10069,16 @@ async def test_stop_session_surfaces_runner_failure_as_error(
     RUNNER_UNAVAILABLE 503 rather than leaking a raw 500.
     """
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    from omnigent.server.routes._sessions import helpers
+
+    monkeypatch.setattr(helpers, "_RUNNER_STOP_FORWARD_TIMEOUT_S", 0.05)
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
         """Snapshot GETs pass; the stop POST gets the runner failure."""
         if request.method != "POST":
             return httpx.Response(204)
+        if failure_mode == "runner_stalled":
+            await asyncio.Event().wait()
         if failure_mode == "bare_connection_error":
             # What WSTunnelTransport raises when the tunnel closes mid-request.
             raise ConnectionError("tunnel closed mid-request")
@@ -10087,10 +10097,11 @@ async def test_stop_session_surfaces_runner_failure_as_error(
             },
         )
 
-        resp = await client.post(
-            f"/v1/sessions/{session['id']}/events",
-            json={"type": "stop_session", "data": {}},
-        )
+        async with asyncio.timeout(budget(10)):
+            resp = await client.post(
+                f"/v1/sessions/{session['id']}/events",
+                json={"type": "stop_session", "data": {}},
+            )
 
     # RUNNER_UNAVAILABLE → 503. A 202 here would mean the failure was
     # swallowed and the UI would falsely report success.
@@ -10432,6 +10443,7 @@ async def test_retry_session_keeps_error_actionable_when_runner_is_unavailable(
         "unbound_waiting",
         "runner_lookup_error",
         "runner_unexpected_error",
+        "runner_stalled",
     ],
 )
 async def test_interrupt_forward_failure_lifts_stop_fence(
@@ -10451,11 +10463,15 @@ async def test_interrupt_forward_failure_lifts_stop_fence(
     demonstrably did not land.
     """
     from omnigent.server.routes import sessions as sessions_module
-    from omnigent.server.routes.sessions import _interrupt_fenced_sessions
+    from omnigent.server.routes.sessions import _interrupt_fenced_sessions, routes_events
 
-    def _handler(request: httpx.Request) -> httpx.Response:
+    monkeypatch.setattr(routes_events, "_RUNNER_STOP_FORWARD_TIMEOUT_S", 0.05)
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
         """Fail the interrupt POST; let everything else pass through."""
         if request.method == "POST" and request.url.path.endswith("/events"):
+            if failure_mode == "runner_stalled":
+                await asyncio.Event().wait()
             if failure_mode == "transport_error":
                 raise httpx.ConnectError("runner unreachable")
             if failure_mode == "bare_connection_error":
@@ -10508,10 +10524,11 @@ async def test_interrupt_forward_failure_lifts_stop_fence(
                     json={"type": "interrupt", "data": {}},
                 )
         else:
-            resp = await client.post(
-                f"/v1/sessions/{session_id}/events",
-                json={"type": "interrupt", "data": {}},
-            )
+            async with asyncio.timeout(budget(10)):
+                resp = await client.post(
+                    f"/v1/sessions/{session_id}/events",
+                    json={"type": "interrupt", "data": {}},
+                )
             assert resp.status_code == 503, resp.text
             assert resp.json()["error"]["code"] == "runner_unavailable"
         assert session_id not in _interrupt_fenced_sessions, (
