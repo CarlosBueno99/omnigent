@@ -1090,6 +1090,97 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
     expect(screen.queryByText("Claude has questions")).toBeNull();
   });
 
+  it.each([
+    {
+      name: "select",
+      harness: "Pi",
+      options: [{ label: "Allow" }, { label: "Block" }],
+      isOther: false,
+      value: "Allow",
+      textInput: undefined,
+    },
+    {
+      name: "input",
+      harness: "Pi",
+      options: [],
+      isOther: true,
+      value: "hello world",
+      textInput: undefined,
+    },
+    ...["original note", "Keep as-is", "", "  two\nlines\n"].map((value) => ({
+      name: `editor ${JSON.stringify(value)}`,
+      harness: "Pi",
+      options: [],
+      isOther: true,
+      value,
+      textInput: { default: "original note" },
+    })),
+    {
+      name: "plan choice",
+      harness: "Codex",
+      options: [{ label: "Implement the plan" }, { label: "Keep planning" }],
+      isOther: false,
+      value: "Implement the plan",
+      textInput: undefined,
+    },
+  ])(
+    "submits a $harness $name using its supported inputs",
+    ({ options, isOther, value, harness, textInput }) => {
+      const submitSpy = vi.fn().mockResolvedValue(undefined);
+      useChatStore.setState({ submitApproval: submitSpy } as Partial<
+        ReturnType<typeof useChatStore.getState>
+      >);
+      render(
+        <ApprovalCard
+          elicitationId="elic_pi"
+          message="Pi question"
+          phase={harness === "Pi" ? "pi_extension_ui" : "codex_request_user_input"}
+          policyName={
+            harness === "Pi" ? "pi_native_extension_ui" : "codex_native_request_user_input"
+          }
+          contentPreview=""
+          requestedSchema={{}}
+          status="pending"
+          response={null}
+          askUserQuestion={{
+            questions: [
+              {
+                id: "0",
+                question: "Pi question",
+                options,
+                multiSelect: false,
+                isOther,
+                textInput,
+              },
+            ],
+          }}
+        />,
+      );
+      expect(
+        screen.getByText(harness === "Pi" ? "Pi needs your input" : "Codex needs input"),
+      ).toBeDefined();
+      expect(screen.queryByText("Claude has questions")).toBeNull();
+      const submit = screen.getByTestId("ask-user-question-submit");
+      expect(submit.hasAttribute("disabled")).toBe(!textInput);
+      if (textInput) {
+        expect(screen.getByTestId("ask-user-question-custom-input")).toHaveValue(textInput.default);
+      }
+      if (isOther) {
+        if (value !== textInput?.default) {
+          fireEvent.change(screen.getByTestId("ask-user-question-custom-input"), {
+            target: { value },
+          });
+        }
+      } else {
+        expect(screen.queryByTestId("ask-user-question-custom-input")).toBeNull();
+        fireEvent.click(screen.getByLabelText(value));
+      }
+      expect(submit.hasAttribute("disabled")).toBe(false);
+      fireEvent.click(submit);
+      expect(submitSpy).toHaveBeenCalledWith("elic_pi", "accept", { "0": value });
+    },
+  );
+
   it("submits multi-select answers as an array", () => {
     const submitSpy = vi.fn().mockResolvedValue(undefined);
     useChatStore.setState({ submitApproval: submitSpy } as Partial<
