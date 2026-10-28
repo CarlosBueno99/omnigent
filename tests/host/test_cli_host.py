@@ -24,7 +24,7 @@ from omnigent.cli_diagnostics import suppresses_recovery_hint
 from omnigent.host.connect import RUNNER_ENV_PASSTHROUGH_ENV_VAR
 from omnigent.host.daemon_lifecycle import DaemonLifecycleLock, read_runner_env
 from omnigent.host.local_server import LocalServerStartup
-from omnigent.runner.identity import RUNNER_PARENT_PID_ENV_VAR
+from omnigent.runner.identity import OMNIGENT_SESSION_ENV_VAR, RUNNER_PARENT_PID_ENV_VAR
 
 
 @dataclass(frozen=True)
@@ -1694,6 +1694,7 @@ def test_host_background_reuses_daemon_on_another_url_for_the_workspace(
     assert owner.try_acquire() is True
     request.addfinalizer(owner.release)
     monkeypatch.delenv(RUNNER_PARENT_PID_ENV_VAR, raising=False)
+    monkeypatch.delenv(OMNIGENT_SESSION_ENV_VAR, raising=False)
     monkeypatch.setenv(RUNNER_ENV_PASSTHROUGH_ENV_VAR, "ISAAC_LAUNCH_MODE")
     monkeypatch.setenv("ISAAC_LAUNCH_MODE", "omni")
 
@@ -2108,6 +2109,7 @@ def test_ensure_host_daemon_reuses_the_daemon_a_spawned_daemon_yielded_to(
     assert owner.try_acquire() is True
     request.addfinalizer(owner.release)
     monkeypatch.delenv(RUNNER_PARENT_PID_ENV_VAR, raising=False)
+    monkeypatch.delenv(OMNIGENT_SESSION_ENV_VAR, raising=False)
     monkeypatch.setenv(RUNNER_ENV_PASSTHROUGH_ENV_VAR, "ISAAC_LAUNCH_MODE")
     monkeypatch.setenv("ISAAC_LAUNCH_MODE", "omni")
 
@@ -2226,14 +2228,28 @@ def test_wait_for_daemon_claim_paces_failed_probes_within_its_deadline(
     assert max(probe_ends) <= 2.0
 
 
+@pytest.mark.parametrize(
+    "winner_target",
+    [_VANITY_API, "https://VANITY.databricks.com:443/api/2.0/omnigent"],
+    ids=["same-url", "old-url-spelling"],
+)
 def test_ensure_host_daemon_treats_an_old_spelling_of_its_url_as_its_own_daemon(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+    winner_target: str,
 ) -> None:
-    """A record under an old spelling of the requested URL is not another URL's daemon."""
-    _seed_yielding_spawn(
-        monkeypatch, tmp_path, winner_target="https://VANITY.databricks.com:443/api/2.0/omnigent"
+    """A concurrent winner for the same URL keeps its identity and takes runner values."""
+    _seed_yielding_spawn(monkeypatch, tmp_path, winner_target=winner_target)
+    owner = DaemonLifecycleLock.for_target(
+        winner_target, base_dir=tmp_path, pid=_SAME_WORKSPACE_PID
     )
+    assert owner.try_acquire() is True
+    request.addfinalizer(owner.release)
+    monkeypatch.delenv(RUNNER_PARENT_PID_ENV_VAR, raising=False)
+    monkeypatch.delenv(OMNIGENT_SESSION_ENV_VAR, raising=False)
+    monkeypatch.setenv(RUNNER_ENV_PASSTHROUGH_ENV_VAR, "ISAAC_LAUNCH_MODE")
+    monkeypatch.setenv("ISAAC_LAUNCH_MODE", "omni")
     actions: list[str] = []
 
     def _record(event: str, *, details: dict[str, object], **_kwargs: object) -> None:
@@ -2244,6 +2260,9 @@ def test_ensure_host_daemon_treats_an_old_spelling_of_its_url_as_its_own_daemon(
 
     assert _ensure_host_daemon(_VANITY_API) is False
     assert actions[-1] == "started_concurrently_during_launch"
+    published = read_runner_env(winner_target, pid=_SAME_WORKSPACE_PID, base_dir=tmp_path)
+    assert published is not None
+    assert published["ISAAC_LAUNCH_MODE"] == "omni"
 
 
 @pytest.mark.parametrize(

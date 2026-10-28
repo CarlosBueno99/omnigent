@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN
+from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN, OMNIGENT_SESSION_ENV_VAR
 from tests._helpers.session import bundle_files, post_session_bundle
 from tests.e2e.omnigent.test_host_ctrl_c_stop_server import (
     _connect_env,
@@ -46,6 +46,7 @@ def test_reused_background_host_launches_runner_with_updated_environment(
     workspace = tmp_path / "ws"
     workspace.mkdir()
     env = _connect_env(mock_credentials_env, home)
+    env.pop(OMNIGENT_SESSION_ENV_VAR, None)
     env["OMNIGENT_HOST_ID"] = uuid.uuid4().hex
     env["OMNIGENT_HOST_NAME"] = "env-refresh-e2e"
     # /proc shows exec-time env; a zygote-forked runner never re-execs.

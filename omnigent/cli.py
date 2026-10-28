@@ -3790,6 +3790,7 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
             f"See {spawned.log_path}."
         )
     if claimed.pid != spawned.pid:
+        _publish_runner_launch_env(claimed)
         action = "started_concurrently_during_launch"
     elif process_was_running:
         action = "restarted_during_launch"
@@ -3804,10 +3805,15 @@ def _publish_runner_launch_env(record: _HostDaemonRecord | None) -> None:
 
     :param record: Daemon record being reused, or ``None`` when it vanished.
     """
-    from omnigent.runner.identity import RUNNER_PARENT_PID_ENV_VAR
+    from omnigent.runner.identity import OMNIGENT_SESSION_ENV_VAR, RUNNER_PARENT_PID_ENV_VAR
 
-    # A CLI run from a session's tools must not change other sessions' runner credentials.
-    if record is None or record.log_path is None or RUNNER_PARENT_PID_ENV_VAR in os.environ:
+    # Session tools retain the session marker even when the parent PID is scrubbed.
+    if (
+        record is None
+        or record.log_path is None
+        or RUNNER_PARENT_PID_ENV_VAR in os.environ
+        or OMNIGENT_SESSION_ENV_VAR in os.environ
+    ):
         return
     from omnigent.host.connect import overlay_runner_env, refreshable_runner_env_names
 

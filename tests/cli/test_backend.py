@@ -51,7 +51,11 @@ from omnigent.cli import (
 from omnigent.host.connect import RUNNER_ENV_PASSTHROUGH_ENV_VAR
 from omnigent.host.daemon_lifecycle import DaemonLifecycleLock, read_runner_env, runner_env_path
 from omnigent.host.local_server import LocalServerStartup
-from omnigent.runner.identity import RUNNER_PARENT_PID_ENV_VAR
+from omnigent.runner.identity import (
+    OMNIGENT_SESSION_ENV_VALUE,
+    OMNIGENT_SESSION_ENV_VAR,
+    RUNNER_PARENT_PID_ENV_VAR,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -521,6 +525,7 @@ def _register_reusable_server_daemon(
     monkeypatch.setattr(cli, "_pid_is_recorded_daemon", lambda record: True)
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.delenv(RUNNER_PARENT_PID_ENV_VAR, raising=False)
+    monkeypatch.delenv(OMNIGENT_SESSION_ENV_VAR, raising=False)
     monkeypatch.setenv(
         RUNNER_ENV_PASSTHROUGH_ENV_VAR, "ISAAC_LAUNCH_MODE,ANTHROPIC_CUSTOM_HEADERS"
     )
@@ -596,10 +601,11 @@ def test_reused_daemon_keeps_earlier_published_values_and_takes_changed_ones(
 
 
 @pytest.mark.parametrize(
-    ("background", "parent_runner_pid"),
+    ("background", "parent_runner_pid", "session_marker"),
     [
-        pytest.param(False, None, id="foreground-host"),
-        pytest.param(True, "4300", id="cli-run-by-a-session-tool"),
+        pytest.param(False, None, None, id="foreground-host"),
+        pytest.param(True, "4300", None, id="cli-run-by-a-session-tool"),
+        pytest.param(True, None, OMNIGENT_SESSION_ENV_VALUE, id="scrubbed-session-tool"),
     ],
 )
 def test_reused_host_runner_env_is_left_alone(
@@ -608,12 +614,15 @@ def test_reused_host_runner_env_is_left_alone(
     hold_daemon_lock: Callable[[str, int], None],
     background: bool,
     parent_runner_pid: str | None,
+    session_marker: str | None,
 ) -> None:
     captured = _register_reusable_server_daemon(monkeypatch, tmp_path, background=background)
     hold_daemon_lock(_REUSED_SERVER, 4242)
     monkeypatch.setenv("ISAAC_LAUNCH_MODE", "omni")
     if parent_runner_pid is not None:
         monkeypatch.setenv(RUNNER_PARENT_PID_ENV_VAR, parent_runner_pid)
+    if session_marker is not None:
+        monkeypatch.setenv(OMNIGENT_SESSION_ENV_VAR, session_marker)
 
     assert _ensure_host_daemon(_REUSED_SERVER) is False
 
@@ -724,6 +733,7 @@ def test_reused_local_daemon_serving_the_url_receives_runner_values(
     monkeypatch.setattr(cli, "local_server_url_if_healthy", lambda: "http://127.0.0.1:8123")
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.delenv(RUNNER_PARENT_PID_ENV_VAR, raising=False)
+    monkeypatch.delenv(OMNIGENT_SESSION_ENV_VAR, raising=False)
     monkeypatch.setenv(RUNNER_ENV_PASSTHROUGH_ENV_VAR, "ISAAC_LAUNCH_MODE")
     monkeypatch.setenv("ISAAC_LAUNCH_MODE", "omni")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-local")
