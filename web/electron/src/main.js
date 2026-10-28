@@ -90,6 +90,8 @@ const cliInstall = require("./cli_install");
 const isaac = require("./isaac");
 const { createArcaConnectFlow } = require("./arca_connect_window");
 const { createArcaAutoConnect } = require("./arca_autoconnect");
+const sshConnect = require("./ssh_connect");
+const { createSshConnectFlow } = require("./ssh_connect_window");
 const { registerSessionExpiryReload } = require("./session-expiry");
 const { ensureDatabricksSession } = require("./databricks-session");
 const {
@@ -366,6 +368,30 @@ const arcaConnectFlow = createArcaConnectFlow({
       return "arca ssh isaac omni host …"; // the run itself re-validates and fails loud
     }
   },
+  log: (message) => console.log(`[omnigent] ${message}`),
+});
+
+/**
+ * Connect a machine the user reaches over SSH (any server, any OS but Windows):
+ * the shell-owned console asks consent, then ssh_connect.js signs the machine in
+ * through a forwarded port and starts its host. See ssh_connect.js.
+ */
+const sshConnectFlow = createSshConnectFlow({
+  BrowserWindow,
+  ipcMain,
+  pagePath: path.join(__dirname, "..", "ssh-connect", "index.html"),
+  preloadPath: path.join(__dirname, "ssh_connect_preload.js"),
+  startConnect: (serverUrl, destination, hooks) =>
+    sshConnect.startSshConnect(serverUrl, destination, {
+      hooks,
+      openExternal: (url) => shell.openExternal(url),
+      readInstallScript: () => {
+        const script = cliInstall.resolveInstallScript();
+        return script ? fs.readFileSync(script, "utf8") : null;
+      },
+      log: (message) => console.log(`[omnigent] ${message}`),
+    }),
+  commandLines: (serverUrl, destination) => sshConnect.describeCommands(serverUrl, destination),
   log: (message) => console.log(`[omnigent] ${message}`),
 });
 
@@ -4846,6 +4872,34 @@ function registerIpc() {
       // v10 values); the SPA hides the toolbar button everywhere else.
       chromeCookieImport: process.platform === "darwin",
     };
+  });
+
+  // SPA → connect a machine the user reaches over SSH to the window's server
+  // as a host. Gated by the pinned-origin sender and by consent in the
+  // shell-owned console, which shows the exact commands (ssh_connect_window.js).
+  // The destination is re-validated here; the renderer is not trusted.
+  ipcMain.handle("omnigent:ssh-connect", async (event, destination) => {
+    if (!isPinnedOriginSender(event)) {
+      throw new Error("ssh-connect is only available to a connected server page");
+    }
+    if (process.platform === "win32") {
+      return { ok: false, error: "Connecting over SSH isn't available on Windows yet." };
+    }
+    const serverUrl = senderServerUrl(event);
+    if (!serverUrl) return { ok: false, error: "this window is not connected to a server" };
+    let target;
+    try {
+      target = sshConnect.validateDestination(destination);
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+    return sshConnectFlow.run(BrowserWindow.fromWebContents(event.sender), serverUrl, target);
+  });
+
+  // SPA → host aliases from ~/.ssh/config, to suggest in the connect field.
+  ipcMain.handle("omnigent:ssh-hosts", (event) => {
+    if (!isPinnedOriginSender(event)) return [];
+    return sshConnect.listSshHosts();
   });
 
   // SPA → connect the user's Arca instance (Databricks-internal sandbox) to

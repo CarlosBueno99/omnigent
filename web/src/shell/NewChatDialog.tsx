@@ -290,8 +290,10 @@ import {
   hasDbcertPreflightBridge,
   isElectronShell,
   onHostStatusChanged,
+  supportsSshConnect,
   type HostIdentity,
 } from "@/lib/nativeBridge";
+import { SshConnectForm } from "./SshConnectForm";
 import {
   fetchUserAgents,
   USER_AGENTS_QUERY_KEY,
@@ -523,9 +525,12 @@ function ConnectingText({ className }: { className?: string }) {
 export function ConnectHostInstructions({
   serverUrl,
   label,
+  onSshConnected,
 }: {
   serverUrl: string;
   label?: string;
+  /** After the desktop shell connects a machine over SSH; null when its id is unknown. */
+  onSshConnected?: (hostId: string | null) => void;
 }) {
   // Databricks/internal deployments add the "Databricks Lakebox" connect
   // path; OSS deployments (where the lakebox launcher is excluded) show
@@ -571,6 +576,7 @@ export function ConnectHostInstructions({
           testIdPrefix="connect-host"
         />
       )}
+      {supportsSshConnect() && <SshConnectForm onConnected={onSshConnected} />}
     </div>
   );
 }
@@ -7726,6 +7732,10 @@ export function NewChatLandingScreen() {
           <ConnectHostInstructions
             serverUrl={serverUrl}
             label="Run this on the machine you want to use, then pick it from the host menu:"
+            onSshConnected={(hostId) => {
+              setConnectOpen(false);
+              if (hostId) selectHost(hostId);
+            }}
           />
         </DialogContent>
       </Dialog>

@@ -1,0 +1,542 @@
+"use strict";
+
+const { describe, it } = require("node:test");
+const assert = require("node:assert/strict");
+const { EventEmitter } = require("node:events");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const {
+  SshConnectError,
+  classifyPrompt,
+  createSshSession,
+  describeSshFailure,
+  hostScript,
+  installScript,
+  loginScript,
+  parseSignInLink,
+  parseSshConfigHosts,
+  remoteCommand,
+  runSshConnect,
+  safeServerUrl,
+  startSshConnect,
+  validateDestination,
+} = require("../src/ssh_connect");
+const { IDENTITY_START, IDENTITY_END } = require("../src/arcaIdentity");
+
+const SERVER = "https://example.cloud.databricks.com/omnigent";
+const sleep = (ms) =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+const tick = () =>
+  new Promise((resolve) => {
+    setImmediate(resolve);
+  });
+const HOST_ID = "a".repeat(32);
+const authorizeLink = (port) =>
+  `https://example.cloud.databricks.com/oidc/v1/authorize?client_id=databricks-cli&redirect_uri=http%3A%2F%2Flocalhost%3A${port}&state=s1`;
+const statusOutput = (serverUrl = SERVER) =>
+  `\n${IDENTITY_START}\n${JSON.stringify({
+    daemons: [
+      {
+        mode: "server",
+        process: "online",
+        host_status: "online",
+        error: null,
+        target: serverUrl,
+        server_url: serverUrl,
+        host_id: HOST_ID,
+      },
+    ],
+  })}\n${IDENTITY_END}\n`;
+
+describe("validateDestination", () => {
+  it("accepts aliases, hosts and user@host", () => {
+    for (const ok of ["my-ec2", "dev.example.com", "pat@10.0.0.4", "box_1"]) {
+      assert.equal(validateDestination(` ${ok} `), ok);
+    }
+  });
+  it("refuses anything ssh could read as an option or a shell could split", () => {
+    for (const bad of ["-oProxyCommand=x", "a b", "a'b", 'a"b', "a;b", "", "@host", 42]) {
+      assert.throws(() => validateDestination(bad), SshConnectError);
+    }
+  });
+});
+
+describe("remote scripts", () => {
+  it("embed only allowlisted server URLs and pass through any login shell unchanged", () => {
+    assert.throws(() => safeServerUrl("https://x.com/'$(id)'"), SshConnectError);
+    assert.throws(() => safeServerUrl("ftp://x.com"), SshConnectError);
+    assert.throws(() => remoteCommand("echo 'hi'"), /must not contain/);
+    for (const script of [loginScript(SERVER), hostScript(SERVER), installScript()]) {
+      assert.match(remoteCommand(script), /^sh -c '[^'\\]*'$/);
+    }
+    assert.match(loginScript(SERVER), /BROWSER=none omnigent login "https:/);
+  });
+});
+
+describe("loginScript on a real shell", () => {
+  /** A fake `omnigent` in ~/.local/bin that starts a child, like the CLI it wraps. */
+  function fakeHome(t, body) {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "ssh-login-test-"));
+    t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+    fs.mkdirSync(path.join(home, ".local", "bin"), { recursive: true });
+    const script = path.join(home, ".local", "bin", "omnigent");
+    fs.writeFileSync(script, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+    return home;
+  }
+  function runLogin(home) {
+    const child = require("node:child_process").spawn("/bin/sh", ["-c", loginScript(SERVER)], {
+      env: { PATH: "/usr/bin:/bin", HOME: home },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const exited = new Promise((resolve) => {
+      child.on("close", (code, signal) => resolve({ code, signal }));
+    });
+    return { child, exited };
+  }
+
+  it("stops the login and its child when the session's stdin closes", async (t) => {
+    const home = fakeHome(
+      t,
+      'echo $$ > "$HOME/login.pid"; sleep 300 & echo $! > "$HOME/child.pid"; wait',
+    );
+    const { child, exited } = runLogin(home);
+    const readPid = (name) => {
+      const file = path.join(home, name);
+      return fs.existsSync(file) ? Number(fs.readFileSync(file, "utf8")) || null : null;
+    };
+    // Polling is sequential by design.
+    // oxlint-disable-next-line no-await-in-loop
+    while (readPid("child.pid") === null) await sleep(20);
+    const pids = [readPid("login.pid"), readPid("child.pid")];
+
+    child.stdin.end();
+
+    await exited;
+    await sleep(200);
+    for (const pid of pids) assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+  });
+
+  it("returns the login's own exit code, including 127 when omnigent is missing", async (t) => {
+    const ok = runLogin(fakeHome(t, "exit 0"));
+    assert.equal((await ok.exited).code, 0, "stdin still open: the watchdog must not block exit");
+    ok.child.stdin.end();
+    const missing = fs.mkdtempSync(path.join(os.tmpdir(), "ssh-login-test-"));
+    t.after(() => fs.rmSync(missing, { recursive: true, force: true }));
+    const absent = runLogin(missing);
+    assert.equal((await absent.exited).code, 127);
+    absent.child.stdin.end();
+  });
+});
+
+describe("parseSignInLink", () => {
+  it("reads the loopback port from a Databricks sign-in link, through ANSI codes", () => {
+    assert.deepEqual(parseSignInLink(`\x1b[2m${authorizeLink(8021)}\x1b[0m\r`), {
+      url: authorizeLink(8021),
+      port: 8021,
+    });
+  });
+  it("opens a server's own sign-in link without a forward", () => {
+    assert.deepEqual(parseSignInLink(`Opening browser for login: ${SERVER}/auth/cli?t=1`), {
+      url: `${SERVER}/auth/cli?t=1`,
+      port: null,
+    });
+  });
+  it("ignores other lines", () => {
+    assert.equal(parseSignInLink("Please complete authentication by opening this link"), null);
+    assert.equal(parseSignInLink("https://example.com/login"), null);
+  });
+});
+
+describe("classifyPrompt", () => {
+  it("tells host-key questions, secrets and other questions apart", () => {
+    assert.equal(
+      classifyPrompt("Are you sure you want to continue connecting (yes/no/[fingerprint])? "),
+      "confirm",
+    );
+    assert.equal(classifyPrompt("Allow use of key?", "confirm"), "confirm");
+    assert.equal(classifyPrompt("pat@my-ec2's password: "), "secret");
+    assert.equal(
+      classifyPrompt("Enter passphrase for key '/home/pat/.ssh/id_ed25519': "),
+      "secret",
+    );
+    assert.equal(classifyPrompt("Passcode or option (1-3): "), "secret");
+    assert.equal(classifyPrompt("Which project? "), "text");
+  });
+});
+
+describe("parseSshConfigHosts", () => {
+  it("lists concrete aliases and skips patterns and comments", () => {
+    const config = [
+      "Host my-ec2 bastion # jump host",
+      "  HostName 10.0.0.4",
+      "host=gpu-box",
+      "Host *.corp !skip ?x",
+      "# Host commented-out",
+      "Host my-ec2",
+    ].join("\n");
+    assert.deepEqual(parseSshConfigHosts(config), ["my-ec2", "bastion", "gpu-box"]);
+  });
+});
+
+describe("describeSshFailure", () => {
+  it("names the fix for each common ssh failure", () => {
+    const cases = [
+      ["pat@my-ec2: Permission denied (publickey).", /didn't accept your sign-in/],
+      ["Host key verification failed.", /wasn't trusted/],
+      ["@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@", /host key changed/],
+      ["ssh: Could not resolve hostname my-ec2: nodename nor servname", /Couldn't find a machine/],
+      ["ssh: connect to host 10.0.0.4 port 22: Connection timed out", /Couldn't reach my-ec2/],
+    ];
+    for (const [stderr, expected] of cases) {
+      assert.match(describeSshFailure(255, stderr, "my-ec2"), expected);
+    }
+  });
+});
+
+/** Scripted stand-in for createSshSession that records every call in order. */
+function fakeSession({ logins, host = { code: 0, stdout: statusOutput(), stderr: "" }, install }) {
+  const calls = [];
+  let loginRuns = 0;
+  const control = (name) => async (port) => {
+    calls.push(`${name} ${port}`);
+    return { code: 0, stderr: "" };
+  };
+  return {
+    calls,
+    open: async () => {
+      calls.push("open");
+    },
+    close: async () => {
+      calls.push("close");
+    },
+    abort: () => calls.push("abort"),
+    forwardLocal: control("forwardLocal"),
+    cancelLocal: control("cancelLocal"),
+    holdRemote: control("holdRemote"),
+    releaseRemote: control("releaseRemote"),
+    exec(script, opts = {}) {
+      let finish;
+      const promise = new Promise((resolve) => {
+        finish = resolve;
+      });
+      let canceled = false;
+      const cancel = () => {
+        canceled = true;
+        calls.push("cancel-exec");
+        finish({ code: null, stdout: "", stderr: "", timedOut: false });
+      };
+      if (script.includes("omnigent login")) {
+        const step = logins[loginRuns];
+        loginRuns += 1;
+        calls.push("exec login");
+        void (async () => {
+          // One line per tick, like a CLI writing as it goes.
+          /* oxlint-disable no-await-in-loop */
+          for (const line of step.lines ?? []) {
+            opts.onStdout(`${line}\n`);
+            await tick();
+          }
+          /* oxlint-enable no-await-in-loop */
+          // Let the queued link handling (forward, browser) run before the CLI exits.
+          await sleep(10);
+          if (!canceled) finish({ code: step.code, stdout: "", stderr: step.stderr ?? "" });
+        })();
+      } else if (script.includes("omnigent host")) {
+        calls.push("exec host");
+        finish({ ...host, timedOut: false });
+      } else {
+        calls.push(`exec install stdin=${opts.stdin}`);
+        finish({
+          code: install?.code ?? 0,
+          stdout: "",
+          stderr: install?.stderr ?? "",
+          timedOut: false,
+        });
+      }
+      return { promise, cancel };
+    },
+  };
+}
+
+function connectContext(session, overrides = {}) {
+  const opened = [];
+  const statuses = [];
+  return {
+    opened,
+    statuses,
+    ctx: {
+      serverUrl: SERVER,
+      destination: "my-ec2",
+      session,
+      openExternal: async (url) => {
+        session.calls.push(`open-browser ${url}`);
+        opened.push(url);
+      },
+      onStatus: (status) => statuses.push(status.step),
+      onOutput: () => {},
+      askInstall: async () => true,
+      readInstallScript: () => "INSTALLER",
+      isPortFree: async () => true,
+      ...overrides,
+    },
+  };
+}
+
+describe("runSshConnect", () => {
+  it("holds the laptop's busy ports, forwards the CLI's port before opening the link, then starts the host", async () => {
+    const session = fakeSession({
+      logins: [{ lines: ["Signing in", authorizeLink(8021)], code: 0 }],
+    });
+    const { ctx, statuses } = connectContext(session, {
+      isPortFree: async (port) => port !== 8020,
+    });
+
+    const result = await runSshConnect(ctx);
+
+    assert.deepEqual(result, {
+      ok: true,
+      alreadyRunning: false,
+      identity: { serverUrl: SERVER, hostId: HOST_ID },
+    });
+    assert.deepEqual(session.calls, [
+      "open",
+      "holdRemote 8020",
+      "exec login",
+      "forwardLocal 8021",
+      `open-browser ${authorizeLink(8021)}`,
+      "cancelLocal 8021",
+      "releaseRemote 8020",
+      "exec host",
+      "close",
+    ]);
+    assert.deepEqual(statuses, [
+      "connecting",
+      "signing-in",
+      "waiting-for-browser",
+      "starting-host",
+    ]);
+  });
+
+  it("opens a server's own sign-in link without forwarding anything", async () => {
+    const link = `${SERVER}/auth/cli?t=1`;
+    const session = fakeSession({
+      logins: [
+        {
+          lines: [`Opening browser for login: ${link}`, "Confirm this code in the browser: AB-12"],
+          code: 0,
+        },
+      ],
+    });
+    const { ctx, opened, statuses } = connectContext(session);
+
+    assert.equal((await runSshConnect(ctx)).ok, true);
+    assert.deepEqual(opened, [link]);
+    assert.ok(!session.calls.some((call) => call.startsWith("forwardLocal")));
+    assert.ok(statuses.includes("waiting-for-browser"));
+  });
+
+  it("asks before installing a missing CLI, pipes the bundled installer, then signs in again", async () => {
+    const session = fakeSession({
+      logins: [
+        { lines: ["sh: 1: exec: omnigent: not found"], code: 127 },
+        { lines: [authorizeLink(8020)], code: 0 },
+      ],
+    });
+    const { ctx, statuses } = connectContext(session);
+
+    assert.equal((await runSshConnect(ctx)).ok, true);
+    assert.deepEqual(session.calls.slice(0, 4), [
+      "open",
+      "exec login",
+      "exec install stdin=INSTALLER",
+      "exec login",
+    ]);
+    assert.ok(statuses.includes("installing"));
+  });
+
+  it("stops without installing when the user declines", async () => {
+    const session = fakeSession({ logins: [{ lines: [], code: 127 }] });
+    const { ctx } = connectContext(session, { askInstall: async () => false });
+
+    const result = await runSshConnect(ctx);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.canceled, true);
+    assert.ok(!session.calls.some((call) => call.startsWith("exec install")));
+    assert.equal(session.calls.at(-1), "close");
+  });
+
+  it("stops sign-in when the link's port is busy on the laptop", async () => {
+    let probes = 0;
+    const session = fakeSession({ logins: [{ lines: [authorizeLink(8020)], code: 0 }] });
+    const { ctx, opened } = connectContext(session, {
+      // Free during the busy-port scan, taken by the time the link arrives.
+      isPortFree: async () => {
+        probes += 1;
+        return probes <= 21;
+      },
+    });
+
+    const result = await runSshConnect(ctx);
+
+    assert.equal(result.ok, false);
+    assert.match(result.error, /Port 8020 became busy/);
+    assert.deepEqual(opened, []);
+    assert.ok(session.calls.includes("cancel-exec"));
+  });
+
+  it("stops sign-in at once when the link can't be opened", async () => {
+    // The CLI would otherwise wait for a redirect that can never come.
+    const session = fakeSession({ logins: [{ lines: [authorizeLink(8020)], code: 0 }] });
+    const { ctx } = connectContext(session, {
+      openExternal: async () => {
+        throw new Error("no default browser");
+      },
+    });
+
+    const result = await runSshConnect(ctx);
+
+    assert.deepEqual(result, { ok: false, error: "Sign-in failed: no default browser" });
+    assert.ok(session.calls.includes("cancel-exec"));
+    assert.ok(session.calls.includes("cancelLocal 8020"));
+  });
+
+  it("reports the last plain output line on failure, never a sign-in link", async () => {
+    const session = fakeSession({
+      logins: [{ lines: ["Could not reach server", `https://x.example/secret?t=1`], code: 1 }],
+    });
+    const { ctx } = connectContext(session);
+
+    const result = await runSshConnect(ctx);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, "Signing in on my-ec2 failed: Could not reach server");
+  });
+
+  it("explains servers that sign in with a username and password", async () => {
+    const session = fakeSession({
+      logins: [{ lines: ["Username [admin]: ", "Aborted!"], code: 1 }],
+    });
+    const { ctx } = connectContext(session);
+
+    assert.match((await runSshConnect(ctx)).error, /username and password/);
+  });
+
+  it("reports a host that didn't start", async () => {
+    const session = fakeSession({
+      logins: [{ lines: [], code: 0 }],
+      host: { code: 1, stdout: "", stderr: "Error: not signed in" },
+    });
+    const { ctx } = connectContext(session);
+
+    assert.equal(
+      (await runSshConnect(ctx)).error,
+      "Starting the Omnigent host on my-ec2 failed: Error: not signed in",
+    );
+  });
+});
+
+describe("startSshConnect", () => {
+  it("routes prompts through hooks, returns ssh's failure as a message, and removes its temp dir", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ssh-connect-test-"));
+    let onPrompt;
+    const prompts = [];
+    const { promise } = startSshConnect(SERVER, "my-ec2", {
+      hooks: {
+        onOutput: () => {},
+        onStatus: () => {},
+        prompt: async (request) => {
+          prompts.push(request);
+          return "pw";
+        },
+        askInstall: async () => false,
+      },
+      openExternal: () => {},
+      readInstallScript: () => null,
+      makeTempDir: () => dir,
+      createAskpass: async (options) => {
+        onPrompt = options.onPrompt;
+        return { env: { SSH_ASKPASS: "x" }, close: () => {} };
+      },
+      createSession: () => ({
+        open: async () => {
+          assert.equal(await onPrompt({ prompt: "pat@my-ec2's password: ", hint: "" }), "pw");
+          throw new SshConnectError(describeSshFailure(255, "Permission denied", "my-ec2"));
+        },
+        close: async () => {},
+        abort: () => {},
+      }),
+    });
+
+    const result = await promise;
+
+    assert.deepEqual(prompts, [{ kind: "secret", text: "pat@my-ec2's password: " }]);
+    assert.equal(result.ok, false);
+    assert.match(result.error, /didn't accept your sign-in/);
+    assert.equal(fs.existsSync(dir), false);
+  });
+});
+
+describe("createSshSession", () => {
+  it("reports a missing ssh as a plain message", async () => {
+    const session = createSshSession({
+      destination: "my-ec2",
+      socketPath: "/tmp/s/m",
+      spawn: () => {
+        throw Object.assign(new Error("spawn ssh ENOENT"), { code: "ENOENT" });
+      },
+    });
+
+    await assert.rejects(session.open(), {
+      name: "Error",
+      message: "Couldn't find ssh on this computer.",
+    });
+  });
+
+  it("opens one shared connection and sends forwards over it", async () => {
+    const spawned = [];
+    const spawn = (command, args) => {
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = () => child.emit("close", null);
+      spawned.push([command, ...args]);
+      // The master stays up; every client exits 0 straight away.
+      if (!args.includes("-M")) setImmediate(() => child.emit("close", 0));
+      return child;
+    };
+    const session = createSshSession({
+      destination: "my-ec2",
+      socketPath: "/tmp/s/m",
+      spawn,
+      pathExists: () => true,
+    });
+
+    await session.open();
+    await session.forwardLocal(8021);
+    await session.holdRemote(8020);
+
+    assert.deepEqual(spawned, [
+      [
+        "ssh",
+        "-M",
+        "-S",
+        "/tmp/s/m",
+        "-o",
+        "ControlPersist=no",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ConnectTimeout=20",
+        "-N",
+        "my-ec2",
+      ],
+      ["ssh", "-S", "/tmp/s/m", "-O", "check", "my-ec2"],
+      ["ssh", "-S", "/tmp/s/m", "-O", "forward", "-L", "8021:127.0.0.1:8021", "my-ec2"],
+      ["ssh", "-S", "/tmp/s/m", "-O", "forward", "-R", "8020:127.0.0.1:9", "my-ec2"],
+    ]);
+  });
+});

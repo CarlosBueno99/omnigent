@@ -1,0 +1,113 @@
+import { type FormEvent, useEffect, useId, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { connectSshHost, listSshHosts } from "@/lib/nativeBridge";
+
+/**
+ * Connect a machine the user reaches over SSH as a host, through the desktop
+ * shell. Consent, ssh prompts and the browser sign-in happen in the shell's
+ * own window; this form only names the machine and reports gate failures.
+ */
+export function SshConnectForm({
+  onConnected,
+}: {
+  /** Called with the new host's id, or null when the shell couldn't read it. */
+  onConnected?: (hostId: string | null) => void;
+}) {
+  const queryClient = useQueryClient();
+  const listId = useId();
+  const inputId = useId();
+  const [destination, setDestination] = useState("");
+  const [hosts, setHosts] = useState<string[]>([]);
+  const [connecting, setConnecting] = useState(false);
+  const [message, setMessage] = useState<{ kind: "error" | "info"; text: string } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void listSshHosts().then((found) => {
+      if (active) setHosts(found);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function connect(event: FormEvent) {
+    event.preventDefault();
+    const target = destination.trim();
+    if (!target || connecting) return;
+    setConnecting(true);
+    setMessage(null);
+    try {
+      const res = await connectSshHost(target);
+      if (!res.ok) {
+        // The shell's window already showed its own outcome or the user closed it.
+        if (!res.canceled && !res.shownInConsole) {
+          setMessage({ kind: "error", text: res.error ?? `Couldn't connect to ${target}.` });
+        }
+        return;
+      }
+      await queryClient.invalidateQueries({ queryKey: ["hosts"] });
+      if (!res.identity && res.alreadyRunning) {
+        setMessage({
+          kind: "info",
+          text: `${target} was already connected to this server. Pick it from the host list.`,
+        });
+      }
+      onConnected?.(res.identity?.hostId ?? null);
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  return (
+    <form
+      onSubmit={(event) => void connect(event)}
+      className="flex flex-col gap-2"
+      data-testid="ssh-connect-form"
+    >
+      <label htmlFor={inputId} className="text-sm text-muted-foreground">
+        Or connect a machine you reach over SSH. Sign-in, and any SSH password or key prompt, happen
+        in the app.
+      </label>
+      <div className="flex gap-2">
+        <Input
+          id={inputId}
+          list={listId}
+          value={destination}
+          onChange={(event) => setDestination(event.target.value)}
+          placeholder="my-ec2 or user@host"
+          autoComplete="off"
+          spellCheck={false}
+          componentId="new_chat.ssh_connect.destination"
+          data-testid="ssh-connect-destination"
+        />
+        <datalist id={listId}>
+          {hosts.map((host) => (
+            <option key={host} value={host} />
+          ))}
+        </datalist>
+        <Button
+          type="submit"
+          variant="outline"
+          disabled={connecting || !destination.trim()}
+          componentId="new_chat.ssh_connect.submit"
+          data-testid="ssh-connect-submit"
+        >
+          {connecting ? "Connecting..." : "Connect"}
+        </Button>
+      </div>
+      {message && (
+        <p
+          className={
+            message.kind === "error" ? "text-sm text-destructive" : "text-sm text-muted-foreground"
+          }
+          data-testid="ssh-connect-message"
+        >
+          {message.text}
+        </p>
+      )}
+    </form>
+  );
+}
