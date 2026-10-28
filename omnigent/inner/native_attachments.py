@@ -339,6 +339,10 @@ class _SpilledTextTooLarge(ValueError):
     """A cached paste cannot fit in one mirrored session event."""
 
 
+class SpilledTextUnavailable(ValueError):
+    """Generated input cannot be reconstructed from its recorded delivery."""
+
+
 def record_spilled_text(text: str, ranges: list[list[int]], bridge_dir: Path) -> str | None:
     """Record generated reference occurrences under one native delivery identity."""
     message_id = f"omnigent-paste-{uuid.uuid4().hex}"
@@ -352,7 +356,11 @@ def record_spilled_text(text: str, ranges: list[list[int]], bridge_dir: Path) ->
 
 
 def restore_spilled_text(
-    text: str, bridge_dir: Path, client_message_id: str | None = None
+    text: str,
+    bridge_dir: Path,
+    client_message_id: str | None = None,
+    *,
+    expected_ranges: tuple[tuple[int, int], ...] | None = None,
 ) -> str | None:
     """
     Put back the text each :func:`materialize_text` reference in *text* stands for.
@@ -365,28 +373,35 @@ def restore_spilled_text(
     :param text: Message text as the harness echoed it.
     :param bridge_dir: Session bridge path, used to identify its attachment cache.
     :param client_message_id: Codex's echoed delivery identity, including on resume.
+    :param expected_ranges: Require these generated occurrences before submission.
     :returns: *text* with each such reference replaced, or ``None`` when the
         restored message would not fit one session event. Restoring stops at that
         budget, so repeated references never expand past it.
     """
+
+    def unavailable() -> str:
+        if expected_ranges is not None:
+            raise SpilledTextUnavailable("Generated paste delivery evidence is unavailable")
+        return text
+
     if "pasted_text_" not in text or not isinstance(client_message_id, str):
-        return text
+        return unavailable()
     if re.fullmatch(r"omnigent-paste-[0-9a-f]{32}", client_message_id) is None:
-        return text
+        return unavailable()
     cache = pasted_text_cache_dir(bridge_dir)
     try:
         raw_receipt = _read_cached_file(cache, f"{client_message_id}.json")
         receipt = json.loads(raw_receipt) if raw_receipt is not None else None
     except (ValueError, _SpilledTextTooLarge):
-        return text
+        return unavailable()
     if (
         not isinstance(receipt, dict)
         or receipt.get("text_digest") != hashlib.sha256(text.encode("utf-8")).hexdigest()
     ):
-        return text
+        return unavailable()
     raw_ranges = receipt.get("ranges")
     if not isinstance(raw_ranges, list):
-        return text
+        return unavailable()
     ranges = {
         tuple(entry)
         for entry in raw_ranges
@@ -394,6 +409,10 @@ def restore_spilled_text(
         and len(entry) == 2
         and all(type(offset) is int for offset in entry)
     }
+    if expected_ranges is not None and (
+        not expected_ranges or ranges != set(expected_ranges) or len(ranges) != len(raw_ranges)
+    ):
+        return unavailable()
     reference = re.compile(
         rf"(?m)^[ \t]*\[Attached file: {re.escape(str(cache))}/"
         r"(?P<name>pasted_text_(?P<digest>[0-9a-f]{12})(?:_(?P=digest))?\.txt)\][ \t]*(?=\r?$)"
@@ -404,6 +423,7 @@ def restore_spilled_text(
     parts: list[str] = []
     size = end = 0
     restored_any = False
+    restored_ranges: set[tuple[int, int]] = set()
     for match in reference.finditer(text):
         if match.span() not in ranges:
             continue
@@ -418,6 +438,10 @@ def restore_spilled_text(
             )
             pastes[name] = raw_bytes.decode("utf-8", errors="replace") if verified else None
         paste = pastes[name]
+        if paste is None and expected_ranges is not None:
+            return unavailable()
+        if paste is not None:
+            restored_ranges.add(match.span())
         restored_any = restored_any or paste is not None
         parts += [text[end : match.start()], match.group(0) if paste is None else paste]
         end = match.end()
@@ -425,6 +449,8 @@ def restore_spilled_text(
         size += len(parts[-2].encode("utf-8")) + len(parts[-1].encode("utf-8"))
         if size > budget and restored_any:
             return None
+    if expected_ranges is not None and restored_ranges != ranges:
+        return unavailable()
     if not restored_any:
         return text
     parts.append(text[end:])

@@ -69,6 +69,7 @@ from omnigent.inner.executor import (
 )
 from omnigent.inner.native_attachments import (
     FRAMEWORK_NOTICE_BLOCK_TYPE,
+    SpilledTextUnavailable,
     attachment_cache_dir,
     attachment_reference_line,
     codex_resize_metadata_path,
@@ -135,13 +136,24 @@ _MIRROR_TOO_LARGE_FAILURE = CodexStartupFailure(
     remediation="Shorten the message, or attach the text as a file.",
 )
 
+_SPILL_RECORD_FAILURE = CodexStartupFailure(
+    message="The large paste could not be recorded safely; this message was not sent.",
+    remediation="Check local disk space and try again, or attach the text as a file.",
+)
+
 
 class _SpilledInputItems(list[dict[str, object]]):
     """Wire input with the identity of its generated paste occurrences."""
 
-    def __init__(self, items: list[dict[str, object]], client_message_id: str | None) -> None:
+    def __init__(
+        self,
+        items: list[dict[str, object]],
+        client_message_id: str | None,
+        expected_ranges: tuple[tuple[int, int], ...],
+    ) -> None:
         super().__init__(items)
         self.client_message_id = client_message_id
+        self.expected_ranges = expected_ranges
 
 
 def _spilled_mirror_fits(input_items: list[dict[str, object]], bridge_dir: Path) -> bool:
@@ -154,7 +166,16 @@ def _spilled_mirror_fits(input_items: list[dict[str, object]], bridge_dir: Path)
     )
     if isinstance(input_items, _SpilledInputItems) and message_id is None:
         return False
-    return restore_spilled_text(text, bridge_dir, message_id) is not None
+    expected_ranges = (
+        input_items.expected_ranges if isinstance(input_items, _SpilledInputItems) else None
+    )
+    try:
+        return (
+            restore_spilled_text(text, bridge_dir, message_id, expected_ranges=expected_ranges)
+            is not None
+        )
+    except SpilledTextUnavailable as error:
+        raise _CodexNativeInputUndelivered(_SPILL_RECORD_FAILURE) from error
 
 
 async def _wait_for_bridge_state(
@@ -600,12 +621,7 @@ async def _inject_codex_turn_once(
 ) -> None:
     """Steer an active turn or start one, recovering one proven stale steer."""
     if isinstance(input_items, _SpilledInputItems) and input_items.client_message_id is None:
-        raise _CodexNativeInputUndelivered(
-            CodexStartupFailure(
-                message="The large paste could not be recorded safely; this message was not sent.",
-                remediation="Check local disk space and try again, or attach the text as a file.",
-            )
-        )
+        raise _CodexNativeInputUndelivered(_SPILL_RECORD_FAILURE)
     if not await asyncio.to_thread(_spilled_mirror_fits, input_items, bridge_dir):
         raise _CodexNativeInputUndelivered(_MIRROR_TOO_LARGE_FAILURE)
     if state.active_turn_id is None:
@@ -1280,7 +1296,9 @@ def _content_to_input_items(
         items = [items[index] for index in order]
         if ranges:
             message_id = record_spilled_text("\n\n".join(texts), ranges, bridge_dir)
-            items = _SpilledInputItems(items, message_id)
+            items = _SpilledInputItems(
+                items, message_id, tuple((start, end) for start, end in ranges)
+            )
     return items
 
 

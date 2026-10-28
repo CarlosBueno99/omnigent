@@ -1945,11 +1945,17 @@ async def test_slow_paste_restoration_keeps_the_event_loop_responsive(
     original_restore = codex_native_executor.restore_spilled_text
 
     def slow_restore(
-        text: str, bridge_dir: Path, client_message_id: str | None = None
+        text: str,
+        bridge_dir: Path,
+        client_message_id: str | None = None,
+        *,
+        expected_ranges: tuple[tuple[int, int], ...] | None = None,
     ) -> str | None:
         loop.call_soon_threadsafe(restore_started.set)
         assert release_restore.wait(2), "paste restoration blocked the event loop"
-        return original_restore(text, bridge_dir, client_message_id)
+        return original_restore(
+            text, bridge_dir, client_message_id, expected_ranges=expected_ranges
+        )
 
     monkeypatch.setattr(codex_native_executor, "restore_spilled_text", slow_restore)
     delivery = asyncio.create_task(
@@ -1974,7 +1980,21 @@ async def test_slow_paste_restoration_keeps_the_event_loop_responsive(
     ]
 
 
-@pytest.mark.parametrize("failure", ["unsupported_codex", "receipt_write"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "unsupported_codex",
+        "receipt_write",
+        "missing_receipt",
+        "invalid_receipt",
+        "wire_digest_mismatch",
+        "empty_ranges",
+        "changed_ranges",
+        "symlink_receipt",
+        "missing_paste",
+        "edited_paste",
+    ],
+)
 @pytest.mark.parametrize("active_turn_id", [None, "turn_live"])
 async def test_spilled_paste_is_not_sent_without_delivery_provenance(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str, active_turn_id: str | None
@@ -1985,11 +2005,32 @@ async def test_spilled_paste_is_not_sent_without_delivery_provenance(
     assert state is not None
     if failure == "unsupported_codex":
         monkeypatch.setattr(_FakeCodexNativeClient, "supports_user_message_ids", False)
-    else:
+    elif failure == "receipt_write":
         monkeypatch.setattr(codex_native_executor, "record_spilled_text", lambda *_args: None)
     items = codex_native_executor._content_to_input_items("large paste\n" * 100_000, tmp_path)
+    assert isinstance(items, codex_native_executor._SpilledInputItems)
+    receipt = pasted_text_cache_dir(tmp_path) / f"{items.client_message_id}.json"
+    if failure == "missing_receipt":
+        receipt.unlink()
+    elif failure == "invalid_receipt":
+        receipt.write_text("invalid JSON")
+    elif failure in {"wire_digest_mismatch", "empty_ranges", "changed_ranges"}:
+        evidence = json.loads(receipt.read_text())
+        if failure == "wire_digest_mismatch":
+            evidence["text_digest"] = "f" * 64
+        else:
+            evidence["ranges"] = [] if failure == "empty_ranges" else [[1, 2]]
+        receipt.write_text(json.dumps(evidence))
+    elif failure == "symlink_receipt":
+        outside = tmp_path / "receipt.json"
+        receipt.rename(outside)
+        receipt.symlink_to(outside)
+    elif failure == "missing_paste":
+        _referenced_file(items[0]).unlink()
+    elif failure == "edited_paste":
+        _referenced_file(items[0]).write_text("edited paste")
 
-    with pytest.raises(codex_native_executor._CodexNativeInputUndelivered):
+    with pytest.raises(codex_native_executor._CodexNativeInputUndelivered) as caught:
         await codex_native_executor._inject_codex_turn_once(
             _FakeCodexNativeClient(),
             bridge_dir=tmp_path,
@@ -1998,6 +2039,8 @@ async def test_spilled_paste_is_not_sent_without_delivery_provenance(
             settings_overrides={},
         )
     assert _FakeCodexNativeClient.requests == []
+    if failure != "unsupported_codex":
+        assert caught.value.failure == codex_native_executor._SPILL_RECORD_FAILURE
 
 
 def test_literal_paste_references_do_not_expand_during_mirror_preflight(tmp_path: Path) -> None:
