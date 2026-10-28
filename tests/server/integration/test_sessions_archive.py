@@ -415,25 +415,43 @@ _CHILD_RUNNER_ID = "c1b2c3d4e5f61234567890abcdef0123"
 
 
 @pytest.mark.parametrize(
-    ("closed", "child_runner_id", "stop_acknowledged", "expect_stop", "expect_release"),
+    (
+        "closed",
+        "child_runner_id",
+        "stop_acknowledged",
+        "runner_reply",
+        "expect_stop",
+        "expect_release",
+    ),
     [
-        pytest.param(True, None, True, False, True, id="closed-unbound"),
-        pytest.param(True, _PARENT_RUNNER_ID, True, False, True, id="closed-shared-runner"),
-        pytest.param(True, _CHILD_RUNNER_ID, True, True, False, id="closed-owned-runner-stopped"),
-        pytest.param(True, _CHILD_RUNNER_ID, False, True, True, id="closed-owned-stop-failed"),
-        pytest.param(False, _PARENT_RUNNER_ID, True, False, False, id="archived-only"),
+        pytest.param(True, None, True, None, False, False, id="closed-unbound"),
+        pytest.param(True, _PARENT_RUNNER_ID, True, 200, False, True, id="closed-shared-runner"),
+        pytest.param(True, _PARENT_RUNNER_ID, True, 500, False, True, id="closed-release-fails"),
+        pytest.param(
+            True, _CHILD_RUNNER_ID, True, 200, True, False, id="closed-owned-runner-stopped"
+        ),
+        pytest.param(
+            True, _CHILD_RUNNER_ID, False, 200, True, True, id="closed-owned-stop-failed"
+        ),
+        pytest.param(False, _PARENT_RUNNER_ID, True, 200, False, False, id="archived-only"),
     ],
 )
 async def test_archive_idle_closed_child_releases_runner_session(
     client: httpx.AsyncClient,
     db_uri: str,
+    caplog: pytest.LogCaptureFixture,
     closed: bool,
     child_runner_id: str | None,
     stop_acknowledged: bool,
+    runner_reply: int | None,
     expect_stop: bool,
     expect_release: bool,
 ) -> None:
-    """Closing an idle child releases its routed runner session, unless its runner was stopped."""
+    """Closing an idle child releases its routed runner session, unless its runner was stopped.
+
+    ``runner_reply`` is the runner's DELETE status; ``None`` means no runner client resolves,
+    as for an unbound session. A missing or failed release never undoes the archive.
+    """
     session = await create_test_session(client, name="archive-closed-child")
     conv_store = SqlAlchemyConversationStore(db_uri)
     conv_store.set_host_id(session["id"], _HOST_ID, workspace="/tmp/archive-ws")
@@ -461,12 +479,12 @@ async def test_archive_idle_closed_child_releases_runner_session(
 
     def _runner(request: httpx.Request) -> httpx.Response:
         runner_requests.append((request.method, request.url.path))
-        return httpx.Response(200, json={})
+        return httpx.Response(runner_reply or 200, json={})
 
     runner_client = httpx.AsyncClient(
         transport=httpx.MockTransport(_runner), base_url="http://runner"
     )
-    get_runner_client = AsyncMock(return_value=runner_client)
+    get_runner_client = AsyncMock(return_value=runner_client if runner_reply else None)
     host_stop = AsyncMock(return_value=stop_acknowledged)
     patch_body: dict[str, object] = {"archived": True}
     if closed:
@@ -494,6 +512,9 @@ async def test_archive_idle_closed_child_releases_runner_session(
             if call.args[0] == child.id and call.kwargs.get("conversation") is not None
         ]
         assert [conv.runner_id for conv in routed] == [child_runner_id]
+    assert ("Archive resource release failed" in caplog.text) is (runner_reply == 500)
+    stored = conv_store.get_conversation(child.id)
+    assert stored is not None and stored.archived
     items = conv_store.list_items(child.id).data
     assert [item.data.content[0]["text"] for item in items] == ["keep me"]
 
