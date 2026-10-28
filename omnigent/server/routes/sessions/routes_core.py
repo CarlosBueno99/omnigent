@@ -1966,10 +1966,7 @@ def register_core_routes(
         # here and never reaches the probe. Only stamp-stale candidates fall
         # through to liveness_lookup, which additionally rules out a runner
         # whose tunnel is live on THIS replica before we settle.
-        #
-        # The same probe covers stale-stamp rows that still count pending
-        # prompts, which read as zero when their runner is offline (the
-        # ``_apply_liveness_to_items`` rule the WS stream applies).
+        # The probe also zeroes pending counts on stale-stamp rows whose runner is offline (WS rule).
         offline_runner_ids: set[str] = set()
         if liveness_lookup is not None:
             stale_runner_rows = [
@@ -2004,10 +2001,8 @@ def register_core_routes(
             )
             if probe_ids:
                 stale_liveness = await asyncio.to_thread(liveness_lookup, probe_ids)
-                # runner_online is False only once the runner is gone from
-                # every replica (no tunnel anywhere AND runner_last_seen
-                # stale past the TTL), so this fires for a genuinely
-                # orphaned runner, never one mid-reconnect within grace.
+                # runner_online is False only when no replica has the runner's tunnel and
+                # its stamp is past the TTL, so a runner reconnecting within grace stays online.
                 offline_runner_ids = {
                     session_id
                     for session_id in probe_ids
@@ -2045,14 +2040,9 @@ def register_core_routes(
         for item in items:
             if item.id in offline_runner_ids:
                 item.pending_elicitations_count = 0
-        # Apart from the bounded stale-runner probe above, the list does not
-        # compute per-item liveness
-        # (runner_online / host_online). No list consumer reads it: the
-        # sidebar no longer surfaces connection state, and the only live
-        # consumer — the open-session view — sources liveness from the
-        # single-session snapshot, the WS stream, and the /health poll, not
-        # from list rows. Skipping it here removes the session-connectivity
-        # and hosts-table queries from every GET /v1/sessions.
+        # Beyond the stale-runner probe above, list rows skip per-item liveness
+        # (runner_online / host_online): no list consumer reads it, and skipping it saves
+        # the session-connectivity and hosts-table queries on every GET /v1/sessions.
         return PaginatedList(
             data=[item.model_dump(exclude_none=True) for item in items],
             first_id=page.first_id,

@@ -17,6 +17,7 @@ import httpx
 import pytest
 from playwright.sync_api import Page, expect
 
+from tests._helpers.polling import poll_until
 from tests.e2e_ui.conftest import (
     _create_bundled_session,
     _ensure_runner_online,
@@ -97,15 +98,10 @@ def _pending_elicitations(base_url: str, session_id: str) -> list[dict]:
     return response.json().get("pending_elicitations") or []
 
 
-def _wait_for_runner_offline(base_url: str, session_id: str, timeout_s: float = 30.0) -> None:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        response = httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=10.0)
-        response.raise_for_status()
-        if response.json().get("runner_online") is False:
-            return
-        time.sleep(0.25)
-    raise AssertionError(f"the server never recorded the runner of {session_id} as offline")
+def _runner_offline(base_url: str, session_id: str) -> bool:
+    response = httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=10.0)
+    response.raise_for_status()
+    return response.json().get("runner_online") is False
 
 
 def _shell_outputs(base_url: str, session_id: str) -> list[str]:
@@ -424,7 +420,7 @@ def test_inbox_lists_the_prompt_its_badge_counts_after_restart_without_runner(
 
         os.kill(int(cast(int, _server_state["runner_pid"])), signal.SIGKILL)
         # A runner that dies while the server shuts down keeps its reconnect grace.
-        _wait_for_runner_offline(live_server, session_id)
+        poll_until(lambda: _runner_offline(live_server, session_id), interval_s=0.25)
         restart_server(require_runner=False)
         page.reload()
         expect(inbox_items.first.or_(empty_state)).to_be_visible(timeout=30_000)
@@ -453,6 +449,10 @@ def test_inbox_lists_the_prompt_its_badge_counts_after_restart_without_runner(
             else:
                 mismatch_since = None
             page.wait_for_timeout(500)
+        expect(empty_state).to_be_visible()
+        expect(inbox_items).to_have_count(0)
+        expect(badge).to_be_hidden()
+        expect(needs_response_tag).to_be_hidden()
     finally:
         _recover_shared_runner()
         httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
