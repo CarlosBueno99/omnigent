@@ -17,6 +17,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from omnigent.debug_logging import record_to_row
 from omnigent.entities import DEFAULT_ENVIRONMENT_ID
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec, TerminalEnvSpec
 from omnigent.inner.os_env import EditEntry, OpResult, OSEnvironment
@@ -36,6 +37,7 @@ from omnigent.runner.resource_registry import (
     trim_terminal_output,
 )
 from omnigent.terminals import TerminalRegistry
+from tests._helpers.polling import poll_until_async
 from tests.runner.helpers import make_test_terminal_instance
 
 
@@ -56,9 +58,14 @@ from tests.runner.helpers import make_test_terminal_instance
     ],
 )
 async def test_claude_program_status_real_launch_and_fallback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, protocol: str, sandbox_type: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    protocol: str,
+    sandbox_type: str,
 ) -> None:
     """Exercise startup negotiation, raw PTY transport, status arbitration and cleanup."""
+    caplog.set_level(logging.INFO)
     monkeypatch.delenv("OMNIGENT_FEATURES", raising=False)
     if protocol == "disabled":
         monkeypatch.setenv("OMNIGENT_FEATURES", "-claude_osc_status")
@@ -190,8 +197,27 @@ async def test_claude_program_status_real_launch_and_fallback(
         async with asyncio.timeout(5):
             while reader.status is None or reader.status.state != "error":
                 await asyncio.sleep(0.02)
-        await asyncio.sleep(0.3)  # Longer than a poll, so a published failure would show here.
+        # Receiving the report does not mean the background poller has observed it yet.
+        await poll_until_async(
+            lambda: any(
+                getattr(record, "event_name", None) == "claude_program_error_observed"
+                for record in caplog.records
+            ),
+            timeout_s=5,
+        )
         assert statuses[-1] == ("running", None)
+        observations = [
+            record_to_row(record, source="runner")
+            for record in caplog.records
+            if getattr(record, "event_name", None) == "claude_program_error_observed"
+        ]
+        assert len(observations) == 1
+        assert observations[0]["session_id"] == "osc-test"
+        assert observations[0]["attributes"]["terminal_instance_id"] == instance.diagnostic_id
+        assert (
+            observations[0]["attributes"]["terminal_launch_id"]
+            == instance.lifecycle_trace.launch_id
+        )
         reader.path.unlink()
         reader.path.mkdir()  # Make snapshot replacement fail while the command keeps running.
         await instance.send(keys="b")

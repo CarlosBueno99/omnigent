@@ -85,6 +85,7 @@ from omnigent.native.native_coding_agents import (
     native_coding_agent_for_harness,
     native_coding_agent_for_wrapper_label,
 )
+from omnigent.onboarding.provider_config import harness_owns_its_credential
 from omnigent.policies.types import (
     ElicitationRequest,
     EvaluationContext,
@@ -345,6 +346,7 @@ from omnigent.server.routes._sessions.helpers import (
     _resolve_subagent_spec,
     _resource_event_item_from_sse,
     _routing_decision_item_from_sse,
+    _runner_supports_side_chat_settings,
     _RunnerForwardResult,
     _seed_missing_title_from_user_message,
     _session_status_from_cache,
@@ -7778,6 +7780,7 @@ async def _forward_codex_side_chat_turn(
         child lacks a parent id or a Codex thread-id label.
     """
     from omnigent.harnesses.claude_native.bridge import url_component
+    from omnigent.harnesses.codex_native.side_chat import EFFORT_RESET_LABEL
     from omnigent.server.routes._sessions.common import (
         _CODEX_NATIVE_SUBAGENT_THREAD_ID_LABEL_KEY,
     )
@@ -7792,6 +7795,13 @@ async def _forward_codex_side_chat_turn(
             "type": "message",
             "content": body.data.get("content"),
             "codex_side_thread_id": child_thread_id,
+            **({"model_override": conv.model_override} if conv.model_override is not None else {}),
+            **(
+                {"reasoning_effort": conv.reasoning_effort}
+                if conv.reasoning_effort is not None
+                or conv.labels.get(EFFORT_RESET_LABEL) == "true"
+                else {}
+            ),
         },
     )
     if resp.status_code >= 400:
@@ -13061,7 +13071,11 @@ def _validate_session_model_selection(
     :raises OmnigentError: If the harness cannot be resolved or its model policy rejects the pick.
     """
     from omnigent.harness_aliases import canonicalize_harness
+    from omnigent.harnesses.codex_native.side_chat import is_side_chat_child
     from omnigent.runtime.workflow import _find_spec_by_name
+
+    if _is_codex_native_subagent(conv) and is_side_chat_child(conv.labels):
+        return
 
     harness = canonicalize_harness(conv.harness_override)
     if harness and harness != "acp":
@@ -13473,6 +13487,7 @@ async def _get_session_snapshot(
     llm_model: str | None = None
     context_window: int | None = None
     agent_name: str | None = None
+    harness_owns_model = False
     if agent_store is not None and agent_cache is not None and conv.agent_id is not None:
         try:
             agent = await asyncio.to_thread(agent_store.get, conv.agent_id)
@@ -13509,6 +13524,11 @@ async def _get_session_snapshot(
                         else:
                             resolved_spec = _sub_spec
                     if resolved_spec is not None:
+                        # A self-authenticated harness (own-auth ACP) picks its
+                        # own model: the spec's pin is not what the session
+                        # runs, so claim neither it nor its context window.
+                        effective_harness = conv.harness_override or _spec_harness(resolved_spec)
+                        harness_owns_model = harness_owns_its_credential(effective_harness)
                         # Prefer the spec's name over the agent row's: a
                         # switch-created session-scoped clone is named
                         # "<builtin> (switch ag_…)" for row disambiguation,
@@ -13516,12 +13536,12 @@ async def _get_session_snapshot(
                         # carries the clean identity (e.g. "claude-native-ui").
                         if resolved_spec.name:
                             agent_name = resolved_spec.name
-                        llm_model = resolved_spec.executor.model
+                        llm_model = None if harness_owns_model else resolved_spec.executor.model
 
                         # Offload: may fetch a provider catalog (blocking IO).
                         context_window = await asyncio.to_thread(
                             resolve_effective_context_window,
-                            resolved_spec.executor.context_window,
+                            None if harness_owns_model else resolved_spec.executor.context_window,
                             llm_model,
                             model_override=conv.model_override,
                         )
@@ -13622,6 +13642,9 @@ async def _get_session_snapshot(
         viewer_id=viewer_id,
         agent_store=agent_store,
         agent_cache=agent_cache,
+    )
+    response.side_chat_settings_supported = await _runner_supports_side_chat_settings(
+        conv, conv_store, getattr(request.app.state, "tunnel_registry", None) if request else None
     )
     response.inference_configured = inference_configured
     response.inference_error = inference_error
