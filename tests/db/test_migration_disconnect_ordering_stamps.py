@@ -19,7 +19,7 @@ from omnigent.db.utils import _build_alembic_config
 _PRIOR_HEAD = "c8e4f2a6b901"
 _THIS_REVISION = "ng12ab34cd56"
 _MAIN_HEAD = "b2e4f6a8c013"
-_MERGE_REVISION = "e7c9a2d4f601"
+_MERGE_REVISION = "f3a7c9e2b014"
 _TABLE = "omnigent_conversation_metadata"
 
 
@@ -73,12 +73,12 @@ def test_live_status_at_is_added_nullable_and_existing_rows_read_null(tmp_path: 
         engine.dispose()
 
 
-def _stamp(uri: str, engine: sa.Engine, revision: str) -> None:
+def _stamp(uri: str, engine: sa.Engine, revision: str | list[str]) -> None:
     """Record *revision* as applied without running it, as an interrupted run can."""
     config = _build_alembic_config(uri)
     with engine.begin() as conn:
         config.attributes["connection"] = conn
-        command.stamp(config, revision)
+        command.stamp(config, revision, purge=True)
 
 
 def test_live_status_at_downgrades_and_replays(tmp_path: Path) -> None:
@@ -148,9 +148,54 @@ def test_disconnect_stamps_join_current_schema(tmp_path: Path, starting_revision
             assert set(
                 conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalars()
             ) == {
-                _MAIN_HEAD,
+                "d0a1f879a01d",
                 _THIS_REVISION,
             }
         _migrate(uri, engine, "head")
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("starting_revision", ["base", "e7c9a2d4f601", "d0a1f879a01d"])
+def test_runner_connection_fence_schema_replays_and_retains_tombstones(
+    tmp_path: Path, starting_revision: str
+) -> None:
+    uri = f"sqlite:///{tmp_path / 'runner-fences.db'}"
+    engine = sa.create_engine(uri)
+    try:
+        _migrate(uri, engine, starting_revision)
+        _migrate(uri, engine, "head")
+        table = sa.Table("runner_connections", sa.MetaData(), autoload_with=engine)
+        assert set(table.primary_key.columns.keys()) == {"workspace_id", "runner_id"}
+        epoch = bytes.fromhex("0123456789abcdef0123456789abcdef")
+        with engine.begin() as conn:
+            for workspace in (0, 1):
+                conn.execute(
+                    table.insert().values(
+                        workspace_id=workspace,
+                        runner_id="runner",
+                        epoch=epoch,
+                        state=2,
+                        last_seen=None,
+                        last_connected=123,
+                        heartbeat_epoch=epoch,
+                    )
+                )
+        # The sibling migration remains applied; replay only the fence revision.
+        _stamp(uri, engine, ["e7c9a2d4f601", "d0a1f879a01d"])
+        _migrate(uri, engine, "head")
+        with engine.connect() as conn:
+            rows = conn.execute(sa.select(table).order_by(table.c.workspace_id)).all()
+            assert [
+                (r.workspace_id, r.state, r.last_seen, r.last_connected, r.epoch) for r in rows
+            ] == [
+                (0, 2, None, 123, epoch),
+                (1, 2, None, 123, epoch),
+            ]
+        _migrate(uri, engine, "e7c9a2d4f601", downgrade=True)
+        assert not sa.inspect(engine).has_table("runner_connections")
+        _migrate(uri, engine, "head")
+        with engine.connect() as conn:
+            assert conn.execute(sa.select(sa.func.count()).select_from(table)).scalar_one() == 0
     finally:
         engine.dispose()
