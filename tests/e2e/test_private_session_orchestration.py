@@ -230,7 +230,15 @@ def test_private_manager_launch_send_read_and_sharing(
                         return json.loads(content[0]["text"])
                     if harness == "claude-sdk":
                         if isinstance(output, list):
-                            output = "\n".join(block["text"] for block in output)
+                            # The CLI appends budget reminders outside the JSON payload.
+                            assert output and output[0]["type"] == "text"
+                            assert all(
+                                block["type"] == "text"
+                                and block["text"].strip().startswith("<system-reminder>")
+                                and block["text"].strip().endswith("</system-reminder>")
+                                for block in output[1:]
+                            )
+                            output = output[0]["text"]
                         return json.loads(output)
                     return ast.literal_eval(output)
 
