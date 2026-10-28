@@ -2197,7 +2197,11 @@ describe("session PR selection", () => {
     expect(picker).toHaveTextContent("example/two #42 — Second repository");
     expect(picker).not.toHaveAttribute("title");
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
-    expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", { poll: true, prUrl: two });
+    expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", {
+      poll: true,
+      prUrl: two,
+      includeReviewThreads: false,
+    });
     await user.hover(picker);
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
       "example/two #42 — Second repository",
@@ -2225,7 +2229,11 @@ describe("session PR selection", () => {
     expect(fallback).toHaveAttribute("href", two);
     await user.click(picker);
     await user.click(screen.getByRole("option", { name: "example/one #42 — First repository" }));
-    expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", { poll: true, prUrl: one });
+    expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", {
+      poll: true,
+      prUrl: one,
+      includeReviewThreads: false,
+    });
 
     state.info = { isLoading: true, error: null, isFetching: true };
     rerender(<PullRequestPanel conversationId="conv_other" />);

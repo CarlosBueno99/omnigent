@@ -5,7 +5,7 @@
 // invalidate proven in useWorkspaceChangedFiles.test.tsx.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/hooks/RunnerHealthProvider", () => ({
@@ -47,8 +47,16 @@ function pullRequestInfoResponse(): Response {
   } as unknown as Response;
 }
 
-function Probe({ id }: { id: string | undefined }) {
-  usePullRequestInfo(id);
+function Probe({
+  id,
+  poll,
+  includeReviewThreads,
+}: {
+  id: string | undefined;
+  poll?: boolean;
+  includeReviewThreads?: boolean;
+}) {
+  usePullRequestInfo(id, { poll, includeReviewThreads });
   return null;
 }
 
@@ -62,11 +70,48 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.resetAllMocks();
 });
 
 describe("usePullRequestInfo turn-end invalidate", () => {
+  it("shares one poll with lightweight observers and includes threads only while requested", async () => {
+    vi.useFakeTimers();
+    stubChatStore(null, "idle");
+    fetchMock.mockImplementation(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        object: "session.github.info",
+        available: true,
+        tracking_available: true,
+      }),
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const tree = (include: boolean) => (
+      <QueryClientProvider client={client}>
+        <Probe id="conv_shared" poll includeReviewThreads={include} />
+        <Probe id="conv_shared" />
+      </QueryClientProvider>
+    );
+    const view = render(tree(false));
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    view.rerender(tree(true));
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1][0]).toContain("include_review_threads=true");
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[2][0]).toContain("include_review_threads=true");
+    view.rerender(tree(false));
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock.mock.calls[3][0]).toBe("/v1/sessions/conv_shared/resources/github");
+    client.clear();
+  });
+
   it("refetches github info when the focused session goes running → idle", async () => {
     stubChatStore("conv_live", "running");
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 0 } } });
