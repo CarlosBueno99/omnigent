@@ -108,6 +108,12 @@ class _FakeCodexNativeClient:
         """
         self.closed = True
 
+    def connection_diagnostics(self) -> dict[str, object]:
+        return {
+            "rpc_transport": "websocket" if self.ws_url is not None else "unix",
+            "rpc_connection_phase": "ready" if self.connected else "websocket_handshake",
+        }
+
     async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """
         Capture a Codex JSON-RPC request and return a canned response.
@@ -3361,6 +3367,8 @@ def test_run_turn_reports_unreachable_app_server_as_undelivered(
     assert row["event_name"] == "codex_app_server_unreachable"
     assert row["session_id"] == "conv_123"
     assert row["attributes"]["thread_id"] == "thread_123"
+    assert row["attributes"]["rpc_connection_phase"] == "websocket_handshake"
+    assert row["attributes"]["rpc_error_type_0"] == type(error).__name__
     assert "hello" not in json.dumps(row["attributes"])
 
 
@@ -3421,6 +3429,7 @@ class _ResetAfterSubmitClient(_FakeCodexNativeClient):
 def test_run_turn_error_after_submit_is_not_marked_undelivered(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """
     A connection error once the turn was submitted stays an ambiguous failure.
@@ -3446,6 +3455,14 @@ def test_run_turn_error_after_submit_is_not_marked_undelivered(
     assert failure.preserve_session is True
     assert failure.retryable is False
     assert [method for method, _params in _ResetAfterSubmitClient.requests] == ["turn/start"]
+    record = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event_name", None) == "codex_turn_injection_failed"
+    )
+    assert record.attributes["rpc_connection_phase"] == "ready"
+    assert record.attributes["rpc_error_type_0"] == "InjectionDeliveryAmbiguous"
+    assert record.attributes["rpc_error_type_1"] == "ConnectionResetError"
 
 
 @pytest.mark.asyncio
