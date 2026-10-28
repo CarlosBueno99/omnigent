@@ -552,7 +552,7 @@ def test_claude_terminal_env_disables_refusal_fallback_for_effective_gateway(
 
 
 @pytest.mark.parametrize(
-    ("base_url", "configured_flag", "expected_flag"),
+    ("provider_url", "configured_flag", "expected_flag"),
     [
         ("https://gateway.example/anthropic", "0", "1"),
         ("https://api.anthropic.com", "0", "0"),
@@ -560,11 +560,13 @@ def test_claude_terminal_env_disables_refusal_fallback_for_effective_gateway(
     ],
 )
 def test_claude_terminal_env_refusal_fallback_provider_override(
-    base_url: str, configured_flag: str, expected_flag: str
+    provider_url: str, configured_flag: str, expected_flag: str
 ) -> None:
     """Gateway launches force the guard; direct Anthropic keeps explicit preferences."""
     flag = "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK"
-    config = ClaudeNativeUcodeConfig(env={"ANTHROPIC_BASE_URL": base_url, flag: configured_flag})
+    config = ClaudeNativeUcodeConfig(
+        env={"ANTHROPIC_BASE_URL": provider_url, flag: configured_flag}
+    )
 
     assert build_native_claude_terminal_env(config)[flag] == expected_flag
 
