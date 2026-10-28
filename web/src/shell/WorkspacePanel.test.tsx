@@ -1468,7 +1468,8 @@ describe("WorkspacePanel sub-agent tabs", () => {
 
   it("shows the sub-agent's whole session with a full-screen link", () => {
     writeSessionWorkspaceState("conv_ws", {
-      openSideChats: [SUBAGENT_TAB, "conv_side"],
+      openSideChats: ["conv_side"],
+      chatTabs: [SUBAGENT_TAB, "conv_side"],
       selectedSideChatId: SUBAGENT_TAB,
     });
     renderWorkspace({ rightRailTab: "sidechat", queryClient: clientWithSubagent() });
@@ -1532,7 +1533,7 @@ describe("WorkspacePanel sub-agent tabs", () => {
   it("shows the transcript read-only without edit access", () => {
     canEditMock.mockReturnValue(false);
     writeSessionWorkspaceState("conv_ws", {
-      openSideChats: [SUBAGENT_TAB],
+      chatTabs: [SUBAGENT_TAB],
       selectedSideChatId: SUBAGENT_TAB,
     });
     renderWorkspace({ rightRailTab: "sidechat", queryClient: clientWithSubagent() });
@@ -1543,7 +1544,7 @@ describe("WorkspacePanel sub-agent tabs", () => {
   it("closes the tab without stopping the sub-agent", () => {
     const stop = vi.spyOn(sessionsApi, "stopSession");
     writeSessionWorkspaceState("conv_ws", {
-      openSideChats: [SUBAGENT_TAB],
+      chatTabs: [SUBAGENT_TAB],
       selectedSideChatId: SUBAGENT_TAB,
     });
     renderWorkspace({ rightRailTab: "sidechat", queryClient: clientWithSubagent() });
@@ -1557,7 +1558,7 @@ describe("WorkspacePanel sub-agent tabs", () => {
 
   it("falls back to a generic label until the session loads", () => {
     vi.spyOn(sessionsApi, "getSessionSlim").mockReturnValue(new Promise(() => {}));
-    writeSessionWorkspaceState("conv_ws", { openSideChats: [SUBAGENT_TAB] });
+    writeSessionWorkspaceState("conv_ws", { chatTabs: [SUBAGENT_TAB] });
     renderWorkspace();
 
     expect(screen.getByRole("tab", { name: "Sub-agent" })).toBeInTheDocument();
@@ -1565,7 +1566,7 @@ describe("WorkspacePanel sub-agent tabs", () => {
 
   it("lists the sub-agent in the panel picker and the phone drawer", () => {
     writeSessionWorkspaceState("conv_ws", {
-      openSideChats: [SUBAGENT_TAB],
+      chatTabs: [SUBAGENT_TAB],
       selectedSideChatId: SUBAGENT_TAB,
     });
     const { onRightRailTabChange } = renderWorkspace({ queryClient: clientWithSubagent() });
@@ -1581,7 +1582,9 @@ describe("WorkspacePanel sub-agent tabs", () => {
       queryClient: clientWithSubagent(),
     });
     const drawer = screen.getByTestId("side-chats-panel-drawer");
-    expect(within(drawer).getByRole("tab", { name: "Research agent" })).toBeInTheDocument();
+    // Long sub-agent titles truncate instead of widening the drawer's tab row.
+    const drawerTab = within(drawer).getByRole("tab", { name: "Research agent" });
+    expect(within(drawerTab).getByText("Research agent")).toHaveClass("truncate");
     expect(within(drawer).getByTestId("subagent-tab-pane")).toBeInTheDocument();
   });
 });

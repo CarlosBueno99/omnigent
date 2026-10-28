@@ -219,7 +219,10 @@ export function writeSessionWorkspaceState(
     next.openSideChats = next.openSideChats.slice(-MAX_OPEN_FILES);
   }
   if (next.chatTabs && next.chatTabs.length > MAX_OPEN_FILES) {
-    next.chatTabs = next.chatTabs.slice(-MAX_OPEN_FILES);
+    const kept = next.chatTabs.slice(-MAX_OPEN_FILES);
+    next.chatTabs = kept;
+    // Drop the same side chats from both lists so a reload keeps the tab order.
+    next.openSideChats = next.openSideChats?.filter((id) => kept.includes(id));
   }
   // Drop any existing entry and re-append so the most-recently-touched session
   // moves to the end; pruning then evicts from the front (oldest-touched).

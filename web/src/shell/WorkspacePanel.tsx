@@ -1066,7 +1066,7 @@ function WorkspacePanelImpl({
     terminalShown,
   ]);
   const subagentTabLabels = useSubagentTabLabels(sideChats.tabs);
-  // Sub-agent tabs show the sub-agent's name; side chats keep their own count.
+  // Number only side chats so their labels stay put as sub-agent tabs open and close.
   const chatTabLabels: Record<string, string> = {};
   let sideChatNumber = 0;
   for (const tabId of sideChats.tabs) {
@@ -1075,14 +1075,18 @@ function WorkspacePanelImpl({
   const selectedSideChat = sideChats.selected;
   const selectedSubagentId =
     selectedSideChat === null ? null : subagentSessionIdFromTab(selectedSideChat);
-  const selectedSideChatPane =
-    selectedSideChat === null ? null : selectedSubagentId !== null ? (
-      <SubagentTabPane
-        key={selectedSideChat}
-        sessionId={selectedSubagentId}
-        label={chatTabLabels[selectedSideChat] ?? SUBAGENT_TAB_FALLBACK_LABEL}
-      />
-    ) : (
+  const renderSelectedSideChatPane = () => {
+    if (selectedSideChat === null) return null;
+    if (selectedSubagentId !== null) {
+      return (
+        <SubagentTabPane
+          key={selectedSideChat}
+          sessionId={selectedSubagentId}
+          label={chatTabLabels[selectedSideChat] ?? SUBAGENT_TAB_FALLBACK_LABEL}
+        />
+      );
+    }
+    return (
       <SideChatPane
         key={selectedSideChat}
         childId={selectedSideChat}
@@ -1100,6 +1104,8 @@ function WorkspacePanelImpl({
         }
       />
     );
+  };
+  const selectedSideChatPane = renderSelectedSideChatPane();
   const closeSideChat = async (childId: string) => {
     // Closing a sub-agent tab only hides it; the sub-agent keeps running.
     if (subagentSessionIdFromTab(childId) !== null) {
@@ -1858,9 +1864,13 @@ function WorkspacePanelImpl({
                     type="button"
                     role="tab"
                     aria-selected={active}
+                    className="flex items-center gap-1"
                     onClick={() => sideChats.select(childId)}
                   >
-                    {label}
+                    {subagentSessionIdFromTab(childId) !== null && (
+                      <BotIcon className="size-4 shrink-0" />
+                    )}
+                    <span className="max-w-[16ch] truncate">{label}</span>
                   </button>
                   <button
                     type="button"

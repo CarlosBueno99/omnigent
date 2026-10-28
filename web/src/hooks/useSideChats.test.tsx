@@ -138,6 +138,18 @@ describe("side-chat soft tabs", () => {
     expect(result.current.tabs).toEqual(["conv_a", subagentTab, "conv_new"]);
   });
 
+  it("keeps mixed tab order when the oldest tab is dropped at the cap", () => {
+    const subagentTab = subagentTabId("conv_child");
+    const sideChatIds = Array.from({ length: 20 }, (_, index) => `conv_${index + 1}`);
+    const first = renderHook(() => useSideChats("session-a"));
+    for (const id of sideChatIds) act(() => first.result.current.open(id));
+    act(() => first.result.current.open(subagentTab));
+    first.unmount();
+
+    const restored = renderHook(() => useSideChats("session-a"));
+    expect(restored.result.current.tabs).toEqual([...sideChatIds.slice(1), subagentTab]);
+  });
+
   it("closes the target tab and selects a neighbor, then clears", () => {
     const { result } = renderHook(() => useSideChats("session-a"));
     act(() => result.current.open("conv_1"));

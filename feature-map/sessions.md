@@ -382,6 +382,9 @@ an existing side chat or choosing Resume after the parent's runner exited (for
 example, on its idle timeout) also relaunches the parent, then moves the side
 chat to that runner. Close a side
 chat with its tab's close button; the parent and sibling chats keep running.
+With Settings → General → **Open sub-agents in the Workspace panel** on, the
+same strip also holds sub-agent tabs, marked with a bot icon. Closing one only
+hides it; the sub-agent keeps running.
 While a side chat works, typing a follow-up turns Interrupt into Send, which
 queues or steers it as the main composer does; Escape still interrupts. Its queue
 strip offers edit, steer, reorder and delete, and Mod+Enter steers them all.
