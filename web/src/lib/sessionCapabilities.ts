@@ -168,10 +168,8 @@ export function readOnlyReasonForSessionLabels(
   const closed =
     activeSession?.labels?.["omnigent.closed"] ?? activeConv?.labels?.["omnigent.closed"];
   if (closed === "true") {
-    // A codex /side child is sealed (server-computed) once its ephemeral fork's
-    // runner is gone; give it a side-chat-specific reason rather than the
-    // generic sub-agent one so the user understands it's read-only for good.
-    // "Side chat" is the nickname the server stamps on a /side fork.
+    // The server seals a codex /side fork (nickname "Side chat") once its runner
+    // is gone; say so instead of the generic sub-agent reason.
     const wrapperLabel =
       activeSession?.labels?.["omnigent.wrapper"] ?? activeConv?.labels?.["omnigent.wrapper"];
     const nickname =

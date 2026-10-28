@@ -56,7 +56,8 @@ export function useSideChats(conversationId: string) {
         chatTabs: sideChats.length === next.tabs.length ? undefined : next.tabs,
         selectedSideChatId: next.selected,
       });
-      setState(next);
+      // Show what was saved: the tab cap may have trimmed `next`.
+      setState(readSideChatTabsState(conversationId));
     },
     [conversationId],
   );

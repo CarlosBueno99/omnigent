@@ -793,6 +793,8 @@ interface WorkspacePanelProps {
   mobileSideChatsOpen?: boolean;
   /** Open or close the mobile side-chats drawer. */
   onMobileSideChatsOpenChange?: (open: boolean) => void;
+  /** Reports whether a sub-agent tab is open, so a phone can reach the drawer. */
+  onHasSubagentTabsChange?: (hasSubagentTabs: boolean) => void;
 }
 
 /**
@@ -863,6 +865,7 @@ function WorkspacePanelImpl({
   onShellCreateFailed,
   mobileSideChatsOpen = false,
   onMobileSideChatsOpenChange,
+  onHasSubagentTabsChange,
 }: WorkspacePanelProps) {
   const terminalShown = selectedTerminalKey !== null && openTerminals.includes(selectedTerminalKey);
   const contentSearchInputRef = useRef<HTMLInputElement>(null);
@@ -890,6 +893,10 @@ function WorkspacePanelImpl({
 
   // ── Side chats: rail tabs backed by forked child conversations. ──────────
   const sideChats = useSideChats(conversationId);
+  const hasSubagentTabs = sideChats.tabs.some((id) => subagentSessionIdFromTab(id) !== null);
+  useEffect(() => {
+    onHasSubagentTabsChange?.(hasSubagentTabs);
+  }, [hasSubagentTabs, onHasSubagentTabsChange]);
   const activeHarness = useChatStore((s) => s.sessionHarness);
   const sideChatHarness = sessionHarness === undefined ? activeHarness : sessionHarness;
   const sideChatToOpen = useChatStore((s) => s.sideChatToOpen);

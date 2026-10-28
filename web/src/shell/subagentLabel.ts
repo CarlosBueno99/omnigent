@@ -77,8 +77,7 @@ export function subAgentComposerLabel(
   // show the friendly nickname label ("Side chat") instead of that UUID suffix.
   const codexLabel = codexNativeSubagentLabel(session.labels);
   if (codexLabel) return codexLabel;
-  // Strip the user-added "ui:" sentinel so its "agent:name" suffix reads
-  // like an LLM-spawned title.
+  // Drop the "ui:" sentinel on user-added rows.
   let title = session.title ?? null;
   if (title?.startsWith("ui:")) title = title.slice(3);
   if (title?.includes(":")) {

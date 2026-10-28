@@ -64,6 +64,7 @@ export function sessionQueryOptions(sessionId: string | null) {
   return {
     queryKey: ["session", sessionId] as const,
     queryFn: () => getSessionSlim(sessionId as string, { refreshState: true }),
+    enabled: sessionId !== null,
     staleTime: Infinity,
     retry: false,
   };

@@ -1925,10 +1925,8 @@ function AppShellImpl() {
     if (isMobileViewport()) openSideChatsPanel();
   }, [sideChatToOpen, conversationId, openSideChatsPanel, setRightPanelOpenAnimated]);
   const showSideChats = supportsSideChat(useChatStore((s) => s.sessionHarness));
-  // With the "open sub-agents in the Workspace panel" setting on, sub-agent
-  // links in this chat open a rail tab instead of replacing the chat. The root
-  // and other ancestors stay full-page links, so a tab only holds work below.
-  // Without a mounted WorkspacePanel to take the request, the link navigates.
+  // With the panel setting on, sub-agent links open a rail tab beside this chat.
+  // Ancestors, or a click with no WorkspacePanel to take it, still navigate.
   const parentSessionId = activeSession?.parentSessionId;
   const workspacePanelMounted = hasRailContent || selectedFilePath !== null;
   const openSubagentInPanel = useCallback(
@@ -1959,10 +1957,7 @@ function AppShellImpl() {
   );
   // Sub-agent tabs opened on desktop must stay reachable from a phone's
   // drawer even when this harness can't start side chats.
-  const hasPersistedChatTabs = useMemo(
-    () => !!conversationId && (readSessionWorkspaceState(conversationId).chatTabs?.length ?? 0) > 0,
-    [conversationId],
-  );
+  const [hasSubagentTabs, setHasSubagentTabs] = useState(false);
 
   function openTerminalsPanel(key: string) {
     setSelectedFilePath(null); // close file viewer
@@ -2593,7 +2588,7 @@ function AppShellImpl() {
                         shellsPanelOpen,
                         githubPanelOpen,
                         sideChatsPanelOpen,
-                        showSideChats: showSideChats || hasPersistedChatTabs,
+                        showSideChats: showSideChats || hasSubagentTabs,
                         hideTerminalsTab,
                         // Mobile: reachable when a shell exists OR the agent
                         // declares shell access (so the drawer's "+ New shell" row
@@ -2702,6 +2697,7 @@ function AppShellImpl() {
                       onShellCreateFailed={clearShellCreatePending}
                       mobileSideChatsOpen={sideChatsPanelOpen}
                       onMobileSideChatsOpenChange={setSideChatsPanelOpen}
+                      onHasSubagentTabsChange={setHasSubagentTabs}
                     />
                   )}
                 </div>

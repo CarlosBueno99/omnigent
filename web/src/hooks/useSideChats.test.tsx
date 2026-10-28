@@ -156,6 +156,8 @@ describe("side-chat soft tabs", () => {
     act(() => first.result.current.open(subagentTabId("conv_old")));
     for (const id of sideChatIds) act(() => first.result.current.open(id));
     act(() => first.result.current.open(subagentTabId("conv_new")));
+    // The tabs on screen match what was saved, not the untrimmed list.
+    expect(first.result.current.tabs).toEqual([...sideChatIds, subagentTabId("conv_new")]);
     first.unmount();
 
     const restored = renderHook(() => useSideChats("session-a"));

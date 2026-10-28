@@ -34,12 +34,15 @@ export function useSubagentTabLabels(tabIds: readonly string[]): Record<string, 
 
 /**
  * A sub-agent's full conversation in the parent's Workspace panel. Read-only
- * without edit access, or when the full-screen chat would be (e.g. a Claude Code sub-agent).
+ * without edit access, until its snapshot loads, or when the full-screen chat
+ * would be (e.g. a Claude Code sub-agent).
  */
 export function SubagentTabPane({ sessionId, label }: { sessionId: string; label: string }) {
   const canEdit = useCanEdit(sessionId);
   const { session } = useSession(sessionId);
   const readOnlyReason = readOnlyReasonForSessionLabels(session, null);
+  // The labels that decide read-only arrive with the snapshot, so don't offer a composer first.
+  const readOnly = !canEdit || session === null || readOnlyReason !== null;
   const search = sessionNavigationSearch(useLocation().search);
   return (
     <div data-testid="subagent-tab-pane" className="flex h-full min-h-0 flex-1 flex-col">
@@ -57,12 +60,7 @@ export function SubagentTabPane({ sessionId, label }: { sessionId: string; label
         </Link>
       </div>
       <div className="min-h-0 flex-1">
-        <SideChatPane
-          key={sessionId}
-          childId={sessionId}
-          fullSession
-          readOnly={!canEdit || readOnlyReason !== null}
-        />
+        <SideChatPane key={sessionId} childId={sessionId} fullSession readOnly={readOnly} />
       </div>
       {readOnlyReason !== null && (
         <p

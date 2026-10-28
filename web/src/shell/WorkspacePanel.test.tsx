@@ -182,6 +182,7 @@ function renderWorkspace(
     inert?: boolean;
     mobileSideChatsOpen?: boolean;
     queryClient?: QueryClient;
+    initialPath?: string;
   } = {},
 ) {
   let overrides = initialOverrides;
@@ -199,7 +200,7 @@ function renderWorkspace(
     new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const tree = () => (
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[initialOverrides.initialPath ?? "/"]}>
         <TooltipProvider delayDuration={0}>
           <WorkspacePanel
             conversationId={overrides.conversationId ?? "conv_ws"}
@@ -1472,7 +1473,11 @@ describe("WorkspacePanel sub-agent tabs", () => {
       chatTabs: [SUBAGENT_TAB, "conv_side"],
       selectedSideChatId: SUBAGENT_TAB,
     });
-    renderWorkspace({ rightRailTab: "sidechat", queryClient: clientWithSubagent() });
+    renderWorkspace({
+      rightRailTab: "sidechat",
+      queryClient: clientWithSubagent(),
+      initialPath: "/c/conv_ws?debug=1&file=notes.md",
+    });
     const rail = screen.getByRole("complementary", { name: "Workspace" });
 
     // Side chats keep their own numbering beside sub-agent tabs.
@@ -1488,10 +1493,22 @@ describe("WorkspacePanel sub-agent tabs", () => {
       "data-full-session",
       "true",
     );
+    // Global params like debug carry over; the parent's file param does not.
     expect(within(pane).getByRole("link", { name: "Open full screen" })).toHaveAttribute(
       "href",
-      "/c/conv_child",
+      "/c/conv_child?debug=1",
     );
+  });
+
+  it("keeps the tab read-only until the sub-agent's snapshot loads", () => {
+    vi.spyOn(sessionsApi, "getSessionSlim").mockReturnValue(new Promise(() => {}));
+    writeSessionWorkspaceState("conv_ws", {
+      chatTabs: [SUBAGENT_TAB],
+      selectedSideChatId: SUBAGENT_TAB,
+    });
+    renderWorkspace({ rightRailTab: "sidechat" });
+
+    expect(screen.getByTestId("side-chat-pane-stub")).toHaveAttribute("data-read-only", "true");
   });
 
   it("leaves a pending native side chat waiting for its own fork", async () => {
