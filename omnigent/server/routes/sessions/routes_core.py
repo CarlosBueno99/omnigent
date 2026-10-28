@@ -1966,7 +1966,6 @@ def register_core_routes(
         # here and never reaches the probe. Only stamp-stale candidates fall
         # through to liveness_lookup, which additionally rules out a runner
         # whose tunnel is live on THIS replica before we settle.
-        # The probe also zeroes pending counts on stale-stamp rows whose runner is offline (WS rule).
         offline_runner_ids: set[str] = set()
         if liveness_lookup is not None:
             stale_runner_rows = [
@@ -1991,6 +1990,7 @@ def register_core_routes(
                     == LEVEL_OWNER
                 )
             ]
+            # Also probe stale-stamp rows with pending prompts; offline runners read 0 (WS rule).
             pending_suspect_ids = {
                 conv.id
                 for conv in stale_runner_rows
@@ -2001,8 +2001,8 @@ def register_core_routes(
             )
             if probe_ids:
                 stale_liveness = await asyncio.to_thread(liveness_lookup, probe_ids)
-                # runner_online is False only when no replica has the runner's tunnel and
-                # its stamp is past the TTL, so a runner reconnecting within grace stays online.
+                # runner_online is False only when no replica holds the runner's tunnel and
+                # its stamp is cleared or past the TTL.
                 offline_runner_ids = {
                     session_id
                     for session_id in probe_ids

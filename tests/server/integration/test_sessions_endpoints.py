@@ -4256,34 +4256,40 @@ async def test_list_sessions_exposes_pending_elicitations_count(
 
 
 @pytest.mark.parametrize(
-    ("runner_stamp_age_s", "expected_count"),
+    ("prompt_holder", "runner_stamp_age_s", "expected_count"),
     [
-        pytest.param(0, 2, id="runner-live-on-another-replica"),
-        pytest.param(None, 0, id="runner-disconnected"),
-        pytest.param(RUNNER_LIVENESS_TTL_S + 1, 0, id="runner-stamp-expired"),
+        pytest.param("row", 0, 2, id="row-runner-live-on-another-replica"),
+        pytest.param("row", None, 0, id="row-runner-disconnected"),
+        pytest.param("row", RUNNER_LIVENESS_TTL_S + 1, 0, id="row-runner-stamp-expired"),
+        pytest.param("index", None, 0, id="index-runner-disconnected"),
     ],
 )
-async def test_list_sessions_pending_count_falls_back_to_row_for_bound_session(
+async def test_list_sessions_pending_count_for_bound_session_follows_runner_liveness(
     client: httpx.AsyncClient,
     db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    prompt_holder: str,
     runner_stamp_age_s: int | None,
     expected_count: int,
 ) -> None:
-    """A runner-bound session surfaces its persisted pending count when the
-    local in-memory index is empty, but only while its runner is live.
+    """A runner-bound session surfaces its pending count only while its
+    runner is live, whether the count is on the row or in the local index.
 
     The tunnel-holding replica writes ``pending_elicitation_count`` to the
     row; a replica that does NOT hold the tunnel has an empty
     ``pending_elicitations`` index for that session and must fall back to
     the row so a parked approval isn't hidden. A runner that is gone left no
-    prompt to list, so its stale row count reads as zero (the rule the WS
-    stream applies) instead of badging an empty inbox. Complements
+    prompt to list, so its count reads as zero from either source (the rule
+    the WS stream applies) instead of badging an empty inbox. Complements
     ``test_list_sessions_exposes_pending_elicitations_count`` (which covers
     the index-authoritative, unbound path).
 
     :param client: Test HTTP client backed by the real app.
     :param db_uri: The app's DB, opened directly to seed the row the way a
         different replica's live-state write would have.
+    :param monkeypatch: Drops the row-mirror write for the ``"index"`` case.
+    :param prompt_holder: ``"row"`` to seed the persisted count, or
+        ``"index"`` to seed only this replica's in-memory index.
     :param runner_stamp_age_s: Age of the ``runner_last_seen`` stamp in
         seconds, or ``None`` when the disconnect cleared it.
     :param expected_count: The list row's expected pending count.
@@ -4299,13 +4305,20 @@ async def test_list_sessions_pending_count_falls_back_to_row_for_bound_session(
     session = await _create_session(client, agent["id"])
     session_id = session["id"]
 
-    # Bind a runner and seed the persisted count directly — simulating the
-    # tunnel-holding replica's row write. THIS replica's index stays empty
-    # (no record_publish here), so a correct read falls back to the row.
+    # A "row" prompt simulates the tunnel-holding replica's row write while
+    # THIS replica's index stays empty, so a correct read falls back to the row.
     pending_elicitations.reset_for_tests()
     store = SqlAlchemyConversationStore(db_uri)
     assert store.set_runner_id(session_id, "runner_other_replica")
-    store.set_pending_elicitation_count(session_id, 2)
+    if prompt_holder == "row":
+        store.set_pending_elicitation_count(session_id, 2)
+    else:
+        # A dropped row-mirror write leaves the prompt only in this replica's index.
+        monkeypatch.setattr(pending_elicitations, "_count_persist_hook", None)
+        pending_elicitations.record_publish(
+            session_id,
+            {"type": "response.elicitation_request", "elicitation_id": "elicit_offline"},
+        )
     if runner_stamp_age_s is not None:
         store.touch_runner_liveness(
             ["runner_other_replica"], int(time.time()) - runner_stamp_age_s
@@ -4318,6 +4331,7 @@ async def test_list_sessions_pending_count_falls_back_to_row_for_bound_session(
     assert row["pending_elicitations_count"] == expected_count
 
     store.set_pending_elicitation_count(session_id, 0)
+    pending_elicitations.reset_for_tests()
 
 
 async def test_get_session_includes_runner_online(
