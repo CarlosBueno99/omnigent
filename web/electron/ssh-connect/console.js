@@ -17,6 +17,7 @@ const promptTextEl = document.getElementById("prompt-text");
 const promptInput = document.getElementById("prompt-input");
 const promptOk = document.getElementById("prompt-ok");
 const promptCancel = document.getElementById("prompt-cancel");
+const footerEl = document.querySelector("footer");
 
 let destination = "this machine";
 let resizeFrame = null;
@@ -24,8 +25,14 @@ function resizeToContent() {
   if (resizeFrame !== null) cancelAnimationFrame(resizeFrame);
   resizeFrame = requestAnimationFrame(() => {
     resizeFrame = null;
+    // While running, the body is viewport-tall, so overflow past it eats the
+    // bottom padding instead of growing scrollHeight; measure to the footer.
+    const footerBottom =
+      footerEl.getBoundingClientRect().bottom +
+      window.scrollY +
+      parseFloat(getComputedStyle(document.body).paddingBottom || "0");
     window.sshConnect.resizeToContent({
-      height: document.documentElement.scrollHeight,
+      height: Math.max(document.documentElement.scrollHeight, Math.ceil(footerBottom)),
       phase: document.body.dataset.phase,
     });
   });
@@ -66,7 +73,8 @@ function ensureTerminal() {
   term.loadAddon(fitAddon);
   term.open(terminalEl);
   fitAddon.fit();
-  window.addEventListener("resize", () => fitAddon.fit());
+  // The panel shrinks when a prompt or a long status appears, not only on window resize.
+  new window.ResizeObserver(() => fitAddon.fit()).observe(terminalEl);
   return term;
 }
 

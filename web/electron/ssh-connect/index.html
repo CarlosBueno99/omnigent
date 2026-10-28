@@ -95,7 +95,8 @@
       }
       body:not([data-phase="asking"]) #console {
         flex: 1;
-        min-height: 0;
+        min-height: 140px;
+        overflow: hidden;
       }
       #commands div {
         white-space: pre-wrap;
@@ -109,6 +110,7 @@
       #terminal {
         flex: 1;
         min-height: 0;
+        overflow: hidden;
       }
       body[data-phase="asking"] #terminal,
       body[data-phase="asking"] #status {

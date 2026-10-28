@@ -141,7 +141,14 @@ function renderConsole(t) {
     { runScripts: "outside-only" },
   );
   t.after(() => dom.window.close());
-  const page = { document: dom.window.document, events: {}, answers: [], confirmed: 0 };
+  const page = {
+    document: dom.window.document,
+    events: {},
+    answers: [],
+    confirmed: 0,
+    refits: 0,
+    resizeCallbacks: new Map(),
+  };
   dom.window.sshConnect = {
     confirm: () => {
       page.confirmed += 1;
@@ -162,8 +169,18 @@ function renderConsole(t) {
   };
   dom.window.FitAddon = {
     FitAddon: class FitAddon {
-      fit() {}
+      fit() {
+        page.refits += 1;
+      }
     },
+  };
+  dom.window.ResizeObserver = class ResizeObserver {
+    constructor(callback) {
+      this.callback = callback;
+    }
+    observe(element) {
+      page.resizeCallbacks.set(element, this.callback);
+    }
   };
   dom.window.requestAnimationFrame = (callback) => {
     callback();
@@ -213,9 +230,14 @@ describe("SSH connect console page", () => {
   });
 
   it("shows progress and the final outcome", (t) => {
-    const { document, events } = renderConsole(t);
+    const page = renderConsole(t);
+    const { document, events } = page;
     events.Init({ serverUrl: SERVER, destination: "my-ec2", commands: [] });
     events.Started({});
+    // A prompt shrinks the output panel without resizing the window; the terminal must refit.
+    const refitsBefore = page.refits;
+    page.resizeCallbacks.get(document.getElementById("terminal"))?.();
+    assert.equal(page.refits, refitsBefore + 1);
     events.Status({ step: "waiting-for-browser" });
     assert.match(
       document.getElementById("status").textContent,
