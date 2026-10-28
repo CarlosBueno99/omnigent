@@ -5,6 +5,7 @@ from __future__ import annotations
 import configparser
 import json
 import os
+import socket
 import stat
 import subprocess
 import sys
@@ -16,6 +17,7 @@ from types import SimpleNamespace
 
 import anyio
 import httpx
+import psutil
 import pytest
 
 from omnigent.host import databricks_credential as dc
@@ -73,6 +75,8 @@ def _patch_get(monkeypatch: pytest.MonkeyPatch, resp_or_exc) -> dict:
         return resp_or_exc
 
     monkeypatch.setattr(dc.httpx.AsyncClient, "get", fake_get)
+    # Unit scenarios drive HTTP policy in-process; real boundary scenarios use _fetch.
+    monkeypatch.setattr(dc, "_fetch", dc._fetch_in_worker)
     return seen
 
 
@@ -397,6 +401,7 @@ def _scripted_get(monkeypatch: pytest.MonkeyPatch, steps: list) -> list[int]:
         return step
 
     monkeypatch.setattr(dc.httpx.AsyncClient, "get", fake_get)
+    monkeypatch.setattr(dc, "_fetch", dc._fetch_in_worker)
     return calls
 
 
@@ -451,6 +456,7 @@ def test_main_retries_stay_within_one_timeout_budget(
         raise httpx.ReadTimeout("slow")
 
     monkeypatch.setattr(dc.httpx.AsyncClient, "get", slow_get)
+    monkeypatch.setattr(dc, "_fetch", dc._fetch_in_worker)
     assert dc.main(["token"]) == 0
     assert capsys.readouterr().out == ""
     assert timeouts == [dc._TIMEOUT_S]
@@ -497,7 +503,7 @@ def test_broker_does_not_retry_after_backoff_uses_the_budget(
 
     monkeypatch.setattr(dc, "anyio", SimpleNamespace(fail_after=anyio.fail_after, sleep=oversleep))
     calls = _scripted_get(monkeypatch, [_Resp(503, None), _BEARER_OK])
-    assert dc._fetch("https://omni.example", "host", "test-token") is None
+    assert dc._fetch_in_worker("https://omni.example", "host", "test-token") is None
     assert len(calls) == 1
 
 
@@ -524,7 +530,7 @@ async def test_broker_cancels_retry_and_closes_worker_from_an_active_loop(
 
     monkeypatch.setattr(dc.httpx.AsyncClient, "get", get)
     started = time.monotonic()
-    assert dc._fetch("https://omni.example", "host", "test-token") is None
+    assert dc._fetch_in_worker("https://omni.example", "host", "test-token") is None
     assert time.monotonic() - started < 1.5
     assert len(timeouts) == 2
     assert timeouts[1] < timeouts[0] <= 0.5
@@ -605,7 +611,8 @@ def test_broker_deadline_closes_a_slow_response(
         else:
             assert dc._fetch(url, "host", "test-token") is None
         elapsed = time.monotonic() - started
-        assert deadline - 0.1 <= elapsed < deadline + (5 if reader == "cli" else 1)
+        cleanup_s = min(dc._WORKER_CLEANUP_S, deadline / 5)
+        assert deadline - cleanup_s - 0.2 <= elapsed < deadline + 0.5
         assert disconnected.wait(2.0), "deadline must close the in-flight response"
         assert received == ["/v1/hosts/host/credentials/databricks"]
     finally:
@@ -614,3 +621,214 @@ def test_broker_deadline_closes_a_slow_response(
         server.server_close()
         server_thread.join(timeout=2.0)
         assert not server_thread.is_alive()
+
+
+@pytest.mark.parametrize("reader", ["fetch", "cli"])
+async def test_broker_deadline_includes_blocking_dns_and_worker_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    _credential_env: dict[str, str],
+    reader: str,
+) -> None:
+    """A stuck resolver cannot extend the production deadline or leave a worker."""
+    marker = tmp_path / "dns-worker"
+    injection = tmp_path / "injection"
+    injection.mkdir()
+    injection.joinpath("sitecustomize.py").write_text(
+        "import json, os, socket, sys, time\n"
+        "def blocked_dns(*args, **kwargs):\n"
+        "    with open(os.environ['DNS_WORKER_MARKER'], 'w') as output:\n"
+        "        json.dump({'pid': os.getpid(), 'argv': sys.argv}, output)\n"
+        f"    time.sleep({dc._TIMEOUT_S + 1.5!r})\n"
+        "    raise socket.gaierror(socket.EAI_AGAIN, 'synthetic DNS delay')\n"
+        "socket.getaddrinfo = blocked_dns\n"
+    )
+    env = {
+        **_credential_env,
+        "DNS_WORKER_MARKER": str(marker),
+        "NO_PROXY": "*",
+        "PYTHONPATH": os.pathsep.join((str(injection), _credential_env["PYTHONPATH"])),
+    }
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    def blocked_dns(*_args, **_kwargs):
+        marker.write_text(json.dumps({"pid": os.getpid(), "argv": sys.argv}))
+        time.sleep(dc._TIMEOUT_S + 1.5)
+        raise socket.gaierror(socket.EAI_AGAIN, "synthetic DNS delay")
+
+    monkeypatch.setattr(socket, "getaddrinfo", blocked_dns)
+    spawned = []
+    original_popen = subprocess.Popen
+
+    def record_process(*args, **kwargs):
+        process = original_popen(*args, **kwargs)
+        spawned.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", record_process)
+    coords = tmp_path / dc._SIDECAR_NAME
+    coords.write_text(
+        json.dumps(
+            {
+                "server": "https://broker.example.test",
+                "host_id": "synthetic-host",
+                "host_token": "synthetic-launch-token",
+                "workspace_host": "https://workspace.example.test",
+            }
+        )
+    )
+    started = time.monotonic()
+    if reader == "cli":
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "omnigent.host.databricks_credential",
+                "token",
+                "--coords",
+                str(coords),
+            ],
+            env=env,
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=dc._TIMEOUT_S + 5,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == result.stderr == ""
+    else:
+        # The synchronous API must also work while its caller owns an active loop.
+        assert (
+            dc._fetch("https://broker.example.test", "synthetic-host", "synthetic-launch-token")
+            is None
+        )
+    elapsed = time.monotonic() - started
+    assert dc._TIMEOUT_S == 15.0
+    assert 13.0 <= elapsed < dc._TIMEOUT_S + (0.5 if reader == "cli" else 0)
+    state = json.loads(marker.read_text())
+    worker_pid = state["pid"]
+    assert not psutil.pid_exists(worker_pid), "DNS worker must be killed and reaped before return"
+    assert "synthetic-launch-token" not in str(state["argv"])
+    assert spawned and all(process.poll() is not None for process in spawned)
+    assert all("synthetic-launch-token" not in str(process.args) for process in spawned)
+
+
+@pytest.mark.parametrize("reply", ["credential", "malformed", "list", "nonzero"])
+def test_broker_supervisor_validates_private_worker_reply(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], reply: str
+) -> None:
+    original_popen = subprocess.Popen
+    spawned = []
+    script = (
+        "import json, sys; payload = json.load(sys.stdin); "
+        "sys.stderr.write(payload[2]); "
+        + {
+            "credential": "print(json.dumps({'token': payload[2]}))",
+            "malformed": "print('invalid JSON')",
+            "list": "print('[]')",
+            "nonzero": "sys.exit(1)",
+        }[reply]
+    )
+
+    def worker(_command, **kwargs):
+        process = original_popen([sys.executable, "-c", script], **kwargs)
+        spawned.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", worker)
+    result = dc._fetch("https://broker.example.test", "host", "synthetic-launch-token")
+    assert result == ({"token": "synthetic-launch-token"} if reply == "credential" else None)
+    assert spawned[0].poll() is not None
+    assert "synthetic-launch-token" not in str(spawned[0].args)
+    output = capsys.readouterr()
+    assert output.out == output.err == ""
+
+
+@pytest.mark.parametrize(
+    ("initial_status", "expected_requests", "expected_output"),
+    [(503, 2, "synthetic-bearer\n"), (401, 1, "")],
+    ids=["transient-outage", "rejected-credential"],
+)
+def test_token_cli_retries_outage_but_preserves_rejection(
+    tmp_path: Path, initial_status: int, expected_requests: int, expected_output: str
+) -> None:
+    """Cross real CLI/TCP boundaries with production retry policy and synthetic credentials."""
+    workspace = "https://workspace.example.test"
+    received: list[tuple[str, str | None]] = []
+
+    class BrokerHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            received.append((self.path, self.headers.get("X-Omnigent-Host-Token")))
+            status = initial_status if len(received) == 1 else 200
+            payload = (
+                {"connected": True, "token": "synthetic-bearer", "workspace_host": workspace}
+                if status == 200
+                else {"error": "synthetic broker failure"}
+            )
+            body = json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), BrokerHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        home = tmp_path / "home"
+        home.mkdir()
+        sidecar = tmp_path / dc._SIDECAR_NAME
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "server": f"http://127.0.0.1:{server.server_port}",
+                    "host_id": "synthetic-host",
+                    "host_token": "synthetic-launch-token",
+                    "workspace_host": workspace,
+                }
+            )
+        )
+        sidecar.chmod(0o600)
+        repo = Path(__file__).resolve().parents[2]
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "omnigent.host.databricks_credential",
+                "token",
+                "--coords",
+                str(sidecar),
+                "--workspace",
+                workspace,
+            ],
+            cwd=tmp_path,
+            env={
+                "HOME": str(home),
+                "DATABRICKS_CONFIG_FILE": str(home / ".databrickscfg"),
+                "OMNIGENT_CONFIG_HOME": str(home / ".omnigent"),
+                "OMNIGENT_DATA_DIR": str(home / ".omnigent"),
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONPATH": os.pathsep.join(
+                    str(repo / path) for path in (".", "sdks/python-client", "sdks/ui")
+                ),
+            },
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert result.returncode == 0, result.stderr
+        assert (
+            received
+            == [("/v1/hosts/synthetic-host/credentials/databricks", "synthetic-launch-token")]
+            * expected_requests
+        )
+        assert result.stdout == expected_output
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=5)
