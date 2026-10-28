@@ -4722,7 +4722,7 @@ def server(
     import uvicorn
     import uvicorn.server
 
-    from omnigent.server.app import create_app
+    from omnigent.server.app import _ensure_default_agents, create_app
     from omnigent.server.auth import create_auth_provider
     from omnigent.server.server_config import (
         SESSION_TITLE_INSTRUCTIONS_KEY,
@@ -4862,7 +4862,9 @@ def server(
         frozenset({_tunnel_token}) if _tunnel_token else None
     )
 
-    # Pre-register agents from --agent directories.
+    # Refresh built-ins first so explicit --agent bundles take precedence.
+    if agent_dirs:
+        _ensure_default_agents(agent_store, artifact_store, agent_cache)
     for agent_dir in agent_dirs:
         _preregister_agent(
             Path(agent_dir),
@@ -4996,6 +4998,7 @@ def server(
         policy_store=policy_store,
         artifact_store=artifact_store,
         agent_cache=agent_cache,
+        default_agents_seeded=bool(agent_dirs),
         runner_tunnel_tokens=_runner_tunnel_tokens,
         permission_store=permission_store,
         scheduled_task_store=scheduled_task_store,
@@ -5717,39 +5720,66 @@ def _count_running_sessions(base_url: str) -> int:
     return 0
 
 
+def _wait_for_running_sessions(count_running: Callable[[], int], *, force_hint: str) -> None:
+    """Block until ``count_running`` reports no session mid-turn.
+
+    Polls every :data:`_UPGRADE_DRAIN_POLL_S` seconds and re-prints the count
+    whenever it changes; ``Ctrl-C`` aborts the wait (and the caller) cleanly.
+
+    :param count_running: Returns how many sessions are still running a turn.
+    :param force_hint: How to skip the wait, e.g.
+        ``"re-run with --force to stop them now"``.
+    """
+    count = count_running()
+    if count == 0:
+        return
+    click.echo(
+        f"Waiting for {count} running session(s) to finish — press Ctrl-C to "
+        f"abort, or {force_hint}."
+    )
+    last = count
+    while True:
+        time.sleep(_UPGRADE_DRAIN_POLL_S)
+        count = count_running()
+        if count == 0:
+            return
+        if count != last:
+            click.echo(f"  {count} session(s) still running…")
+            last = count
+
+
 def _wait_for_local_sessions_to_drain() -> None:
     """Block until no local session is actively running a turn.
 
     Used by ``omni upgrade`` (without ``--force``) so an upgrade never
     yanks a running agent turn. Waits only on sessions whose status is
     ``"running"`` (see :func:`_count_running_sessions`) — idle-but-connected
-    sessions do not hold it up. Polls every :data:`_UPGRADE_DRAIN_POLL_S`
-    seconds and re-prints the count whenever it changes; ``Ctrl-C`` aborts
-    the wait (and the upgrade) cleanly. Returns immediately when the server
-    is down or already idle.
+    sessions do not hold it up. Returns immediately when the server is down
+    or already idle.
     """
-    info = local_server_status()
-    if not (info.running and info.url is not None):
-        return
-    count = _count_running_sessions(info.url)
-    if count == 0:
-        return
-    click.echo(
-        f"Waiting for {count} running session(s) to finish — press Ctrl-C to "
-        "abort, or re-run with --force to stop them now."
-    )
-    last = count
-    while True:
-        time.sleep(_UPGRADE_DRAIN_POLL_S)
+
+    def _count() -> int:
         info = local_server_status()
         if not (info.running and info.url is not None):
-            return
-        count = _count_running_sessions(info.url)
-        if count == 0:
-            return
-        if count != last:
-            click.echo(f"  {count} session(s) still running…")
-            last = count
+            return 0
+        return _count_running_sessions(info.url)
+
+    _wait_for_running_sessions(_count, force_hint="re-run with --force to stop them now")
+
+
+def _count_running_daemon_sessions(record: _HostDaemonRecord) -> int:
+    """Count a daemon's sessions that are running a turn.
+
+    A failed session listing counts as none, so an unreachable server never
+    blocks the caller, matching :func:`_count_running_sessions`.
+
+    :param record: Daemon record whose host-bound sessions are counted.
+    :returns: Number of sessions with ``status == "running"``.
+    """
+    result = _sessions_for_daemon(record, connected_only=True)
+    if result.error is not None:
+        return 0
+    return sum(1 for session in result.sessions if session.get("status") == "running")
 
 
 def _drain_and_stop_local_server(*, force: bool) -> None:
@@ -10026,7 +10056,7 @@ def _daemon_session_request_params(
     *,
     connected_only: bool,
     after: str | None,
-    include_sub_agents: bool = False,
+    kind: Literal["default", "sub_agent"] = "default",
 ) -> dict[str, str | int]:
     """
     Build query parameters for one sessions page.
@@ -10035,8 +10065,7 @@ def _daemon_session_request_params(
         sessions only.
     :param after: Optional cursor from the prior page, e.g.
         ``"conv_abc123"``.
-    :param include_sub_agents: When ``True``, also list sub-agent sessions,
-        which the server omits from ``GET /v1/sessions`` by default.
+    :param kind: Session kind to fetch; the server omits sub-agents by default.
     :returns: Query parameters for ``GET /v1/sessions``.
     """
     params: dict[str, str | int] = {
@@ -10044,8 +10073,8 @@ def _daemon_session_request_params(
         "include_archived": "true",
         "visibility": "all",
     }
-    if include_sub_agents:
-        params["kind"] = "any"
+    if kind != "default":
+        params["kind"] = kind
     if connected_only:
         params["connected"] = "true"
     if after is not None:
@@ -10110,7 +10139,7 @@ def _fetch_session_pages(
     *,
     base_url: str,
     connected_only: bool,
-    include_sub_agents: bool = False,
+    kind: Literal["default", "sub_agent"] = "default",
 ) -> _SessionPagesResult:
     """
     Fetch every available session page from a server.
@@ -10119,7 +10148,7 @@ def _fetch_session_pages(
         ``"https://example.databricksapps.com"``.
     :param connected_only: When ``True``, ask the server for connected
         sessions only.
-    :param include_sub_agents: When ``True``, also fetch sub-agent sessions.
+    :param kind: Session kind to fetch, e.g. ``"sub_agent"``.
     :returns: Accumulated sessions result. ``error`` is ``None`` on success.
     """
     after: str | None = None
@@ -10132,7 +10161,7 @@ def _fetch_session_pages(
             params=_daemon_session_request_params(
                 connected_only=connected_only,
                 after=after,
-                include_sub_agents=include_sub_agents,
+                kind=kind,
             ),
         )
         page = _decode_sessions_page(page_result)
@@ -10180,27 +10209,23 @@ def _daemon_owned_sessions(
     sessions: list[_HostSessionRow],
     *,
     host_id: str,
-    include_sub_agents: bool,
+    sub_agents: list[_HostSessionRow],
 ) -> list[_HostSessionRow]:
     """
     Select the sessions a daemon's host runs, optionally with their sub-agents.
 
     A sub-agent carries no host id of its own: it runs on its parent's host.
-    With *include_sub_agents*, a sub-agent joins when its parent chain reaches
+    A sub-agent joins when its parent chain reaches
     a session this host owns, so a stop reaches children mid-turn.
 
     :param sessions: Session rows from the server, e.g. ``[{"id": "conv_1", ...}]``.
     :param host_id: Host id the daemon advertises, e.g. ``"host_abc123"``.
-    :param include_sub_agents: Whether to add sub-agent rows to the owned set.
+    :param sub_agents: Rows fetched with ``kind=sub_agent``; list rows have no kind field.
     :returns: Owned session rows, parents before their children.
     """
     owned = [s for s in sessions if s.get("host_id") == host_id]
-    if not include_sub_agents:
-        return owned
     owned_ids = {s.get("id") for s in owned}
-    pending = [
-        s for s in sessions if s.get("kind") == "sub_agent" and s.get("id") not in owned_ids
-    ]
+    pending = [s for s in sub_agents if s.get("id") not in owned_ids]
     grew = True
     while grew and pending:
         grew = False
@@ -10254,7 +10279,6 @@ def _sessions_for_daemon(
     pages = _fetch_session_pages(
         base_url=base_url,
         connected_only=connected_only,
-        include_sub_agents=include_sub_agents,
     )
     if pages.error is not None:
         return _DaemonSessionsResult(
@@ -10263,10 +10287,22 @@ def _sessions_for_daemon(
             error=pages.error,
             unreachable=pages.unreachable,
         )
+    sub_agents: list[_HostSessionRow] = []
+    if include_sub_agents:
+        children = _fetch_session_pages(
+            base_url=base_url,
+            connected_only=connected_only,
+            kind="sub_agent",
+        )
+        if children.error is not None:
+            # The root listing succeeded, so a child-list failure is not proof
+            # the server is dead. Keep the daemon running until the drain succeeds.
+            return _DaemonSessionsResult(base_url=base_url, sessions=[], error=children.error)
+        sub_agents = children.sessions
     owned = _daemon_owned_sessions(
         pages.sessions,
         host_id=host_id,
-        include_sub_agents=include_sub_agents,
+        sub_agents=sub_agents,
     )
     return _DaemonSessionsResult(base_url=base_url, sessions=owned, error=None)
 
@@ -10837,17 +10873,25 @@ def _echo_daemon_payloads(payloads: list[_HostPayload]) -> None:
     default=False,
     help="Do not launch browser sign-in while preparing the service.",
 )
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Replace a running host now, even mid-turn.",
+)
 @click.pass_context
 def host_enable(
     ctx: click.Context,
     server: str | None,
     non_interactive: bool,
+    force: bool,
 ) -> None:
     """Install and start the host as a per-user system service.
 
     :param ctx: Click context carrying group-level options.
     :param server: Optional server target; empty selects local mode.
     :param non_interactive: Fail instead of launching browser sign-in.
+    :param force: Replace a running host without waiting for its running turns.
     """
     if server is None:
         server = _host_group_option(ctx, "server")
@@ -10863,6 +10907,12 @@ def host_enable(
     target = _normalize_daemon_target(resolved_server)
     record = _find_daemon_record(target)
     if record is not None:
+        # Replacing the daemon kills its runners, so let running turns finish first.
+        if not force and _daemon_owner_is_live(record):
+            _wait_for_running_sessions(
+                lambda: _count_running_daemon_sessions(record),
+                force_hint="re-run with --force to replace the host now",
+            )
         _record_daemon_stop_requested(record, reason="host_enable", force=False)
         _terminate_daemon(record, force=False)
 
@@ -12954,6 +13004,9 @@ def _workspace_api_server_url(server: str) -> str:
     ``databricks auth login``), the mount probe is retried with that
     bearer before giving up.
 
+    Notices about the decision go to stderr, so a command's
+    machine-readable stdout (e.g. ``host status --json``) stays parseable.
+
     :param server: The user-supplied server URL, e.g.
         ``"https://example.databricks.com"``.
     :returns: The normalized base URL without a trailing slash, e.g.
@@ -13013,7 +13066,8 @@ def _workspace_api_server_url(server: str) -> str:
         return server
     if _workspace_mount_probe_matches(candidate, api_probe):
         click.echo(
-            f"Using {display_server_url(candidate)} (Databricks workspace-hosted omnigent)."
+            f"Using {display_server_url(candidate)} (Databricks workspace-hosted omnigent).",
+            err=True,
         )
         return candidate
     # The anonymous probe came back inconclusive (404 on Azure even
@@ -13033,7 +13087,8 @@ def _workspace_api_server_url(server: str) -> str:
             authed_probe = None
         if authed_probe is not None and _workspace_mount_probe_matches(candidate, authed_probe):
             click.echo(
-                f"Using {display_server_url(candidate)} (Databricks workspace-hosted omnigent)."
+                f"Using {display_server_url(candidate)} (Databricks workspace-hosted omnigent).",
+                err=True,
             )
             return candidate
         click.echo(
@@ -13042,7 +13097,8 @@ def _workspace_api_server_url(server: str) -> str:
             f"the cached workspace credentials. Connecting to {server} as "
             "given; if omnigent is hosted on this workspace, refresh the "
             f"login with `databricks auth login --host {server}` or pass "
-            "the full mount URL."
+            "the full mount URL.",
+            err=True,
         )
         return server
     click.echo(
@@ -13051,7 +13107,8 @@ def _workspace_api_server_url(server: str) -> str:
         f"(HTTP {api_probe.status_code}). Some edges hide the mount from "
         "unauthenticated requests — if omnigent is hosted on this "
         f"workspace, run `databricks auth login --host {server}` and "
-        "retry, or pass the full mount URL."
+        "retry, or pass the full mount URL.",
+        err=True,
     )
     return server
 
