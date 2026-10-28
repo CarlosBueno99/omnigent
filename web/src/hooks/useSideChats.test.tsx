@@ -150,6 +150,19 @@ describe("side-chat soft tabs", () => {
     expect(restored.result.current.tabs).toEqual([...sideChatIds.slice(1), subagentTab]);
   });
 
+  it("drops the oldest sub-agent tab before any side chat at the cap", () => {
+    const sideChatIds = Array.from({ length: 19 }, (_, index) => `conv_${index + 1}`);
+    const first = renderHook(() => useSideChats("session-a"));
+    act(() => first.result.current.open(subagentTabId("conv_old")));
+    for (const id of sideChatIds) act(() => first.result.current.open(id));
+    act(() => first.result.current.open(subagentTabId("conv_new")));
+    first.unmount();
+
+    const restored = renderHook(() => useSideChats("session-a"));
+    expect(restored.result.current.tabs).toEqual([...sideChatIds, subagentTabId("conv_new")]);
+    expect(readSessionWorkspaceState("session-a").openSideChats).toEqual(sideChatIds);
+  });
+
   it("closes the target tab and selects a neighbor, then clears", () => {
     const { result } = renderHook(() => useSideChats("session-a"));
     act(() => result.current.open("conv_1"));

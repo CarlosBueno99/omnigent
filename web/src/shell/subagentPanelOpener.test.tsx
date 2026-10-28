@@ -9,7 +9,16 @@ vi.mock("@/hooks/useIsMobileViewport", () => ({
   useIsMobileViewport: () => isMobileMock(),
 }));
 
-const PLAIN_CLICK = { button: 0, metaKey: false, ctrlKey: false, shiftKey: false, altKey: false };
+function plainClick() {
+  return {
+    button: 0,
+    metaKey: false,
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+    preventDefault: vi.fn(),
+  };
+}
 
 function renderWithOpener(opener: ((id: string) => boolean) | null) {
   const wrapper = ({ children }: { children: ReactNode }) => (
@@ -31,22 +40,26 @@ describe("useOpenSubagentInPanel", () => {
     const opener = vi.fn(() => true);
     const openInPanel = renderWithOpener(opener);
 
-    expect(openInPanel("conv_child", PLAIN_CLICK)).toBe(true);
+    const click = plainClick();
+    expect(openInPanel("conv_child", click)).toBe(true);
     expect(opener).toHaveBeenCalledWith("conv_child");
+    expect(click.preventDefault).toHaveBeenCalled();
   });
 
   it("returns the opener's refusal", () => {
     writeOpenSubagentsInPanel(true);
     const openInPanel = renderWithOpener(() => false);
 
-    expect(openInPanel("conv_child", PLAIN_CLICK)).toBe(false);
+    const click = plainClick();
+    expect(openInPanel("conv_child", click)).toBe(false);
+    expect(click.preventDefault).not.toHaveBeenCalled();
   });
 
   it("keeps navigation when the setting is off", () => {
     const opener = vi.fn(() => true);
     const openInPanel = renderWithOpener(opener);
 
-    expect(openInPanel("conv_child", PLAIN_CLICK)).toBe(false);
+    expect(openInPanel("conv_child", plainClick())).toBe(false);
     expect(opener).not.toHaveBeenCalled();
   });
 
@@ -61,7 +74,7 @@ describe("useOpenSubagentInPanel", () => {
     const opener = vi.fn(() => true);
     const openInPanel = renderWithOpener(opener);
 
-    expect(openInPanel("conv_child", { ...PLAIN_CLICK, ...modifiers })).toBe(false);
+    expect(openInPanel("conv_child", { ...plainClick(), ...modifiers })).toBe(false);
     expect(opener).not.toHaveBeenCalled();
   });
 
@@ -71,7 +84,7 @@ describe("useOpenSubagentInPanel", () => {
     const opener = vi.fn(() => true);
     const openInPanel = renderWithOpener(opener);
 
-    expect(openInPanel("conv_child", PLAIN_CLICK)).toBe(false);
+    expect(openInPanel("conv_child", plainClick())).toBe(false);
     expect(opener).not.toHaveBeenCalled();
   });
 
@@ -79,6 +92,6 @@ describe("useOpenSubagentInPanel", () => {
     writeOpenSubagentsInPanel(true);
     const openInPanel = renderWithOpener(null);
 
-    expect(openInPanel("conv_child", PLAIN_CLICK)).toBe(false);
+    expect(openInPanel("conv_child", plainClick())).toBe(false);
   });
 });

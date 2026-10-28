@@ -107,15 +107,15 @@ describe("SubagentsGraphView node clicks", () => {
     expect(screen.getByTestId("current-path")).toHaveTextContent("/c/conv_child");
   });
 
-  it("keeps the root node as navigation even with the setting on", () => {
+  it("navigates when the opener refuses the node, as AppShell's does for the root", () => {
     writeOpenSubagentsInPanel(true);
-    const opener = vi.fn(() => true);
+    const opener = vi.fn((id: string) => id !== "conv_root");
     // Navigating to the root drops the file viewer param, so the URL shows the click landed.
     renderGraph(opener, "/c/conv_root?file=notes.md");
 
     fireEvent.click(screen.getByRole("button", { name: "conv_root" }));
 
-    expect(opener).not.toHaveBeenCalled();
+    expect(opener).toHaveBeenCalledWith("conv_root");
     expect(screen.getByTestId("current-path").textContent).toBe("/c/conv_root");
   });
 });

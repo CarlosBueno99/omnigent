@@ -216,7 +216,7 @@ export function SubagentsGraphView({ conversationId, rootSessionId }: SubagentsG
   const handleNodeClick = useCallback(
     (event: React.MouseEvent, node: Node<AgentNodeData>) => {
       const childSessionId = node.data.sessionId;
-      if (childSessionId !== rootSessionId && openInPanel(childSessionId, event)) return;
+      if (openInPanel(childSessionId, event)) return;
       const params = new URLSearchParams(location.search);
       for (const key of ["file", "diff", "comment", "view", "message"]) params.delete(key);
       const search = params.toString();
@@ -225,7 +225,7 @@ export function SubagentsGraphView({ conversationId, rootSessionId }: SubagentsG
         search: search ? `?${search}` : "",
       });
     },
-    [navigate, location.search, openInPanel, rootSessionId],
+    [navigate, location.search, openInPanel],
   );
 
   return (

@@ -11,21 +11,22 @@ export type SubagentPanelOpener = (childSessionId: string) => boolean;
 export const SubagentPanelOpenerContext = createContext<SubagentPanelOpener | null>(null);
 
 /** The parts of a click that decide whether it is a plain one. */
-interface ClickModifiers {
+interface SubagentLinkClick {
   button: number;
   metaKey: boolean;
   ctrlKey: boolean;
   shiftKey: boolean;
   altKey: boolean;
+  preventDefault: () => void;
 }
 
 /**
- * Click handler for sub-agent links. Returns true, so the caller cancels its
- * navigation, only for a plain desktop click with the setting on.
+ * Click handler for sub-agent links. For a plain desktop click with the setting
+ * on, it opens the tab, cancels the link's navigation and returns true.
  */
 export function useOpenSubagentInPanel(): (
   childSessionId: string,
-  event: ClickModifiers,
+  event: SubagentLinkClick,
 ) => boolean {
   const opener = useContext(SubagentPanelOpenerContext);
   const isMobile = useIsMobileViewport();
@@ -35,7 +36,9 @@ export function useOpenSubagentInPanel(): (
       if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
         return false;
       }
-      return opener(childSessionId);
+      if (!opener(childSessionId)) return false;
+      event.preventDefault();
+      return true;
     },
     [opener, isMobile],
   );

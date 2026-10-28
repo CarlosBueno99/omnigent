@@ -573,7 +573,7 @@ function SubagentRow({
           data-testid="subagent-row"
           data-child-session-id={child.id}
           onClick={(event) => {
-            if (openInPanel(child.id, event)) event.preventDefault();
+            openInPanel(child.id, event);
           }}
           data-depth={depth}
           // Left gutter (depth-stepped) + connector glyph nests this row

@@ -133,7 +133,7 @@ import { isMobileViewport, Sidebar } from "./Sidebar";
 import { SidebarHeaderActions } from "./SidebarHeaderActions";
 import { useSettingsRoute } from "./settingsNav";
 import { SubagentsPanel } from "./SubagentsPanel";
-import { useRootSessionId, useSession } from "@/hooks/useSession";
+import { isCachedAncestor, useRootSessionId, useSession } from "@/hooks/useSession";
 import { useSessionActionRestrictions } from "@/hooks/useSessionActionRestrictions";
 import { workspaceRecoveryDisabledReason } from "@/lib/sessionCapabilities";
 import {
@@ -1926,15 +1926,30 @@ function AppShellImpl() {
   }, [sideChatToOpen, conversationId, openSideChatsPanel, setRightPanelOpenAnimated]);
   const showSideChats = supportsSideChat(useChatStore((s) => s.sessionHarness));
   // With the "open sub-agents in the Workspace panel" setting on, sub-agent
-  // links in this chat open a rail tab instead of replacing the chat.
+  // links in this chat open a rail tab instead of replacing the chat. The root
+  // and other ancestors stay full-page links, so a tab only holds work below.
+  const parentSessionId = activeSession?.parentSessionId;
   const openSubagentInPanel = useCallback(
     (childSessionId: string) => {
-      if (!conversationId || childSessionId === conversationId) return false;
+      if (
+        !conversationId ||
+        childSessionId === conversationId ||
+        childSessionId === rootSessionId ||
+        isCachedAncestor(queryClient, parentSessionId, childSessionId)
+      ) {
+        return false;
+      }
       useChatStore.setState({
         sideChatToOpen: { childId: subagentTabId(childSessionId), parentId: conversationId },
       });
       return true;
     },
+    [conversationId, rootSessionId, parentSessionId, queryClient],
+  );
+  // Sub-agent tabs opened on desktop must stay reachable from a phone's
+  // drawer even when this harness can't start side chats.
+  const hasPersistedChatTabs = useMemo(
+    () => !!conversationId && (readSessionWorkspaceState(conversationId).chatTabs?.length ?? 0) > 0,
     [conversationId],
   );
 
@@ -2567,7 +2582,7 @@ function AppShellImpl() {
                         shellsPanelOpen,
                         githubPanelOpen,
                         sideChatsPanelOpen,
-                        showSideChats,
+                        showSideChats: showSideChats || hasPersistedChatTabs,
                         hideTerminalsTab,
                         // Mobile: reachable when a shell exists OR the agent
                         // declares shell access (so the drawer's "+ New shell" row

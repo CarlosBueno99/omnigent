@@ -7,6 +7,7 @@
 // effect drops keys whose PTY has gone away once the terminal list loads.
 
 import type { RightRailTab } from "@/shell/railTabs";
+import { subagentSessionIdFromTab } from "./subagentTabs";
 import { parseTerminalSplitState, type TerminalSplitState } from "./terminalSplitLayout";
 import type { DefaultWorkspaceTab } from "./workspaceTabPreferences";
 
@@ -219,7 +220,14 @@ export function writeSessionWorkspaceState(
     next.openSideChats = next.openSideChats.slice(-MAX_OPEN_FILES);
   }
   if (next.chatTabs && next.chatTabs.length > MAX_OPEN_FILES) {
-    const kept = next.chatTabs.slice(-MAX_OPEN_FILES);
+    // Evict sub-agent tabs first: unlike a dropped side chat, they leave nothing running unseen.
+    const excess = next.chatTabs.length - MAX_OPEN_FILES;
+    const evicted = new Set(
+      next.chatTabs
+        .filter((id) => subagentSessionIdFromTab(id) !== null && id !== next.selectedSideChatId)
+        .slice(0, excess),
+    );
+    const kept = next.chatTabs.filter((id) => !evicted.has(id)).slice(-MAX_OPEN_FILES);
     next.chatTabs = kept;
     // Drop the same side chats from both lists so a reload keeps the tab order.
     next.openSideChats = next.openSideChats?.filter((id) => kept.includes(id));

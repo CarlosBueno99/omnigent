@@ -3,7 +3,8 @@ import { BotIcon, Maximize2Icon } from "lucide-react";
 import { SideChatPane } from "@/components/chat/SideChatPane";
 import { useCanEdit } from "@/hooks/usePermissions";
 import { sessionQueryOptions } from "@/hooks/useSession";
-import { Link } from "@/lib/routing";
+import { Link, useLocation } from "@/lib/routing";
+import { sessionNavigationSearch } from "@/lib/sessionNavigation";
 import { subagentSessionIdFromTab } from "@/lib/subagentTabs";
 import { subAgentComposerLabel } from "./subagentLabel";
 
@@ -33,13 +34,14 @@ export function useSubagentTabLabels(tabIds: readonly string[]): Record<string, 
 /** A sub-agent's full conversation in the parent's Workspace panel; read-only without edit access. */
 export function SubagentTabPane({ sessionId, label }: { sessionId: string; label: string }) {
   const canEdit = useCanEdit(sessionId);
+  const search = sessionNavigationSearch(useLocation().search);
   return (
     <div data-testid="subagent-tab-pane" className="flex h-full min-h-0 flex-1 flex-col">
       <div className="flex h-9 shrink-0 items-center gap-2 border-border border-b px-3">
         <BotIcon aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
         <span className="min-w-0 flex-1 truncate text-sm font-medium">{label}</span>
         <Link
-          to={`/c/${sessionId}`}
+          to={{ pathname: `/c/${sessionId}`, search }}
           data-testid="subagent-tab-open-full"
           componentId="workspace.subagent_tab.open_full_screen"
           className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"

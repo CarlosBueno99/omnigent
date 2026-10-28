@@ -26,7 +26,7 @@ import type * as UseSessionModule from "@/hooks/useSession";
 import type * as UseConversationsModule from "@/hooks/useConversations";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -453,6 +453,91 @@ describe("click sub-agent in rail (real SubagentsPanel)", () => {
       "true",
     );
     expect(within(rail).getByTestId("side-chat-pane-stub")).toHaveTextContent("conv_child");
+  });
+
+  it("navigates to an ancestor's row instead of opening it as a tab", async () => {
+    writeOpenSubagentsInPanel(true);
+    const summary = (id: string, name: string) => ({
+      id,
+      title: `researcher:${name}`,
+      task_summary: null,
+      tool: "researcher",
+      session_name: name,
+      current_task_status: null,
+      busy: false,
+      last_message_preview: null,
+      pending_elicitations_count: 0,
+    });
+    const tree: Record<string, ReturnType<typeof summary>[]> = {
+      conv_root: [summary("conv_child", "auth")],
+      conv_child: [summary("conv_grandchild", "tokens")],
+    };
+    vi.mocked(useChildSessions).mockImplementation((id) => ({
+      children: tree[id ?? ""] ?? [],
+      isLoading: false,
+      error: null,
+    }));
+    const snapshot = (id: string, parentSessionId: string | null) =>
+      ({
+        id,
+        agentId: "ag",
+        agentName: null,
+        runnerId: null,
+        status: "idle",
+        createdAt: 0,
+        title: null,
+        labels: {},
+        items: [],
+        pendingElicitations: [],
+        permissionLevel: 4,
+        parentSessionId,
+        subAgentName: null,
+        kind: parentSessionId === null ? "default" : "sub_agent",
+      }) satisfies Session;
+    const sessions: Record<string, Session> = {
+      conv_root: snapshot("conv_root", null),
+      conv_child: snapshot("conv_child", "conv_root"),
+      conv_grandchild: snapshot("conv_grandchild", "conv_child"),
+    };
+    vi.mocked(useSession).mockImplementation((id) => ({
+      session: sessions[id ?? ""] ?? null,
+      isLoading: false,
+      error: null,
+    }));
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    for (const [id, children] of Object.entries(tree)) {
+      qc.setQueryData(childSessionsQueryKey(id), children);
+    }
+    for (const [id, session] of Object.entries(sessions)) qc.setQueryData(["session", id], session);
+    writeSessionWorkspaceState("conv_grandchild", { rightRailTab: "subagents" });
+    render(
+      <QueryClientProvider client={qc}>
+        <SidebarDataProvider>
+          <TooltipProvider>
+            <MemoryRouter initialEntries={["/c/conv_grandchild"]}>
+              <Routes>
+                <Route element={<AppShell />}>
+                  <Route path="c/:conversationId" element={<PathProbe />} />
+                </Route>
+              </Routes>
+            </MemoryRouter>
+          </TooltipProvider>
+        </SidebarDataProvider>
+      </QueryClientProvider>,
+    );
+
+    // The rail re-roots at conv_root once the parent walk resolves.
+    const parentRow = await waitFor(() => {
+      const row = screen
+        .getAllByTestId("subagent-row")
+        .find((candidate) => candidate.getAttribute("data-child-session-id") === "conv_child");
+      expect(row).toBeDefined();
+      return row!;
+    });
+    fireEvent.click(parentRow);
+
+    expect(screen.getByTestId("page")).toHaveTextContent("/c/conv_child");
+    expect(readSessionWorkspaceState("conv_grandchild").chatTabs).toBeUndefined();
   });
 
   it("restores a saved width while a cold-loaded session snapshot is unresolved", () => {

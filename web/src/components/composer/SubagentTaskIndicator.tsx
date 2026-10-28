@@ -119,7 +119,7 @@ function SubagentNavigationRow({
         to={{ pathname: `/c/${child.id}`, search }}
         componentId="composer-subagent-indicator-row"
         onClick={(event) => {
-          if (openInPanel(child.id, event)) event.preventDefault();
+          openInPanel(child.id, event);
           onNavigate(event);
         }}
         className="flex items-start gap-2 rounded-lg px-1 py-2 hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
