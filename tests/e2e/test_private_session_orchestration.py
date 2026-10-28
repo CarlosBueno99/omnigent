@@ -40,8 +40,23 @@ _REPO = Path(__file__).resolve().parents[2]
 
 def _claude_isolation_reason() -> str | None:
     """Check prerequisites without executing Claude or sending a network request."""
-    if sys.platform != "linux" or {name for _, name in socket.if_nameindex()} != {"lo"}:
+    if sys.platform != "linux" or not Path("/.dockerenv").exists():
         return "Claude process proof requires a Linux container with --network none"
+    try:
+        active_interfaces = {
+            name
+            for _, name in socket.if_nameindex()
+            if int((Path("/sys/class/net") / name / "flags").read_text().strip(), 16) & 1
+        }
+        capabilities = next(
+            line.split()[1]
+            for line in Path("/proc/self/status").read_text().splitlines()
+            if line.startswith("CapEff:")
+        )
+    except (OSError, ValueError, StopIteration):
+        return "Claude process proof cannot establish network/capability isolation"
+    if active_interfaces != {"lo"} or int(capabilities, 16) != 0:
+        return "Claude process proof requires loopback-only networking and --cap-drop ALL"
     config_paths = [
         Path("/etc/claude-code"),
         Path("/var/run/docker.sock"),
