@@ -17,7 +17,6 @@ import json
 import logging
 import os
 import re
-import tempfile
 import time
 import uuid
 from collections import OrderedDict
@@ -77,7 +76,7 @@ from omnigent.native.native_coding_agents import (
     native_coding_agent_for_harness,
 )
 from omnigent.runner import native as _native
-from omnigent.runner import pending_approvals
+from omnigent.runner import pending_approvals, pr_reports
 from omnigent.runner import subagent_work as _subagent_work
 from omnigent.runner.acp_subagent_sessions import (
     _chain_acp_subagent_post,
@@ -1501,6 +1500,19 @@ def create_runner_app(
         if pending_approvals.has_any_pending():
             return True
         session_ids = set(_session_start_cache) | set(_session_agent_ids)
+        # Terminal ensure can start native work before any harness or web turn.
+        # Read current resources so deleting a terminal also retires this pin.
+        terminals = resource_registry.terminal_registry
+        if terminals is not None:
+            session_ids.update(
+                session_id
+                for session_id, name, _ in terminals.native_panes()
+                if is_native_harness(
+                    resource_registry.terminal_resource_role(
+                        session_id, terminal_resource_id(name, "main")
+                    )
+                )
+            )
         if process_manager is not None and any(
             process_manager.has_active_turn(session_id) for session_id in session_ids
         ):
@@ -1862,6 +1874,19 @@ def create_runner_app(
         # particular, losing Codex's streamable TUI must not cancel an active
         # app-server turn; the native-terminal ensure path can recreate it.
         if event.lifecycle != TerminalLifecycle.REQUIRED:
+            return
+
+        # Omnigent killed this pane after a delivery timeout. The turn's own
+        # error is the failure; a terminal-exit failure would be a second one.
+        if event.expected_close:
+            _logger.info(
+                "required terminal %s closed by its turn's delivery timeout; "
+                "the turn reports that error: session=%s",
+                event.terminal_name,
+                event.session_id,
+                extra={"session_id": event.session_id},
+            )
+            _release_required_terminal_session(event.session_id)
             return
 
         # A required terminal exit ends the session. Tear down any registered
@@ -2823,8 +2848,6 @@ def create_runner_app(
                         bundle_dir = _resolved_spec_workdir(entry) if entry is not None else None
                         agent_name = getattr(spec, "name", None)
                         skills_filter = getattr(spec, "skills_filter", "all")
-                    if bundle_dir is None:
-                        bundle_dir = Path(tempfile.mkdtemp(prefix="omnigent-skill-bundle-"))
                     _logger.info(
                         "Claude terminal auto-create inputs resolved: session=%s "
                         "bundle_dir=%s agent_name=%s skills_filter=%s",
@@ -2834,7 +2857,8 @@ def create_runner_app(
                         skills_filter,
                         extra={"session_id": session_id},
                     )
-                    _ensure_orchestrator_skills_in_bundle(bundle_dir, spec)
+                    if bundle_dir is not None:
+                        _ensure_orchestrator_skills_in_bundle(bundle_dir, spec)
                     return dataclasses.replace(
                         ctx,
                         bundle_dir=bundle_dir,
@@ -3726,10 +3750,32 @@ def create_runner_app(
             else _native_runtime.codex_native_bridge_dir(conv_id)
         )
 
+    def _codex_goal_bridge_is_inactive(conv_id: str, state: CodexNativeBridgeState) -> bool:
+        """Recognize an unloaded bridge without a recorded startup failure."""
+        from omnigent.harnesses.codex_native.bridge import (
+            bridge_dir_for_codex_home,
+            read_bridge_startup_error,
+            read_bridge_state,
+        )
+
+        registry = resource_registry.terminal_registry
+        if (
+            registry is None
+            or registry.get(conv_id, "codex", "main") is not None
+            or conv_id in _native_runtime._AUTO_CODEX_APP_SERVERS
+        ):
+            return False
+        bridge_dir = bridge_dir_for_codex_home(Path(state.codex_home))
+        return (
+            read_bridge_state(bridge_dir) == state
+            and read_bridge_startup_error(bridge_dir) is None
+        )
+
     codex_goal_runner = CodexGoalRunner(
         bridge_state_for_session=_codex_native_bridge_state_for_session,
         client_safe_error_detail=_client_safe_error_detail,
         logger=_logger,
+        bridge_is_inactive=_codex_goal_bridge_is_inactive,
     )
 
     async def _native_cost_popup_config_file(conv_id: str, harness: str) -> Path:
@@ -3884,6 +3930,8 @@ def create_runner_app(
         error: dict[str, Any] | None = None,
         owner_response_id: str | None = None,
     ) -> None:
+        # Harness children record PRs without a server client; report them as the turn ends.
+        pr_reports.notify(conv_id)
         # Stale-finalizer guard: when owner_response_id no longer matches the live response,
         # a newer turn has taken over — skip all conversation-state mutations.
         if owner_response_id is not None and _live_response_id.get(conv_id) != owner_response_id:
@@ -6729,6 +6777,8 @@ def create_runner_app(
                     # while its parent inbox is still unavailable.
                     terminal_status = "cancelled"
                     output = recovered_entry.output
+            if status in ("idle", "failed"):
+                pr_reports.notify(conversation_id)
             if status in ("running", "waiting", "idle", "failed"):
                 # Forwarders report these edges straight to the server, so record
                 # them here too; the idle watchdog reads them for native turns.
@@ -7182,6 +7232,8 @@ def create_runner_app(
             return
         snapshot = await _session_snapshot(session_id)
         _session_start_cache[session_id] = snapshot.created_at
+        # Replay discoveries an earlier runner recorded but the server never acknowledged.
+        pr_reports.notify(session_id)
         # Only memoize a workspace the server actually returned; a failed
         # fetch is re-resolved lazily by _session_workspace_value.
         if snapshot.ok:
