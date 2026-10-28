@@ -8,6 +8,7 @@ import contextlib
 import errno
 import json
 import logging
+import threading
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -1874,6 +1875,47 @@ def test_run_turn_sends_an_oversized_message_as_an_attachment_reference(
     assert method == "turn/start"
     assert _text_chars(params["input"]) < _CODEX_TEXT_LIMIT
     assert _referenced_file(params["input"][0]).read_text(encoding="utf-8") == text
+
+
+@pytest.mark.parametrize("active_turn_id", [None, "turn_live"])
+async def test_slow_paste_restoration_keeps_the_event_loop_responsive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, active_turn_id: str | None
+) -> None:
+    _FakeCodexNativeClient.requests = []
+    _seed_bridge(tmp_path, active_turn_id=active_turn_id)
+    state = read_bridge_state(tmp_path)
+    assert state is not None
+    restore_started = asyncio.Event()
+    release_restore = threading.Event()
+    loop = asyncio.get_running_loop()
+    original_restore = codex_native_executor.restore_spilled_text
+
+    def slow_restore(text: str, bridge_dir: Path) -> str | None:
+        loop.call_soon_threadsafe(restore_started.set)
+        assert release_restore.wait(2), "paste restoration blocked the event loop"
+        return original_restore(text, bridge_dir)
+
+    monkeypatch.setattr(codex_native_executor, "restore_spilled_text", slow_restore)
+    delivery = asyncio.create_task(
+        codex_native_executor._inject_codex_turn_once(
+            _FakeCodexNativeClient(),
+            bridge_dir=tmp_path,
+            state=state,
+            input_items=[{"type": "text", "text": "hello"}],
+            settings_overrides={},
+        )
+    )
+    try:
+        await asyncio.wait_for(restore_started.wait(), timeout=5)
+        assert not delivery.done()
+        assert _FakeCodexNativeClient.requests == []
+    finally:
+        release_restore.set()
+        await delivery
+
+    assert [method for method, _ in _FakeCodexNativeClient.requests] == [
+        "turn/start" if active_turn_id is None else "turn/steer"
+    ]
 
 
 @pytest.mark.parametrize("paste_kind", ["envelope", "oversized_file", "utf8", "json_escaping"])
