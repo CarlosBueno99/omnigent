@@ -640,7 +640,8 @@ def _resolve_replay_context_window(
     :param model: The spec model, e.g. ``"claude-sonnet-4-5"``, or ``None``.
     :param model_override: The session's model override, which takes
         precedence over the declared window.
-    :returns: The window in tokens, or the shared fallback when unknown.
+    :returns: The window in tokens, or the shared fallback when unknown
+        or not positive.
     """
     from omnigent.llms.context_window import (
         DEFAULT_CONTEXT_WINDOW,
@@ -655,7 +656,7 @@ def _resolve_replay_context_window(
         # A malformed AP_CONTEXT_WINDOW_OVERRIDE must not fail every restarted turn.
         logger.warning("ClaudeSDKExecutor: unreadable context window override", exc_info=True)
         return DEFAULT_CONTEXT_WINDOW
-    return window or DEFAULT_CONTEXT_WINDOW
+    return window if window and window > 0 else DEFAULT_CONTEXT_WINDOW
 
 
 def _render_prior_message(message: Message) -> list[_JsonObject]:

@@ -6217,13 +6217,14 @@ async def test_fresh_client_replays_history_within_the_turn_models_window(
 
 
 @pytest.mark.asyncio
-async def test_malformed_window_override_replays_within_the_default_window(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("override", ["200k", "-10"])
+async def test_invalid_window_override_replays_within_the_default_window(
+    monkeypatch: pytest.MonkeyPatch, override: str
 ) -> None:
     from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
     from omnigent.llms.context_window import DEFAULT_CONTEXT_WINDOW
 
-    monkeypatch.setenv("AP_CONTEXT_WINDOW_OVERRIDE", "200k")
+    monkeypatch.setenv("AP_CONTEXT_WINDOW_OVERRIDE", override)
     fake_sdk = _make_recovery_fake_sdk()
     executor = ClaudeSDKExecutor(model="claude-sonnet-4-5")
     # Too large for half of the default window, but not for half of a 200k window.

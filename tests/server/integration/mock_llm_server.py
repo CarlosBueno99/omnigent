@@ -1517,7 +1517,7 @@ async def set_context_window(request: Request) -> dict[str, object]:
     """
     body = await request.json()
     limit = body.get("max_input_tokens")
-    if limit is not None and (not isinstance(limit, int) or limit <= 0):
+    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0):
         raise HTTPException(status_code=400, detail="max_input_tokens must be a positive int")
     async with _state._lock:
         _state.context_window_tokens = limit

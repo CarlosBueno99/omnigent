@@ -153,6 +153,7 @@ async def test_context_window_rejects_oversized_prompts_until_reset() -> None:
     ) as client:
         configured = await client.post("/mock/configure", json={"responses": [{"text": "Fits."}]})
         configured.raise_for_status()
+        boolean = await client.post("/mock/context_window", json={"max_input_tokens": True})
         limited = await client.post("/mock/context_window", json={"max_input_tokens": 100})
         limited.raise_for_status()
         rejected = await client.post("/v1/messages", content=oversized, headers=headers)
@@ -160,6 +161,7 @@ async def test_context_window_rejects_oversized_prompts_until_reset() -> None:
         (await client.post("/mock/reset")).raise_for_status()
         after_reset = await client.post("/v1/messages", content=oversized, headers=headers)
 
+    assert boolean.status_code == 400
     assert rejected.status_code == 400
     assert rejected.json()["error"]["message"].startswith("prompt is too long")
     assert accepted.status_code == 200
