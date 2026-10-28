@@ -574,7 +574,7 @@ async def _inject_codex_turn_once(
     settings_overrides: Mapping[str, object],
 ) -> None:
     """Steer an active turn or start one, recovering one proven stale steer."""
-    if not _spilled_mirror_fits(input_items, bridge_dir):
+    if not await asyncio.to_thread(_spilled_mirror_fits, input_items, bridge_dir):
         raise _CodexNativeInputUndelivered(_MIRROR_TOO_LARGE_FAILURE)
     if state.active_turn_id is None:
         await _start_codex_turn(
