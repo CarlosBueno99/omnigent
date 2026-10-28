@@ -9975,7 +9975,10 @@ async def _delete_native_bridge_dirs(
         bridge_dir_for_session_id as qwen_bridge_dir,
     )
     from omnigent.inner.native_attachments import attachment_cache_dir
-    from omnigent.native.native_bridge_common import try_bridge_dir_cleanup_lock
+    from omnigent.native.native_bridge_common import (
+        read_bridge_session_id,
+        try_bridge_dir_cleanup_lock,
+    )
 
     labels: dict[str, str] = {}
     if server_client is not None:
@@ -9988,11 +9991,14 @@ async def _delete_native_bridge_dirs(
         claude_bridge_dir(labels.get(BRIDGE_ID_LABEL_KEY) or session_id),
         claude_bridge_dir(session_id),
     }
-    targets = claude_targets | {
+    transferred_targets = {
         antigravity_bridge_dir(labels.get(ANTIGRAVITY_NATIVE_BRIDGE_ID_LABEL_KEY) or session_id),
         antigravity_bridge_dir(session_id),
         codex_bridge_dir(labels.get(CODEX_NATIVE_BRIDGE_ID_LABEL_KEY) or session_id),
         codex_bridge_dir(session_id),
+    }
+    owned_targets = claude_targets | transferred_targets
+    targets = owned_targets | {
         cursor_bridge_dir(session_id),
         goose_bridge_dir(session_id),
         hermes_bridge_dir(session_id),
@@ -10007,7 +10013,7 @@ async def _delete_native_bridge_dirs(
         try:
             lock = (
                 try_bridge_dir_cleanup_lock(bridge_target)
-                if bridge_target in claude_targets
+                if bridge_target in owned_targets
                 else contextlib.nullcontext(True)
             )
             with lock as acquired:
@@ -10015,10 +10021,14 @@ async def _delete_native_bridge_dirs(
                     continue
                 if bridge_target in claude_targets:
                     owner = read_active_session_id(bridge_target)
-                    if owner is not None and owner != session_id:
-                        continue
-                # /clear can transfer a Claude bridge and its cache to a new session.
-                # A cache can also survive a missing bridge directory after a reboot.
+                elif bridge_target in transferred_targets:
+                    owner = read_bridge_session_id(bridge_target)
+                else:
+                    owner = None
+                if owner is not None and owner != session_id:
+                    continue
+                # A transferred bridge keeps its cache; ownerless legacy paths
+                # and caches whose bridge is already gone remain reclaimable.
                 for target in (bridge_target, attachment_cache_dir(bridge_target)):
                     try:
                         shutil.rmtree(target, ignore_errors=False)
