@@ -7403,8 +7403,13 @@ def test_serve_mcp_answers_while_relay_call_is_blocked(
         bridge_dir: Path,
         name: str,
         arguments: dict[str, Any],
+        *,
+        codex_execution: CodexExecutionIdentity | None = None,
+        claude_execution: ClaudeExecutionIdentity | None = None,
     ) -> dict[str, Any]:
         del bridge_dir, arguments
+        assert codex_execution is None
+        assert claude_execution is None
         if name == "sys_slow":
             blocked_call_started.set()
             release_blocked_call.wait(timeout=10.0)

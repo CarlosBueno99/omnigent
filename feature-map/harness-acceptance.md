@@ -127,7 +127,7 @@ no harness-specific tests exist. No passing per-harness results are implied.
 | `compaction` | — | No shared probe. Use the Composer compaction recipe and the harness's supported entry points. |
 | `images` | — | No shared probe. Attachment UI alone does not establish delivery to a real harness/model. |
 | `fork` | `fork_replay` | Copied-history use through server/runner; fork dialog, alternate targets and parent isolation need the Sessions recipe. |
-| `requester-delegation` | — | `tests/e2e/test_private_session_orchestration.py` covers OpenAI Agents SDK and native Codex web input. [Session orchestration](./session-orchestration.md) maps browser checks and the Claude, terminal, native-child and version-skew gaps. No shared bench probe. |
+| `requester-delegation` | — | `tests/e2e/test_private_session_orchestration.py` covers OpenAI Agents SDK, isolated Claude SDK, and native Codex Chat/host-managed terminal input. [Session orchestration](./session-orchestration.md) maps browser checks and the native Claude, interactive CLI, native-child and version-skew gaps. No shared bench probe. |
 | `mcp` | `omnigent_mcp` | Read-only relay tool for supported natives; Settings inventory alone is not a tool-execution check. |
 | `user-resources` | — | Use the Pi resource recipes below and the native skill/plugin recipes. No shared cross-harness resource-loading probe; file linking alone does not prove runtime discovery or marketplace compatibility. |
 | `interactive-input` | — | `tests/e2e/test_pi_extension_ui_round_trip.py` drives SDK/native Pi through the approval API. The [native dialog recipe](./native-harnesses.md#driving-it-with-the-repro-environment) separately covers browser answers. No shared cross-harness dialog probe. |

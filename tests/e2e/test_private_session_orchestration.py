@@ -14,7 +14,6 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-import uuid
 from importlib.metadata import version
 from pathlib import Path
 

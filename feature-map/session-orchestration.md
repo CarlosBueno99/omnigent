@@ -7,9 +7,9 @@ workers on its host or a new managed sandbox. This is enabled by default, with
 
 Shared-source support remains under review. OpenAI Agents SDK, Codex-native
 Chat and authenticated host-managed Codex terminal input have process evidence.
-Claude SDK requester binding is implemented, with isolated process validation
-pending. Native Claude, provider-created helpers and standalone Codex delegation
-remain unresolved compatibility limits; typing and ordinary helper work remain
+Claude SDK requester binding also has isolated pinned-process evidence.
+Native Claude and provider-created helper delegation remain unresolved
+compatibility limits; typing and ordinary helper work remain
 available. Do not infer support from another harness's passing journey.
 
 ## Sub-features
@@ -79,20 +79,25 @@ the header states are covered by `web/src/shell/ChatHeader.test.tsx`.
   tests/e2e/test_private_session_orchestration.py --reruns 0` uses real local
   host, server, SDK and Codex processes with a scripted model. It submits chat
   requests over HTTP and checks send, history reads, same-host creation, and
-  sharing behavior. Both rows check shared owner requests, collaborator refusal
+  sharing behavior. Each harness checks shared owner requests, collaborator refusal
   for messaging and creation, fresh owner recovery, and owner side-chat delegation.
   The Codex row uses web submissions with provider consumption IDs and resolves
   each tool's retained execution through authenticated harness IPC. Its default
   row sends the first task and creates a worker through the real terminal WebSocket,
   including authenticated local single-user identity, then exercises Chat on the
   same executor. Reattachment uses the same observed terminal. Provider-native
-  helper delegation and the standalone CLI launcher are not covered.
+  helper delegation and the legacy internal standalone launcher are not covered.
+  The public Codex CLI uses host-managed preparation; interactive CLI attachment
+  still needs its own process evidence.
   Claude SDK rows require the lockfile SDK and pinned CLI inside a clean Linux
   container with loopback-only networking; they skip before probing Claude on
-  an ordinary workstation. A skip is not Claude process validation.
+  an ordinary workstation. The isolated CLI 2.1.295 / SDK 0.2.121 rows passed
+  at `a61b68089` with a scripted provider, no external network and no host mounts.
+  A workstation skip is not Claude process validation; the SDK proof does not
+  cover native Claude terminals or provider-created helpers.
   It also checks that unconfigured managed creation gives a clear
   refusal without creating a session. Codex and tmux are required for the native row.
-  Both harnesses also exercise a server restart with the explicit kill switch:
+  All three harnesses also exercise a server restart with the explicit kill switch:
   existing runners remain opted in, but their subsequent peer sends and independent
   creates are refused without writes; session-info reads still work.
   It also fires an owner-created schedule through the real server/host and checks
@@ -125,10 +130,10 @@ the header states are covered by `web/src/shell/ChatHeader.test.tsx`.
   | --- | --- | --- |
   | OpenAI Agents SDK Chat/API | Implemented | Real process send/create, editor refusal, fresh owner recovery and kill switch. |
   | Codex native web Chat | Implemented | Pinned CLI consumption IDs, authenticated harness lookup, browser actions and destination history. |
-  | Claude SDK Chat/API | Implemented; process proof pending | Raw provider UUID echoes and exact SDK control tasks retain input/tool lineage before typed parsing. Component tests cover delayed callbacks; isolated pinned-process rows must pass. |
+  | Claude SDK Chat/API | Implemented | Raw provider UUID echoes and exact SDK control tasks retain input/tool lineage before typed parsing. Isolated pinned-process rows cover owner/editor/recovery, worker creation and kill switch; component tests cover delayed callbacks. |
   | Claude native Chat/terminal | Blocked | PTY input must bind its actual requester to consumed execution and retained calls. Typing remains available. |
   | Codex host-managed terminal / default CLI attach | Implemented | Authenticated relay captures writers; the TUI proxy registers input before submission. Real terminal WebSocket send/create passes. Local CLI attach selection has component coverage. |
-  | Codex standalone CLI launcher | Delegation blocked | Typing remains available; this launcher has not integrated trusted input registration. |
+  | Legacy internal Codex standalone launcher | Delegation blocked | No in-tree production caller found; the public CLI uses host-managed preparation. Direct internal calls lack trusted input registration. |
   | Provider-native children/helpers | Incomplete | Preserve each input's requester through child creation, steering, queue consumption and wakes. Ordinary helper visibility is not proof. |
   | Legacy runner → updated server | Refused without requester | Private/shared sends and creates leave no new task or worker; ordinary child work keeps unknown origin. |
   | Updated runner → older/mixed server replicas | Refuses unsupported receiving routes | Mutations require `/v1/requester/sessions` and its events route, with no legacy fallback. ASGI route-absence tests include servers that already have the older orchestrated endpoint; no released-binary mixed-replica process run. |
@@ -152,7 +157,7 @@ the header states are covered by `web/src/shell/ChatHeader.test.tsx`.
   Append `-session_orchestration` to the isolated server's feature settings and
   restart it, then repeat from a private manager: expect a disabled error, no new
   task and no independent worker. Read history/info to confirm reads still work.
-- Live sandbox provisioning, native Claude and standalone Codex delegation require
+- Live sandbox provisioning, native Claude and legacy standalone delegation require
   separate verification; local host-managed Codex process checks do not cover them.
 
 ## Gotchas

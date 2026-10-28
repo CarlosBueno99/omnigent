@@ -22,10 +22,12 @@ from omnigent.harnesses.claude_native.bridge import (
 from omnigent.harnesses.cursor_native import bridge as cursor_native_bridge
 from omnigent.harnesses.kiro_native import bridge as kiro_native_bridge
 from omnigent.harnesses.qwen_native import bridge as qwen_native_bridge
+from omnigent.models.claude_model_vocabulary import MODEL_VOCABULARY_ENV_VARS
 from omnigent.runner import create_runner_app, native_controls
 from omnigent.spec.types import AgentSpec, ExecutorSpec
 from omnigent.terminals import TerminalRegistry
 from omnigent.terminals.writer import TerminalWriter, TerminalWriterEvidence
+from tests._helpers.providers import isolate_provider_resolution
 from tests.runner.conftest import (
     _build_app_for_spec,
     _drain_session_event_queue,
@@ -39,18 +41,10 @@ from tests.runner.native_helpers import _harness_spec
 
 
 @pytest.fixture(autouse=True)
-def _isolate_anthropic_default_model_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Clear ambient ``ANTHROPIC_DEFAULT_*_MODEL`` gateway pins (#4279).
-
-    claude-native model resolution reads these from ``os.environ``; a developer
-    whose shell pins them (anyone driving Claude through a gateway) otherwise
-    gets a different model-change verdict and these tests fail spuriously.
-    """
-    for var in (
-        "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-    ):
+def _isolate_native_provider_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Use only each scenario's provider config and model vocabulary."""
+    isolate_provider_resolution(monkeypatch, tmp_path / "provider-config")
+    for var in MODEL_VOCABULARY_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
 
 
@@ -3509,6 +3503,7 @@ async def test_events_model_change_on_native_session_returns_503_when_bridge_not
     swallows this 503 and still returns 200 with the persisted
     value — the next spawn applies the new model via ``--model``.
     """
+    commands: list[str] = []
 
     def _fake_inject(
         bridge_dir: Any,
@@ -3520,10 +3515,16 @@ async def test_events_model_change_on_native_session_returns_503_when_bridge_not
         ready_timeout_s: float | None = None,
     ) -> None:
         """Simulate the bridge-not-ready path."""
-        del bridge_dir, command, timeout_s
+        del bridge_dir, timeout_s
+        commands.append(command)
         raise RuntimeError("tmux target is not advertised")
 
     monkeypatch.setattr(claude_native_bridge, "inject_slash_command", _fake_inject)
+    monkeypatch.setattr(
+        claude_native_bridge,
+        "read_model_env",
+        lambda _bridge_dir: {"ANTHROPIC_CUSTOM_MODEL_OPTION": "claude-opus-4-7"},
+    )
 
     native_spec = _harness_spec("claude-native")
 
@@ -3552,6 +3553,7 @@ async def test_events_model_change_on_native_session_returns_503_when_bridge_not
     assert body.get("error") == "claude_native_model_failed", (
         f"503 body must carry the bridge-failure error code; got {body!r}"
     )
+    assert commands == ["/model claude-opus-4-7"]
 
 
 @pytest.mark.asyncio

@@ -172,7 +172,9 @@ verify-env run -- python -m pytest <test> --ui-skip-build --video=on \
   unknown requester work must remain unable to delegate. The real process scenario
   `tests/e2e/test_private_session_orchestration.py` exercises authenticated terminal
   send/create on pinned Codex, followed by Chat collaborator refusal and fresh-owner
-  recovery. Other native terminals and standalone Codex are separate coverage gaps.
+  recovery. Other native terminals and interactive public CLI attachment are separate
+  coverage gaps. The public Codex CLI uses host-managed preparation; the legacy
+  internal standalone launcher is not a supported delegation path.
 - Terminal writer identity is retained for one process incarnation. Read-only
   viewers and resize frames cannot authorize input. Unknown/programmatic input
   or multiple identities restrict terminal delegation until restart; typing stays
