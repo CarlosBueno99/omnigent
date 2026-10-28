@@ -186,7 +186,8 @@ class CodexNativeBridgeState:
         ``"/home/user/project"``.
     :param active_turn_id: Current Codex turn id, if one is running,
         e.g. ``"turn_abc123"``.
-    :param file_revision: Inode and modification time of the observed state file;
+    :param state_revision: Persisted unique write identity, excluded from logical equality.
+    :param file_revision: Observed inode and modification time for legacy writers;
         excluded from logical equality and never persisted in the payload.
     """
 
@@ -197,6 +198,7 @@ class CodexNativeBridgeState:
     active_turn_id: str | None = None
     cwd: str | None = None
     file_revision: tuple[int, int] | None = field(default=None, compare=False, repr=False)
+    state_revision: str | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -1061,6 +1063,7 @@ def _write_bridge_state_unlocked(bridge_dir: Path, state: CodexNativeBridgeState
                     "codex_home": state.codex_home,
                     "active_turn_id": state.active_turn_id,
                     "cwd": state.cwd,
+                    "state_revision": secrets.token_hex(16),
                 },
                 handle,
                 sort_keys=True,
@@ -1547,6 +1550,7 @@ def read_bridge_state_result(bridge_dir: Path) -> CodexNativeBridgeStateRead:
     codex_home = raw.get("codex_home")
     active_turn_id = raw.get("active_turn_id")
     cwd = raw.get("cwd")
+    state_revision = raw.get("state_revision")
     if (
         not isinstance(session_id, str)
         or not session_id
@@ -1556,6 +1560,10 @@ def read_bridge_state_result(bridge_dir: Path) -> CodexNativeBridgeStateRead:
         or not thread_id
         or not isinstance(codex_home, str)
         or not codex_home
+        or (
+            state_revision is not None
+            and (not isinstance(state_revision, str) or not state_revision)
+        )
     ):
         return CodexNativeBridgeStateRead(None, "invalid_state")
     parsed_active_turn_id = (
@@ -1570,6 +1578,7 @@ def read_bridge_state_result(bridge_dir: Path) -> CodexNativeBridgeStateRead:
             active_turn_id=parsed_active_turn_id,
             cwd=cwd if isinstance(cwd, str) and cwd else None,
             file_revision=(state_stat.st_ino, state_stat.st_mtime_ns),
+            state_revision=state_revision,
         ),
         "ready",
     )
@@ -1623,6 +1632,7 @@ def update_active_turn_id(
             or state.socket_path != expected_state.socket_path
             or state.codex_home != expected_state.codex_home
             or state.active_turn_id != expected_state.active_turn_id
+            or state.state_revision != expected_state.state_revision
             or (
                 expected_state.file_revision is not None
                 and state.file_revision != expected_state.file_revision

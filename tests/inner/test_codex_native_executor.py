@@ -1681,18 +1681,33 @@ def test_late_delivery_reply_preserves_newer_bridge_state(
     [(None, False), ("turn_existing", False), ("turn_existing", True)],
     ids=["start", "steer", "live-steer"],
 )
+@pytest.mark.parametrize("metadata_collision", [False, True], ids=["distinct-stat", "reused-stat"])
+@pytest.mark.parametrize("legacy_state", [False, True], ids=["versioned", "legacy"])
 def test_late_delivery_reply_does_not_resurrect_completed_turn(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     active_turn_id: str | None,
     live_injection: bool,
+    metadata_collision: bool,
+    legacy_state: bool,
 ) -> None:
     """A completion observed before the RPC reply still governs the next send."""
     from omnigent.harnesses.codex_native import forwarder
 
     _seed_bridge(tmp_path, active_turn_id=active_turn_id)
+    if legacy_state:
+        state_path = tmp_path / "state.json"
+        payload = json.loads(state_path.read_text())
+        payload.pop("state_revision", None)
+        state_path.write_text(json.dumps(payload))
     before = read_bridge_state(tmp_path)
     assert before is not None
+
+    if metadata_collision:
+        observed_stat = (tmp_path / "state.json").stat()
+        monkeypatch.setattr(
+            "omnigent.harnesses.codex_native.bridge.os.fstat", lambda _fd: observed_stat
+        )
 
     class _CompletedBeforeReplyClient(_FakeCodexNativeClient):
         requests = []
