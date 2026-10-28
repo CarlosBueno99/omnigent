@@ -1,5 +1,7 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { RefObject } from "react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import * as sessionsApi from "@/lib/sessionsApi";
@@ -8,10 +10,13 @@ import { ALT_KEY, MOD_KEY } from "@/components/KeyboardShortcut";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useSessionAgent } from "@/hooks/useAgents";
 import type { SessionLiveness } from "@/hooks/useSessionLiveness";
+import type * as UsePermissionsModule from "@/hooks/usePermissions";
 import type * as UseTerminalsModule from "@/hooks/useTerminals";
 import { useCreateTerminal, useTerminals } from "@/hooks/useTerminals";
 import { writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
 import { browserViewId } from "@/lib/browserTabs";
+import { subagentTabId } from "@/lib/subagentTabs";
+import type { Session } from "@/lib/types";
 import type { ChangedSort } from "./FlatFileList";
 import type { RightRailTab } from "./railTabs";
 import {
@@ -88,9 +93,16 @@ vi.mock("@/hooks/useAgents", () => ({
 vi.mock("sonner", () => ({ toast: { error: vi.fn() } }));
 // A side chat's pane is covered by its own suite; the stub just names its child.
 vi.mock("@/components/chat/SideChatPane", () => ({
-  SideChatPane: ({ childId }: { childId: string }) => (
-    <div data-testid="side-chat-pane-stub">{childId}</div>
+  SideChatPane: ({ childId, readOnly }: { childId: string; readOnly?: boolean }) => (
+    <div data-testid="side-chat-pane-stub" data-read-only={String(readOnly ?? false)}>
+      {childId}
+    </div>
   ),
+}));
+const canEditMock = vi.hoisted(() => vi.fn(() => true));
+vi.mock("@/hooks/usePermissions", async (importOriginal) => ({
+  ...(await importOriginal<typeof UsePermissionsModule>()),
+  useCanEdit: () => canEditMock(),
 }));
 const isMobileMock = vi.hoisted(() => vi.fn(() => false));
 vi.mock("@/hooks/useIsMobileViewport", () => ({ useIsMobileViewport: () => isMobileMock() }));
@@ -109,6 +121,7 @@ afterEach(() => {
   vi.clearAllMocks();
   vi.restoreAllMocks();
   isMobileMock.mockReturnValue(false);
+  canEditMock.mockReturnValue(true);
   Reflect.deleteProperty(window, "omnigentDesktop");
   useTerminalsMock.mockReturnValue({ terminals: [], isLoading: false, error: null });
   useCreateTerminalMock.mockReturnValue({
@@ -149,6 +162,7 @@ function renderWorkspace(
     resizing?: boolean;
     inert?: boolean;
     mobileSideChatsOpen?: boolean;
+    queryClient?: QueryClient;
   } = {},
 ) {
   let overrides = initialOverrides;
@@ -161,62 +175,70 @@ function renderWorkspace(
   const onCloseTerminal = vi.fn();
   const onToggleMaximized = vi.fn();
   const onMobileSideChatsOpenChange = vi.fn();
+  const queryClient =
+    initialOverrides.queryClient ??
+    new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const tree = () => (
-    <TooltipProvider delayDuration={0}>
-      <WorkspacePanel
-        conversationId={overrides.conversationId ?? "conv_ws"}
-        contained={overrides.contained}
-        width={360}
-        open={overrides.open}
-        animateVisibility={overrides.animateVisibility}
-        resizing={overrides.resizing}
-        inert={overrides.inert}
-        handleProps={{
-          tabIndex: 0,
-          role: "separator",
-          "aria-label": "Resize panel",
-          onMouseDown: vi.fn(),
-          onKeyDown: vi.fn(),
-        }}
-        rightRailTab={overrides.rightRailTab === undefined ? "files" : overrides.rightRailTab}
-        onRightRailTabChange={onRightRailTabChange}
-        openPanels={overrides.openPanels ?? []}
-        onClosePanel={onClosePanel}
-        showFilesPanel={overrides.showFilesPanel ?? true}
-        showContentSearch={overrides.showContentSearch}
-        showGithubTab={overrides.showGithubTab ?? false}
-        showBrowserTab={overrides.showBrowserTab ?? false}
-        onReveal={onReveal}
-        changedCount={overrides.changedCount ?? 0}
-        subagentsWorking={0}
-        agentCount={1}
-        rootSessionId={null}
-        selectedFilePath={overrides.selectedFilePath ?? null}
-        openFiles={overrides.openFiles ?? []}
-        openFileViewer={openFileViewer}
-        onCloseFile={onCloseFile}
-        onShowScopeView={vi.fn()}
-        onCommentsOpenChange={vi.fn()}
-        openTerminalTab={openTerminalTab}
-        openTerminals={overrides.openTerminals ?? []}
-        selectedTerminalKey={overrides.selectedTerminalKey ?? null}
-        onCloseTerminal={onCloseTerminal}
-        maximized={overrides.maximized ?? false}
-        onToggleMaximized={onToggleMaximized}
-        permissionLevel={null}
-        filesPanelSort={"recent" as ChangedSort}
-        onSortChange={vi.fn()}
-        filesPanelShowHidden={false}
-        onShowHiddenChange={vi.fn()}
-        liveness={overrides.liveness}
-        pending={overrides.pending}
-        mobileSideChatsOpen={overrides.mobileSideChatsOpen}
-        onMobileSideChatsOpenChange={onMobileSideChatsOpenChange}
-      />
-    </TooltipProvider>
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter>
+        <TooltipProvider delayDuration={0}>
+          <WorkspacePanel
+            conversationId={overrides.conversationId ?? "conv_ws"}
+            contained={overrides.contained}
+            width={360}
+            open={overrides.open}
+            animateVisibility={overrides.animateVisibility}
+            resizing={overrides.resizing}
+            inert={overrides.inert}
+            handleProps={{
+              tabIndex: 0,
+              role: "separator",
+              "aria-label": "Resize panel",
+              onMouseDown: vi.fn(),
+              onKeyDown: vi.fn(),
+            }}
+            rightRailTab={overrides.rightRailTab === undefined ? "files" : overrides.rightRailTab}
+            onRightRailTabChange={onRightRailTabChange}
+            openPanels={overrides.openPanels ?? []}
+            onClosePanel={onClosePanel}
+            showFilesPanel={overrides.showFilesPanel ?? true}
+            showContentSearch={overrides.showContentSearch}
+            showGithubTab={overrides.showGithubTab ?? false}
+            showBrowserTab={overrides.showBrowserTab ?? false}
+            onReveal={onReveal}
+            changedCount={overrides.changedCount ?? 0}
+            subagentsWorking={0}
+            agentCount={1}
+            rootSessionId={null}
+            selectedFilePath={overrides.selectedFilePath ?? null}
+            openFiles={overrides.openFiles ?? []}
+            openFileViewer={openFileViewer}
+            onCloseFile={onCloseFile}
+            onShowScopeView={vi.fn()}
+            onCommentsOpenChange={vi.fn()}
+            openTerminalTab={openTerminalTab}
+            openTerminals={overrides.openTerminals ?? []}
+            selectedTerminalKey={overrides.selectedTerminalKey ?? null}
+            onCloseTerminal={onCloseTerminal}
+            maximized={overrides.maximized ?? false}
+            onToggleMaximized={onToggleMaximized}
+            permissionLevel={null}
+            filesPanelSort={"recent" as ChangedSort}
+            onSortChange={vi.fn()}
+            filesPanelShowHidden={false}
+            onShowHiddenChange={vi.fn()}
+            liveness={overrides.liveness}
+            pending={overrides.pending}
+            mobileSideChatsOpen={overrides.mobileSideChatsOpen}
+            onMobileSideChatsOpenChange={onMobileSideChatsOpenChange}
+          />
+        </TooltipProvider>
+      </MemoryRouter>
+    </QueryClientProvider>
   );
   const view = render(tree());
   return {
+    queryClient,
     rerender: (next: typeof overrides) => {
       overrides = { ...overrides, ...next };
       view.rerender(tree());
@@ -1393,6 +1415,129 @@ describe("WorkspacePanel mobile side chats", () => {
 
     expect(screen.queryByTestId("side-chats-panel-drawer")).toBeNull();
     expect(screen.getByTestId("side-chat-pane-stub")).toHaveTextContent("conv_side_b");
+  });
+});
+
+describe("WorkspacePanel sub-agent tabs", () => {
+  const SUBAGENT_TAB = subagentTabId("conv_child");
+
+  function clientWithSubagent(title = "Research agent") {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(["session", "conv_child"], {
+      id: "conv_child",
+      parentSessionId: "conv_ws",
+      title,
+      labels: {},
+    } as unknown as Session);
+    return queryClient;
+  }
+
+  it("opens a requested sub-agent as a labeled tab without duplicating it", () => {
+    const { onRightRailTabChange } = renderWorkspace({ queryClient: clientWithSubagent() });
+    const rail = screen.getByRole("complementary", { name: "Workspace" });
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      act(() => {
+        useChatStore.setState({ sideChatToOpen: { childId: SUBAGENT_TAB, parentId: "conv_ws" } });
+      });
+      expect(useChatStore.getState().sideChatToOpen).toBeNull();
+    }
+
+    expect(within(rail).getAllByRole("tab", { name: "Research agent" })).toHaveLength(1);
+    expect(onRightRailTabChange).toHaveBeenCalledWith("sidechat");
+  });
+
+  it("leaves a request for another chat's panel queued", () => {
+    renderWorkspace({ queryClient: clientWithSubagent() });
+    const request = { childId: SUBAGENT_TAB, parentId: "conv_other" };
+    act(() => {
+      useChatStore.setState({ sideChatToOpen: request });
+    });
+
+    expect(useChatStore.getState().sideChatToOpen).toEqual(request);
+    expect(screen.queryByRole("tab", { name: "Research agent" })).toBeNull();
+    act(() => {
+      useChatStore.setState({ sideChatToOpen: null });
+    });
+  });
+
+  it("shows the sub-agent's whole session with a full-screen link", () => {
+    writeSessionWorkspaceState("conv_ws", {
+      openSideChats: ["conv_side", SUBAGENT_TAB],
+      selectedSideChatId: SUBAGENT_TAB,
+    });
+    renderWorkspace({ rightRailTab: "sidechat", queryClient: clientWithSubagent() });
+    const rail = screen.getByRole("complementary", { name: "Workspace" });
+
+    // Side chats keep their own numbering beside sub-agent tabs.
+    expect(within(rail).getByRole("tab", { name: "Side chat 1" })).toBeInTheDocument();
+    const pane = screen.getByTestId("subagent-tab-pane");
+    expect(pane).toHaveTextContent("Research agent");
+    expect(within(pane).getByTestId("side-chat-pane-stub")).toHaveTextContent("conv_child");
+    expect(within(pane).getByTestId("side-chat-pane-stub")).toHaveAttribute(
+      "data-read-only",
+      "false",
+    );
+    expect(within(pane).getByRole("link", { name: "Open full screen" })).toHaveAttribute(
+      "href",
+      "/c/conv_child",
+    );
+  });
+
+  it("shows the transcript read-only without edit access", () => {
+    canEditMock.mockReturnValue(false);
+    writeSessionWorkspaceState("conv_ws", {
+      openSideChats: [SUBAGENT_TAB],
+      selectedSideChatId: SUBAGENT_TAB,
+    });
+    renderWorkspace({ rightRailTab: "sidechat", queryClient: clientWithSubagent() });
+
+    expect(screen.getByTestId("side-chat-pane-stub")).toHaveAttribute("data-read-only", "true");
+  });
+
+  it("closes the tab without stopping the sub-agent", () => {
+    const stop = vi.spyOn(sessionsApi, "stopSession");
+    writeSessionWorkspaceState("conv_ws", {
+      openSideChats: [SUBAGENT_TAB],
+      selectedSideChatId: SUBAGENT_TAB,
+    });
+    renderWorkspace({ rightRailTab: "sidechat", queryClient: clientWithSubagent() });
+
+    fireEvent.click(screen.getByRole("button", { name: "Close Research agent" }));
+
+    expect(screen.queryByRole("tab", { name: "Research agent" })).toBeNull();
+    expect(screen.queryByTestId("subagent-tab-pane")).toBeNull();
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  it("falls back to a generic label until the session loads", () => {
+    vi.spyOn(sessionsApi, "getSessionSlim").mockReturnValue(new Promise(() => {}));
+    writeSessionWorkspaceState("conv_ws", { openSideChats: [SUBAGENT_TAB] });
+    renderWorkspace();
+
+    expect(screen.getByRole("tab", { name: "Sub-agent" })).toBeInTheDocument();
+  });
+
+  it("lists the sub-agent in the panel picker and the phone drawer", () => {
+    writeSessionWorkspaceState("conv_ws", {
+      openSideChats: [SUBAGENT_TAB],
+      selectedSideChatId: SUBAGENT_TAB,
+    });
+    const { onRightRailTabChange } = renderWorkspace({ queryClient: clientWithSubagent() });
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Select panel" }), { button: 0 });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Research agent" }));
+    expect(onRightRailTabChange).toHaveBeenCalledWith("sidechat");
+    cleanup();
+
+    isMobileMock.mockReturnValue(true);
+    renderWorkspace({
+      rightRailTab: "sidechat",
+      mobileSideChatsOpen: true,
+      queryClient: clientWithSubagent(),
+    });
+    const drawer = screen.getByTestId("side-chats-panel-drawer");
+    expect(within(drawer).getByRole("tab", { name: "Research agent" })).toBeInTheDocument();
+    expect(within(drawer).getByTestId("subagent-tab-pane")).toBeInTheDocument();
   });
 });
 

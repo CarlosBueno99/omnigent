@@ -40,12 +40,12 @@ import {
   splitSlashCommand,
   stripGatedSubagentRoutingChips,
   stripPendingElicitations,
-  subAgentComposerLabel,
   unboundSessionResumableInApp,
   WORKING_MESSAGES,
   workingIndicatorLabel,
 } from "./ChatPage";
 import { modelPickerKindForConv } from "@/lib/composerCapabilities";
+import { subAgentComposerLabel } from "@/shell/subagentLabel";
 import { nativeCodingAgentForHarness, WRAPPER_LABEL_KEY } from "@/lib/nativeCodingAgents";
 
 // The Composer's read-only and disabled states are derived from

@@ -67,10 +67,12 @@ import { useNewBrowserHotkey } from "@/hooks/useNewBrowserHotkey";
 import { useSideChats } from "@/hooks/useSideChats";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { MobilePanelDrawer } from "./MobilePanelDrawer";
+import { SUBAGENT_TAB_FALLBACK_LABEL, SubagentTabPane, useSubagentTabLabels } from "./SubagentTab";
 import { SideChatPane } from "@/components/chat/SideChatPane";
 import { useChatStore } from "@/store/chatStore";
 import { SIDE_CHAT_COMMAND_PREFIX, supportsSideChat, usesNativeSideChatFork } from "@/lib/sideChat";
 import { createSideChat, stopSession } from "@/lib/sessionsApi";
+import { subagentSessionIdFromTab } from "@/lib/subagentTabs";
 import { useSessionAgent } from "@/hooks/useAgents";
 import type { SessionLiveness } from "@/hooks/useSessionLiveness";
 import {
@@ -913,9 +915,9 @@ function WorkspacePanelImpl({
     // screen now.
     if (sideChatToOpen.parentId !== conversationId) return;
     const { childId } = sideChatToOpen;
-    if (childId.startsWith("pending:")) {
-      // "Ask in side chat": a not-yet-forked tab, so it must not take a slot in
-      // the Codex awaiting queue. Its first send creates the fork.
+    if (childId.startsWith("pending:") || subagentSessionIdFromTab(childId) !== null) {
+      // "Ask in side chat" (a not-yet-forked tab) and sub-agent tabs (an
+      // existing session) must not take a slot in the Codex awaiting queue.
       sideChats.open(childId);
     } else {
       // Started this session → live (not a dead restored Codex fork).
@@ -1063,9 +1065,24 @@ function WorkspacePanelImpl({
     selectedFilePath,
     terminalShown,
   ]);
+  const subagentTabLabels = useSubagentTabLabels(sideChats.tabs);
+  // Sub-agent tabs show the sub-agent's name; side chats keep their own count.
+  const chatTabLabels: Record<string, string> = {};
+  let sideChatNumber = 0;
+  for (const tabId of sideChats.tabs) {
+    chatTabLabels[tabId] = subagentTabLabels[tabId] ?? `Side chat ${++sideChatNumber}`;
+  }
   const selectedSideChat = sideChats.selected;
+  const selectedSubagentId =
+    selectedSideChat === null ? null : subagentSessionIdFromTab(selectedSideChat);
   const selectedSideChatPane =
-    selectedSideChat === null ? null : (
+    selectedSideChat === null ? null : selectedSubagentId !== null ? (
+      <SubagentTabPane
+        key={selectedSideChat}
+        sessionId={selectedSubagentId}
+        label={chatTabLabels[selectedSideChat] ?? SUBAGENT_TAB_FALLBACK_LABEL}
+      />
+    ) : (
       <SideChatPane
         key={selectedSideChat}
         childId={selectedSideChat}
@@ -1084,6 +1101,11 @@ function WorkspacePanelImpl({
       />
     );
   const closeSideChat = async (childId: string) => {
+    // Closing a sub-agent tab only hides it; the sub-agent keeps running.
+    if (subagentSessionIdFromTab(childId) !== null) {
+      sideChats.close(childId);
+      return;
+    }
     // Take the queue first so the stop's idle status can't send it to the closing chat.
     const queued = useChatStore.getState().clearQueuedMessages(childId);
     if (!childId.startsWith("pending:")) {
@@ -1259,9 +1281,9 @@ function WorkspacePanelImpl({
       },
       disabled: false,
     })),
-    ...sideChats.tabs.map((childId, index) => ({
+    ...sideChats.tabs.map((childId) => ({
       key: `sidechat:${childId}`,
-      label: `Side chat ${index + 1}`,
+      label: chatTabLabels[childId] ?? childId,
       active: sideChatSelected && sideChats.selected === childId,
       select: () => {
         sideChats.select(childId);
@@ -1575,9 +1597,11 @@ function WorkspacePanelImpl({
                       </button>
                     </div>
                   ))}
-                {sideChats.tabs.map((childId, index) => {
+                {sideChats.tabs.map((childId) => {
                   const active = sideChatSelected && sideChats.selected === childId;
-                  const label = `Side chat ${index + 1}`;
+                  const label = chatTabLabels[childId] ?? childId;
+                  const TabIcon =
+                    subagentSessionIdFromTab(childId) === null ? MessagesSquareIcon : BotIcon;
                   return (
                     <div
                       key={childId}
@@ -1605,8 +1629,8 @@ function WorkspacePanelImpl({
                           onRightRailTabChange("sidechat");
                         }}
                       >
-                        <MessagesSquareIcon className="size-4" />
-                        {label}
+                        <TabIcon className="size-4 shrink-0" />
+                        <span className="max-w-[16ch] truncate">{label}</span>
                       </button>
                       <button
                         type="button"
@@ -1819,9 +1843,9 @@ function WorkspacePanelImpl({
             aria-label="Side chats"
             className="flex shrink-0 items-center gap-1 overflow-x-auto border-border border-b px-2 py-1.5"
           >
-            {sideChats.tabs.map((childId, index) => {
+            {sideChats.tabs.map((childId) => {
               const active = sideChats.selected === childId;
-              const label = `Side chat ${index + 1}`;
+              const label = chatTabLabels[childId] ?? childId;
               return (
                 <div
                   key={childId}
