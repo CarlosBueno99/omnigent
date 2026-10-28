@@ -6674,7 +6674,8 @@ def _clear_composer(socket_path: str, tmux_target: str, *, preserve_draft: bool 
     if not preserve_draft:
         _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Space")
     removing_probe = False
-    for round_no in range(_COMPOSER_CLEAR_MAX_ROUNDS + 1):
+    round_no = 0
+    while True:
         pane = _capture_pane(socket_path, tmux_target)
         _raise_if_composer_frame_ambiguous(pane)
         box = _composer_box(pane)
@@ -6703,6 +6704,9 @@ def _clear_composer(socket_path: str, tmux_target: str, *, preserve_draft: bool 
             if _composer_cursor_offset(socket_path, tmux_target, pane) == 1:
                 _run_tmux(socket_path, "send-keys", "-t", tmux_target, "BSpace")
                 removing_probe = True
+                # A probe seen on the last clear poll still needs time
+                # for the terminal to acknowledge its removal.
+                round_no = 0
         if round_no == _COMPOSER_CLEAR_MAX_ROUNDS:
             delivery_diagnostics.record_composer_not_cleared(
                 pane=pane,
@@ -6719,6 +6723,7 @@ def _clear_composer(socket_path: str, tmux_target: str, *, preserve_draft: bool 
                 socket_path, tmux_target, rows=len(box.rows), probe_empty=True
             )
         time.sleep(_CLAUDE_READY_POLL_INTERVAL_S)
+        round_no += 1
 
 
 def _composer_cursor_offset(socket_path: str, tmux_target: str, pane: str) -> int | None:

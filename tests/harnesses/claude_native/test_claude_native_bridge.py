@@ -11835,13 +11835,19 @@ def test_delivery_verifies_clear_keys_emptied_the_composer(
 
 @pytest.mark.parametrize("slash", [False, True], ids=["web-message", "slash-command"])
 @pytest.mark.parametrize("removal", ["handled", "delayed", "ignored", "unavailable"])
+@pytest.mark.parametrize("probe_observation", ["immediate", "last-clear-poll"])
 def test_delivery_waits_for_probe_removal_acknowledgment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slash: bool, removal: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    slash: bool,
+    removal: str,
+    probe_observation: str,
 ) -> None:
     """An unacknowledged Backspace must not turn a slash command into model input."""
     composer = _EditableComposer("old terminal draft", cursor=4)
     composer.install(monkeypatch)
     operations: list[tuple[str, ...]] = []
+    probe_polls = 0
     removal_polls = 0
     backspace: tuple[str, ...] | None = None
 
@@ -11855,7 +11861,14 @@ def test_delivery_waits_for_probe_removal_acknowledgment(
         composer._run_tmux(socket_path, *args)
 
     def cursor_offset(socket_path: str, tmux_target: str, pane: str) -> int | None:
-        nonlocal removal_polls
+        nonlocal probe_polls, removal_polls
+        if backspace is None:
+            probe_polls += 1
+            if (
+                probe_observation == "last-clear-poll"
+                and probe_polls < claude_native_bridge._COMPOSER_CLEAR_MAX_ROUNDS
+            ):
+                return None
         if backspace is not None:
             removal_polls += 1
             if removal == "unavailable":
