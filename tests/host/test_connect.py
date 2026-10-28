@@ -10932,20 +10932,24 @@ def test_run_host_process_classifies_how_the_host_ended(
     assert _host_exit_reasons(caplog) == [expected]
 
 
+@pytest.mark.parametrize("pending_status", ["sign_in_pending", "credential_pending"])
 @pytest.mark.parametrize(
     "state", ["pending", "dead", "untracked", "stopped", "rebound", "stop_during_read"]
 )
 async def test_runner_status_only_exposes_pending_sign_in_for_its_live_launch(
-    tmp_path, monkeypatch, state
+    tmp_path, monkeypatch, state, pending_status
 ) -> None:
     from omnigent.host.connect import _RunnerHandle
-    from omnigent.runner.identity import mark_sign_in_pending
+    from omnigent.runner.identity import mark_credential_pending, mark_sign_in_pending
 
     monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
     host = _make_host_process()
     connected = tmp_path / "owned.connected"
     monkeypatch.setenv(RUNNER_CONNECT_MARKER_ENV_VAR, str(connected))
-    mark_sign_in_pending("runner-owned", time.monotonic() + 20)
+    mark_wait = (
+        mark_sign_in_pending if pending_status == "sign_in_pending" else mark_credential_pending
+    )
+    mark_wait("runner-owned", time.monotonic() + 20)
     proc = Mock(pid=123, returncode=None)
     proc.poll.return_value = 1 if state == "dead" else None
     handle = _RunnerHandle(
@@ -10960,11 +10964,20 @@ async def test_runner_status_only_exposes_pending_sign_in_for_its_live_launch(
                 host._runners.pop("runner-owned")
             else:
                 handle.stop_requested = True
-            return True
+            return True if pending_status == "sign_in_pending" else 20.0
 
-        monkeypatch.setattr("omnigent.host.connect.runner_sign_in_is_pending", replaced)
+        reader = (
+            "runner_sign_in_is_pending"
+            if pending_status == "sign_in_pending"
+            else "runner_credential_wait_remaining"
+        )
+        monkeypatch.setattr(f"omnigent.host.connect.{reader}", replaced)
     result = await host._handle_runner_status(HostRunnerStatusFrame("status", "runner-owned"))
-    assert (result.status == "sign_in_pending") is (state == "pending")
+    assert (result.status == pending_status) is (state == "pending")
+    if pending_status == "credential_pending" and state == "pending":
+        assert 0 < result.credential_wait_remaining_s <= 20
+    else:
+        assert result.credential_wait_remaining_s is None
     proc.terminate.assert_not_called()
     proc.kill.assert_not_called()
 

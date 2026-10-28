@@ -39,9 +39,11 @@ from omnigent.cli_invocation import cli_invocation
 from omnigent.debug_logging import debug_event, runner_primary_session_id
 from omnigent.runner.identity import (
     OMNIGENT_INTERNAL_WS_ORIGIN,
+    RUNNER_CREDENTIAL_PENDING_WAIT_S,
     RUNNER_SIGN_IN_PENDING_WAIT_S,
     RUNNER_SLICE_KEY_ENV_VAR,
     RUNNER_TUNNEL_TOKEN_HEADER,
+    mark_credential_pending,
     mark_sign_in_pending,
     touch_connect_marker,
 )
@@ -124,7 +126,7 @@ _REFRESHABLE_HTTP_STATUSES = {401, 403}
 _HTTP_AUTH_REJECTION_FATAL_ATTEMPTS = 3
 # A never-connected runner with no credential to send keeps re-minting for this long
 # before it exits as signed out; a transient mint failure clears within the window.
-_NO_CREDENTIAL_FATAL_WINDOW_S = 120.0
+_NO_CREDENTIAL_FATAL_WINDOW_S = RUNNER_CREDENTIAL_PENDING_WAIT_S
 # Routine server-initiated recycles, NOT errors: 1012 "service restart" and
 # 1001 "going away" (and a 502 upgrade rejection) are how the Databricks Apps
 # ingress cycles long-lived WebSockets out from under a healthy app. The
@@ -459,6 +461,7 @@ async def serve_tunnel(
         record_websocket_connected("runner", reconnect=ever_connected)
         # Tell the launching host's connect watchdog this runner made it.
         touch_connect_marker()
+        mark_credential_pending(runner_id, None)
         connected_this_attempt = True
         ever_connected = True
         login_redirect_streak = 0
@@ -496,6 +499,7 @@ async def serve_tunnel(
             # A shutdown requested between reconnect attempts (no live
             # connection to drain): nothing to flush, just stop looping.
             mark_sign_in_pending(runner_id, None)
+            mark_credential_pending(runner_id, None)
             return
         connected_this_attempt = False
         disconnect_error: BaseException | None = None
@@ -509,9 +513,13 @@ async def serve_tunnel(
             )
         except BaseException:
             mark_sign_in_pending(runner_id, None)
+            mark_credential_pending(runner_id, None)
             raise
+        if auth_token is not None or ever_connected:
+            mark_credential_pending(runner_id, None)
         if not ever_connected and not sign_in_wait_ended:
             if pending and sign_in_wait_started is None:
+                mark_credential_pending(runner_id, None)
                 sign_in_wait_started = time.monotonic()
                 mark_sign_in_pending(runner_id, sign_in_wait_started + _SIGN_IN_PENDING_WAIT_S)
                 _logger.warning(
@@ -637,6 +645,14 @@ async def serve_tunnel(
                             or getattr(auth_token_factory, "declined_without_proxy_bearer", False)
                         )
                     )
+                    if not ever_connected and no_credential_to_send:
+                        assert http_auth_rejection_started is not None
+                        mark_credential_pending(
+                            runner_id,
+                            http_auth_rejection_started + _NO_CREDENTIAL_FATAL_WINDOW_S,
+                        )
+                    else:
+                        mark_credential_pending(runner_id, None)
                     if (
                         not ever_connected
                         and no_credential_to_send
@@ -737,6 +753,7 @@ async def serve_tunnel(
             if terminal_error is not None or (
                 shutdown_event is not None and shutdown_event.is_set()
             ):
+                mark_credential_pending(runner_id, None)
                 close = (
                     _CloseDetails.from_error(disconnect_error)
                     if disconnect_error is not None
@@ -847,7 +864,11 @@ async def serve_tunnel(
         )
         if connected_this_attempt:
             attempt = 0
-        await asyncio.sleep(jittered)
+        try:
+            await asyncio.sleep(jittered)
+        except BaseException:
+            mark_credential_pending(runner_id, None)
+            raise
         # Match the host tunnel (connect.py): escalate the backoff only on
         # non-recycle failures. A routine ingress recycle keeps reconnecting
         # promptly at the base delay instead of doubling toward the cap.

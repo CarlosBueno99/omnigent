@@ -505,9 +505,12 @@ async def test_serve_tunnel_no_credential_error_after_streak(
     assert "login https://ws.cloud.databricks.com/omnigent?o=123` " in message
 
 
+@pytest.mark.parametrize("recovery_at", [2.0, 60.0])
 @pytest.mark.asyncio
 async def test_serve_tunnel_rides_out_a_transient_missing_credential(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    recovery_at,
 ) -> None:
     """A credential that is missing for a few attempts connects once it is minted again.
 
@@ -516,23 +519,35 @@ async def test_serve_tunnel_rides_out_a_transient_missing_credential(
     """
     monkeypatch.delenv("OMNIGENT_WRAPPER_COMMAND", raising=False)
     monkeypatch.setattr(serve_module, "_NO_CREDENTIAL_FATAL_WINDOW_S", 120.0)
-    mints = 0
+    from omnigent.runner.identity import (
+        RUNNER_CONNECT_MARKER_ENV_VAR,
+        runner_credential_wait_remaining,
+    )
+
+    marker = tmp_path / "runner.connected"
+    monkeypatch.setenv(RUNNER_CONNECT_MARKER_ENV_VAR, str(marker))
+    monkeypatch.setattr(serve_module, "_RECONNECT_JITTER_FRACTION", 0.0)
+    monkeypatch.setattr(
+        "omnigent.runner.identity.time", SimpleNamespace(monotonic=lambda: 1000.0 + sum(sleeps))
+    )
+    sleeps = _clock_advanced_by_sleep(monkeypatch)
     upgrades: list[str | None] = []
 
     def _mint() -> str | None:
-        nonlocal mints
-        mints += 1
-        return None if mints <= 4 else "tok-recovered"
+        return None if sum(sleeps) < recovery_at else "tok-recovered"
 
-    async def _serve_once(app: Any, *, auth_token: str | None = None, **_kwargs: Any) -> None:
+    async def _serve_once(app: Any, *, auth_token: str | None = None, **kwargs: Any) -> None:
         del app
         upgrades.append(auth_token)
         if auth_token is None:
+            if upgrades[:-1]:
+                remaining = runner_credential_wait_remaining(marker, "runner_transient_credential")
+                assert remaining == pytest.approx(120.0 - sum(sleeps))
             raise InvalidStatus(Response(401, "Unauthorized", [], b""))
+        kwargs["on_connected"]()
         raise asyncio.CancelledError
 
     monkeypatch.setattr(serve_module, "_serve_tunnel_once", _serve_once)
-    _clock_advanced_by_sleep(monkeypatch)
 
     with pytest.raises(asyncio.CancelledError):
         await serve_tunnel(
@@ -545,10 +560,15 @@ async def test_serve_tunnel_rides_out_a_transient_missing_credential(
 
     assert upgrades[-1] == "tok-recovered"
 
+    assert sum(sleeps) == recovery_at
+    assert marker.exists()
+    assert not marker.with_suffix(".credential-pending").exists()
+
 
 @pytest.mark.asyncio
 async def test_serve_tunnel_no_credential_exits_only_after_the_window(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ) -> None:
     """A credential that stays missing past the retry window still ends the launch.
 
@@ -557,6 +577,10 @@ async def test_serve_tunnel_no_credential_exits_only_after_the_window(
     """
     monkeypatch.delenv("OMNIGENT_WRAPPER_COMMAND", raising=False)
     monkeypatch.setattr(serve_module, "_NO_CREDENTIAL_FATAL_WINDOW_S", 120.0)
+    from omnigent.runner.identity import RUNNER_CONNECT_MARKER_ENV_VAR
+
+    marker = tmp_path / "runner.connected"
+    monkeypatch.setenv(RUNNER_CONNECT_MARKER_ENV_VAR, str(marker))
     attempts = 0
 
     async def _serve_once(app: Any, *, auth_token: str | None = None, **_kwargs: Any) -> None:
@@ -581,6 +605,8 @@ async def test_serve_tunnel_no_credential_exits_only_after_the_window(
     assert str(exc_info.value).startswith(serve_module.RUNNER_TUNNEL_NO_CREDENTIAL_PREFIX)
     assert sum(sleeps) >= serve_module._NO_CREDENTIAL_FATAL_WINDOW_S
     assert attempts > serve_module._HTTP_AUTH_REJECTION_FATAL_ATTEMPTS
+
+    assert not marker.with_suffix(".credential-pending").exists()
 
 
 class _SignInFactory:
@@ -3979,29 +4005,48 @@ async def test_application_silence_preserves_connection_owned_requests(
                 await task
 
 
+@pytest.mark.parametrize("pending_status", ["sign_in_pending", "credential_pending"])
 @pytest.mark.asyncio
-async def test_pending_sign_in_cancellation_clears_launch_marker(tmp_path, monkeypatch) -> None:
+async def test_pending_sign_in_cancellation_clears_launch_marker(
+    tmp_path, monkeypatch, pending_status
+) -> None:
     from omnigent.runner.identity import RUNNER_CONNECT_MARKER_ENV_VAR, sign_in_pending_marker_path
 
     marker = tmp_path / "runner.connected"
     monkeypatch.setenv(RUNNER_CONNECT_MARKER_ENV_VAR, str(marker))
+    pending_marker = (
+        sign_in_pending_marker_path(marker)
+        if pending_status == "sign_in_pending"
+        else marker.with_suffix(".credential-pending")
+    )
+    monkeypatch.setattr(serve_module, "_NO_CREDENTIAL_FATAL_WINDOW_S", 120.0)
+
+    async def rejected(*_args, **_kwargs):
+        raise InvalidStatus(Response(401, "Unauthorized", [], b""))
+
+    monkeypatch.setattr(serve_module, "_serve_tunnel_once", rejected)
+    factory = (
+        _SignInFactory(pending_calls=10_000, token=None)
+        if pending_status == "sign_in_pending"
+        else lambda: None
+    )
     task = asyncio.create_task(
         serve_tunnel(
             _noop_app,
             server_url="http://synthetic.invalid",
             runner_id="runner-owned",
             runner_version="0.1",
-            auth_token_factory=_SignInFactory(pending_calls=10_000, token=None),
+            auth_token_factory=factory,
         )
     )
     try:
         async with asyncio.timeout(1):
-            while not sign_in_pending_marker_path(marker).exists():
+            while not pending_marker.exists():
                 await asyncio.sleep(0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert not sign_in_pending_marker_path(marker).exists()
+        assert not pending_marker.exists()
         assert not marker.exists()
     finally:
         task.cancel()
