@@ -2287,10 +2287,35 @@ def _codex_rollout_records_from_session_items(
         if item.get("type") == "compaction":
             compacted_msgs = item.get("compacted_messages")
             if isinstance(compacted_msgs, list) and compacted_msgs:
-                replacement_history = [
-                    _sanitize_compacted_item(message)
-                    for message in _codex_items_with_outputs_in_call_order(compacted_msgs)
-                ]
+                compacted_msgs = _codex_items_with_outputs_in_call_order(compacted_msgs)
+                replacement_history: list[object] = []
+                for message in compacted_msgs:
+                    if isinstance(message, dict):
+                        if message.get("type") == "message" and "content" in message:
+                            message = {
+                                **message,
+                                "content": sanitize_replayed_image_blocks(message["content"]),
+                            }
+                        elif message.get("type") == "function_call" and isinstance(
+                            message.get("arguments"), str
+                        ):
+                            message = {
+                                **message,
+                                "arguments": _codex_replayed_arguments(message["arguments"]),
+                            }
+                        elif (
+                            message.get("type")
+                            in (
+                                "function_call_output",
+                                "custom_tool_call_output",
+                            )
+                            and "output" in message
+                        ):
+                            message = {
+                                **message,
+                                "output": sanitize_replayed_image_blocks(message["output"]),
+                            }
+                    replacement_history.append(message)
                 replacement_call_ids = {
                     message.get("call_id")
                     for message in replacement_history
@@ -2418,7 +2443,11 @@ def _codex_items_with_outputs_in_call_order(
         item_type = item.get("type")
         if item_type == "function_call_output":
             output_positions.append(position)
-        elif item_type == "compaction" or item_type not in NON_CONTENT_ITEM_TYPES:
+        elif (
+            not isinstance(item_type, str)
+            or item_type not in NON_CONTENT_ITEM_TYPES
+            or item_type == "compaction"
+        ):
             flush_run()
     flush_run()
     return ordered
@@ -2676,6 +2705,18 @@ def _codex_message_payload_from_session_item(item: _JsonObject) -> _JsonObject |
 _MAX_REPLAYED_ARGUMENTS_CHARS = 900_000
 
 
+def _codex_replayed_arguments(arguments: str) -> str:
+    """Replace oversized tool arguments with a bounded replay marker."""
+    if len(arguments) <= _MAX_REPLAYED_ARGUMENTS_CHARS:
+        return arguments
+    _logger.warning(
+        "Replaying oversized Codex function_call arguments as a stub: chars=%d", len(arguments)
+    )
+    return json.dumps(
+        {"omitted": f"{len(arguments)} characters of arguments, too large to replay"}
+    )
+
+
 def _codex_function_call_payload_from_session_item(
     item: _JsonObject,
 ) -> _JsonObject | None:
@@ -2708,21 +2749,10 @@ def _codex_function_call_payload_from_session_item(
             "Cannot synthesize Codex resume rollout: Omnigent function_call "
             f"{item_id!r} has non-string arguments."
         )
-    if len(arguments) > _MAX_REPLAYED_ARGUMENTS_CHARS:
-        # An apply_patch mirror carries whole files for added or deleted ones. One
-        # oversized call would fail every request in the thread, so replay a stub.
-        _logger.warning(
-            "Replaying an oversized Codex function_call as a stub: name=%s chars=%d",
-            name,
-            len(arguments),
-        )
-        arguments = json.dumps(
-            {"omitted": f"{len(arguments)} characters of arguments, too large to replay"}
-        )
     payload: _JsonObject = {
         "type": "function_call",
         "name": name,
-        "arguments": arguments,
+        "arguments": _codex_replayed_arguments(arguments),
         "call_id": call_id,
     }
     # The Responses API rejects a replayed namespaced call without it.
@@ -2730,23 +2760,6 @@ def _codex_function_call_payload_from_session_item(
     if isinstance(namespace, str) and namespace:
         payload["namespace"] = namespace
     return payload
-
-
-def _sanitize_compacted_item(item: object) -> object:
-    """Replace omitted images only in native message and tool-output content."""
-    if not isinstance(item, dict):
-        return item
-    item_type = item.get("type")
-    if not isinstance(item_type, str):
-        return item
-    field = {
-        "message": "content",
-        "function_call_output": "output",
-        "custom_tool_call_output": "output",
-    }.get(item_type)
-    if field is None or field not in item:
-        return item
-    return {**item, field: sanitize_replayed_image_blocks(item[field])}
 
 
 def _codex_function_call_output_payload_from_session_item(

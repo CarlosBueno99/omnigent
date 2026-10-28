@@ -556,7 +556,15 @@ def test_compacted_tool_images_preserve_snapshot_and_late_output_order() -> None
 )
 def test_compacted_image_sanitization_preserves_non_content_values(item: object) -> None:
     """Tool arguments, plain outputs, and unknown records are left intact."""
-    assert codex_native._sanitize_compacted_item(item) == item
+    records = codex_native._codex_rollout_records_from_session_items(
+        [{"type": "compaction", "compacted_messages": [item]}],
+        session_id="conv_test",
+        external_session_id="019f-thread",
+        cwd=Path("/tmp/test"),
+        model_provider="openai",
+        cli_version="0.154.0",
+    )
+    assert records[1]["payload"]["replacement_history"] == [item]
 
 
 def test_codex_event_msg_record_ignores_non_list_content() -> None:
