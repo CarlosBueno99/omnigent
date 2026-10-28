@@ -339,24 +339,61 @@ class _SpilledTextTooLarge(ValueError):
     """A cached paste cannot fit in one mirrored session event."""
 
 
-def restore_spilled_text(text: str, bridge_dir: Path) -> str | None:
+def record_spilled_text(text: str, ranges: list[list[int]], bridge_dir: Path) -> str | None:
+    """Record generated reference occurrences under one native delivery identity."""
+    message_id = f"omnigent-paste-{uuid.uuid4().hex}"
+    receipt = json.dumps(
+        {"text_digest": hashlib.sha256(text.encode("utf-8")).hexdigest(), "ranges": ranges},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    name = f"{message_id}.json"
+    path = _materialize_bytes(receipt, name, pasted_text_cache_dir(bridge_dir))
+    return message_id if path is not None and path.name == name else None
+
+
+def restore_spilled_text(
+    text: str, bridge_dir: Path, client_message_id: str | None = None
+) -> str | None:
     """
     Put back the text each :func:`materialize_text` reference in *text* stands for.
 
     A harness echoes a spilled paste as its ``[Attached file: ...]`` line. Only a
-    whole-line reference into this session's generated-paste cache is replaced,
-    and only when the file still holds text with the digest in its name. Uploads
-    and unavailable historical cache entries keep their references.
+    whole-line reference recorded for this native message identity is replaced,
+    and only when the file still holds text with the digest in its name. Literal
+    references and unavailable historical cache entries keep their references.
 
     :param text: Message text as the harness echoed it.
     :param bridge_dir: Session bridge path, used to identify its attachment cache.
+    :param client_message_id: Codex's echoed delivery identity, including on resume.
     :returns: *text* with each such reference replaced, or ``None`` when the
         restored message would not fit one session event. Restoring stops at that
         budget, so repeated references never expand past it.
     """
-    if "pasted_text_" not in text:
+    if "pasted_text_" not in text or not isinstance(client_message_id, str):
+        return text
+    if re.fullmatch(r"omnigent-paste-[0-9a-f]{32}", client_message_id) is None:
         return text
     cache = pasted_text_cache_dir(bridge_dir)
+    try:
+        raw_receipt = _read_cached_file(cache, f"{client_message_id}.json")
+        receipt = json.loads(raw_receipt) if raw_receipt is not None else None
+    except (ValueError, _SpilledTextTooLarge):
+        return text
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("text_digest") != hashlib.sha256(text.encode("utf-8")).hexdigest()
+    ):
+        return text
+    raw_ranges = receipt.get("ranges")
+    if not isinstance(raw_ranges, list):
+        return text
+    ranges = {
+        tuple(entry)
+        for entry in raw_ranges
+        if isinstance(entry, list)
+        and len(entry) == 2
+        and all(type(offset) is int for offset in entry)
+    }
     reference = re.compile(
         rf"(?m)^[ \t]*\[Attached file: {re.escape(str(cache))}/"
         r"(?P<name>pasted_text_(?P<digest>[0-9a-f]{12})(?:_(?P=digest))?\.txt)\][ \t]*(?=\r?$)"
@@ -368,6 +405,8 @@ def restore_spilled_text(text: str, bridge_dir: Path) -> str | None:
     size = end = 0
     restored_any = False
     for match in reference.finditer(text):
+        if match.span() not in ranges:
+            continue
         name = match.group("name")
         if name not in pastes:
             try:

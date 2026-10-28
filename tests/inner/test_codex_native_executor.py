@@ -70,6 +70,7 @@ class _FakeCodexNativeClient:
     requests: list[tuple[str, dict[str, Any]]] = []
     created: list[tuple[Path | None, str | None, str]] = []
     next_turn = 1
+    supports_user_message_ids = True
 
     def __init__(
         self,
@@ -1801,7 +1802,8 @@ def test_spilled_text_is_reused_when_the_same_message_is_sent_again(tmp_path: Pa
     second = _content_to_input_items(content, tmp_path)
 
     assert first == second
-    assert len(list(pasted_text_cache_dir(tmp_path).iterdir())) == 1
+    assert len(list(pasted_text_cache_dir(tmp_path).glob("*.txt"))) == 1
+    assert first.client_message_id != second.client_message_id
 
 
 @pytest.mark.parametrize("kind", ["text", "file"])
@@ -1942,10 +1944,12 @@ async def test_slow_paste_restoration_keeps_the_event_loop_responsive(
     loop = asyncio.get_running_loop()
     original_restore = codex_native_executor.restore_spilled_text
 
-    def slow_restore(text: str, bridge_dir: Path) -> str | None:
+    def slow_restore(
+        text: str, bridge_dir: Path, client_message_id: str | None = None
+    ) -> str | None:
         loop.call_soon_threadsafe(restore_started.set)
         assert release_restore.wait(2), "paste restoration blocked the event loop"
-        return original_restore(text, bridge_dir)
+        return original_restore(text, bridge_dir, client_message_id)
 
     monkeypatch.setattr(codex_native_executor, "restore_spilled_text", slow_restore)
     delivery = asyncio.create_task(
@@ -1968,6 +1972,44 @@ async def test_slow_paste_restoration_keeps_the_event_loop_responsive(
     assert [method for method, _ in _FakeCodexNativeClient.requests] == [
         "turn/start" if active_turn_id is None else "turn/steer"
     ]
+
+
+@pytest.mark.parametrize("failure", ["unsupported_codex", "receipt_write"])
+@pytest.mark.parametrize("active_turn_id", [None, "turn_live"])
+async def test_spilled_paste_is_not_sent_without_delivery_provenance(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str, active_turn_id: str | None
+) -> None:
+    _FakeCodexNativeClient.requests = []
+    _seed_bridge(tmp_path, active_turn_id=active_turn_id)
+    state = read_bridge_state(tmp_path)
+    assert state is not None
+    if failure == "unsupported_codex":
+        monkeypatch.setattr(_FakeCodexNativeClient, "supports_user_message_ids", False)
+    else:
+        monkeypatch.setattr(codex_native_executor, "record_spilled_text", lambda *_args: None)
+    items = codex_native_executor._content_to_input_items("large paste\n" * 100_000, tmp_path)
+
+    with pytest.raises(codex_native_executor._CodexNativeInputUndelivered):
+        await codex_native_executor._inject_codex_turn_once(
+            _FakeCodexNativeClient(),
+            bridge_dir=tmp_path,
+            state=state,
+            input_items=items,
+            settings_overrides={},
+        )
+    assert _FakeCodexNativeClient.requests == []
+
+
+def test_literal_paste_references_do_not_expand_during_mirror_preflight(tmp_path: Path) -> None:
+    from omnigent.inner.native_attachments import materialize_text
+    from omnigent.session_event_batch import MAX_SESSION_EVENT_REQUEST_BYTES
+
+    path = materialize_text("x" * (MAX_SESSION_EVENT_REQUEST_BYTES // 4), tmp_path)
+    literal = "\n".join([f"[Attached file: {path}]"] * 12)
+    items = codex_native_executor._content_to_input_items(literal, tmp_path)
+
+    assert codex_native_executor._spilled_mirror_fits(items, tmp_path)
+    assert items == [{"type": "text", "text": literal}]
 
 
 @pytest.mark.parametrize("paste_kind", ["envelope", "oversized_file", "utf8", "json_escaping"])

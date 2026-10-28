@@ -1126,6 +1126,7 @@ class CodexAppServerClient:
         self._events: asyncio.Queue[CodexMessage | None] = asyncio.Queue()
         self._next_id = 1
         self._subscribed_thread_ids: set[str] = set()
+        self.supports_user_message_ids = False
 
     async def connect(self) -> None:
         """
@@ -1133,6 +1134,7 @@ class CodexAppServerClient:
 
         :returns: None.
         """
+        self.supports_user_message_ids = False
         if self._ws_url is not None:
             self._ws = await websockets.connect(
                 self._ws_url,
@@ -1154,7 +1156,7 @@ class CodexAppServerClient:
             self._reader_loop(),
             name="codex-native-app-server-reader",
         )
-        await self.request(
+        response = await self.request(
             "initialize",
             {
                 "clientInfo": {
@@ -1165,6 +1167,15 @@ class CodexAppServerClient:
                     "experimentalApi": True,
                 },
             },
+        )
+        result = response.get("result")
+        user_agent = result.get("userAgent") if isinstance(result, dict) else None
+        version = re.match(
+            rf"{re.escape(self._client_name)}/(\d+)\.(\d+)\.(\d+)(?:\D|$)",
+            user_agent if isinstance(user_agent, str) else "",
+        )
+        self.supports_user_message_ids = bool(
+            version and tuple(int(part) for part in version.groups()) >= (0, 154, 0)
         )
         await self.notify("initialized")
 

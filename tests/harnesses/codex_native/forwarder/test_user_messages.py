@@ -10,7 +10,7 @@ import pytest
 
 from omnigent.harnesses.codex_native import forwarder as fwd
 from omnigent.inner import native_attachments
-from omnigent.inner.native_attachments import materialize_text
+from omnigent.inner.native_attachments import materialize_text, record_spilled_text
 from omnigent.session_event_batch import MAX_SESSION_EVENT_REQUEST_BYTES
 from tests.harnesses.codex_native.forwarder._support import (
     _RecordingClient,
@@ -99,6 +99,33 @@ async def test_post_user_message_truly_empty_is_skipped() -> None:
     assert client.posts == []
 
 
+@pytest.mark.parametrize("copies", [1, 12])
+async def test_post_user_message_keeps_literal_cached_paste_references(
+    tmp_path: Path, copies: int
+) -> None:
+    """Typing an old cache reference never changes the authored message."""
+    paste = "old paste\n" * 100
+    reference = f"[Attached file: {materialize_text(paste, tmp_path)}]"
+    literal = "\n".join([reference] * copies)
+    item = {
+        "id": "later_item",
+        "type": "userMessage",
+        "content": [{"type": "text", "text": literal}],
+    }
+    client = _RecordingClient()
+
+    await fwd._post_user_message(
+        client,
+        "conv_x",
+        {"threadId": "thread_x", "turnId": "later_turn"},
+        item,
+        bridge_dir=tmp_path,
+    )
+
+    [(_url, body)] = client.posts
+    assert body["data"]["item_data"]["content"] == [{"type": "input_text", "text": literal}]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bridge_known", [True, False], ids=["bridge", "no-bridge"])
 async def test_post_user_message_mirrors_a_spilled_paste_as_sent(
@@ -111,6 +138,10 @@ async def test_post_user_message_mirrors_a_spilled_paste_as_sent(
         "type": "userMessage",
         "content": [{"type": "text", "text": "what failed?"}, {"type": "text", "text": reference}],
     }
+    wire_text = f"what failed?\n\n{reference}"
+    item["clientId"] = record_spilled_text(
+        wire_text, [[len("what failed?\n\n"), len(wire_text)]], tmp_path
+    )
     client = _RecordingClient()
     loop = asyncio.get_running_loop()
     read_started = asyncio.Event()
@@ -119,6 +150,8 @@ async def test_post_user_message_mirrors_a_spilled_paste_as_sent(
     read_cache = native_attachments._read_cached_file
 
     def slow_read(cache: Path, name: str) -> bytes | None:
+        if name.endswith(".json"):
+            return read_cache(cache, name)
         loop.call_soon_threadsafe(read_started.set)
         loop_progressed.append(read_release.wait(timeout=1.0))
         return read_cache(cache, name)
@@ -152,6 +185,7 @@ async def test_post_user_message_restores_a_paste_whose_whole_event_fits(tmp_pat
     paste = "x" * 10_450_000
     reference = f"[Attached file: {materialize_text(paste, tmp_path)}]"
     item = {"type": "userMessage", "content": [{"type": "text", "text": reference}]}
+    item["clientId"] = record_spilled_text(reference, [[0, len(reference)]], tmp_path)
     client = _RecordingClient()
 
     await fwd._post_user_message(client, "conv_x", {"turnId": "t1"}, item, bridge_dir=tmp_path)
@@ -167,6 +201,7 @@ async def test_post_user_message_keeps_the_reference_only_past_the_event_limit(
     paste = "x" * MAX_SESSION_EVENT_REQUEST_BYTES
     reference = f"[Attached file: {materialize_text(paste, tmp_path)}]"
     item = {"type": "userMessage", "content": [{"type": "text", "text": reference}]}
+    item["clientId"] = record_spilled_text(reference, [[0, len(reference)]], tmp_path)
     client = _RecordingClient()
 
     await fwd._post_user_message(client, "conv_x", {"turnId": "t1"}, item, bridge_dir=tmp_path)

@@ -6552,7 +6552,13 @@ async def _post_user_message(
     """
     text = _user_message_text(item)
     if bridge_dir is not None:
-        text = await asyncio.to_thread(_with_spilled_pastes_restored, text, bridge_dir)
+        client_message_id = item.get("clientId")
+        text = await asyncio.to_thread(
+            _with_spilled_pastes_restored,
+            text,
+            bridge_dir,
+            client_message_id if isinstance(client_message_id, str) else None,
+        )
     # An image/file-only message has no text but must still be posted: the
     # server drains its optimistic pending-input entry (FIFO) and folds the
     # image in by file_id (``_merge_pending_file_blocks``). Bailing here would
@@ -8785,7 +8791,9 @@ def _delta_recovery_status_edge(
     )
 
 
-def _with_spilled_pastes_restored(text: str, bridge_dir: Path) -> str:
+def _with_spilled_pastes_restored(
+    text: str, bridge_dir: Path, client_message_id: str | None = None
+) -> str:
     """
     Mirror the paste the person sent in place of the file reference Codex saw.
 
@@ -8797,7 +8805,7 @@ def _with_spilled_pastes_restored(text: str, bridge_dir: Path) -> str:
     :param bridge_dir: The session's bridge directory.
     :returns: The text to mirror.
     """
-    restored = restore_spilled_text(text, bridge_dir)
+    restored = restore_spilled_text(text, bridge_dir, client_message_id)
     if restored is None:
         _logger.warning("Codex user message too large to mirror with its paste restored")
         return text

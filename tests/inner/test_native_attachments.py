@@ -28,6 +28,7 @@ from omnigent.inner.native_attachments import (
     materialize_text,
     parse_data_uri,
     pasted_text_cache_dir,
+    record_spilled_text,
     requires_filesystem,
     resize_notice,
     resolve_file_id_block,
@@ -473,7 +474,11 @@ def test_restore_spilled_text_puts_each_paste_back_in_place(tmp_path: Path) -> N
         ]
     )
 
-    assert restore_spilled_text(echoed, tmp_path) == "\n\n".join(["Compare these:", first, second])
+    ranges = [[m.start(), m.end()] for m in re.finditer(r"(?m)^\[Attached file: .+\]$", echoed)]
+    message_id = record_spilled_text(echoed, ranges, tmp_path)
+    assert restore_spilled_text(echoed, tmp_path, message_id) == "\n\n".join(
+        ["Compare these:", first, second]
+    )
 
 
 @pytest.mark.parametrize(
@@ -499,8 +504,11 @@ def test_restore_spilled_text_checks_cache_before_restoring(
         with path.open("r+b") as handle:
             handle.truncate(MAX_SESSION_EVENT_REQUEST_BYTES + 1)
 
+        read_fd = native_attachments._read_fd
+
         def _unexpected_read(fd: int, size: int) -> bytes:
-            raise AssertionError(f"read {size} bytes of an oversized cache file")
+            assert size <= MAX_SESSION_EVENT_REQUEST_BYTES
+            return read_fd(fd, size)
 
         monkeypatch.setattr(native_attachments, "_read_fd", _unexpected_read)
     elif case == "symlink":
@@ -511,7 +519,10 @@ def test_restore_spilled_text_checks_cache_before_restoring(
     reference = f"[Attached file: {path}]"
     echoed = f"see {reference} here" if case == "inline" else reference
 
-    assert restore_spilled_text(echoed, bridge) == (None if case == "oversized" else echoed)
+    message_id = record_spilled_text(echoed, [[0, len(echoed)]], bridge)
+    assert restore_spilled_text(echoed, bridge, message_id) == (
+        None if case == "oversized" else echoed
+    )
 
 
 def test_restore_spilled_text_reads_a_repeated_paste_once(
@@ -529,8 +540,10 @@ def test_restore_spilled_text_reads_a_repeated_paste_once(
     monkeypatch.setattr(native_attachments, "_read_cached_file", _counting_read)
     echoed = "\n".join([f"[Attached file: {path}]"] * 3)
 
-    assert restore_spilled_text(echoed, tmp_path) == "one paste\none paste\none paste"
-    assert len(reads) == 1
+    ranges = [[m.start(), m.end()] for m in re.finditer(r"(?m)^\[Attached file: .+\]$", echoed)]
+    message_id = record_spilled_text(echoed, ranges, tmp_path)
+    assert restore_spilled_text(echoed, tmp_path, message_id) == "one paste\none paste\none paste"
+    assert sum(name.endswith(".txt") for name in reads) == 1
 
 
 def test_restore_spilled_text_stops_once_repeats_outgrow_one_event(tmp_path: Path) -> None:
@@ -542,9 +555,11 @@ def test_restore_spilled_text_stops_once_repeats_outgrow_one_event(tmp_path: Pat
     # Restored in full this would be 12 events' worth of text.
     echoed = "\n".join([f"[Attached file: {path}]"] * 96)
 
+    ranges = [[m.start(), m.end()] for m in re.finditer(r"(?m)^\[Attached file: .+\]$", echoed)]
+    message_id = record_spilled_text(echoed, ranges, tmp_path)
     tracemalloc.start()
     try:
-        assert restore_spilled_text(echoed, tmp_path) is None
+        assert restore_spilled_text(echoed, tmp_path, message_id) is None
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
@@ -556,6 +571,48 @@ def test_restore_spilled_text_leaves_text_with_nothing_to_restore(tmp_path: Path
     text = "pasted_text_ mentioned in a message " + "y" * MAX_SESSION_EVENT_REQUEST_BYTES
 
     assert restore_spilled_text(text, tmp_path) is text
+
+
+@pytest.mark.parametrize("identity", ["generated", "other", "absent"])
+def test_restore_spilled_text_requires_the_recorded_delivery_and_occurrence(
+    tmp_path: Path, identity: str
+) -> None:
+    """Only the generated occurrence is expanded, including during a later replay."""
+    paste = "original paste"
+    reference = f"[Attached file: {materialize_text(paste, tmp_path)}]"
+    echoed = f"{reference}\n\n{reference}"
+    message_id = record_spilled_text(echoed, [[len(reference) + 2, len(echoed)]], tmp_path)
+    assert message_id is not None
+    observed_id = {"generated": message_id, "other": "omnigent-paste-" + "a" * 32, "absent": None}[
+        identity
+    ]
+    expected = f"{reference}\n\n{paste}" if identity == "generated" else echoed
+
+    assert restore_spilled_text(echoed, tmp_path, observed_id) == expected
+    assert restore_spilled_text(echoed, tmp_path, observed_id) == expected
+    assert restore_spilled_text(echoed + " edited", tmp_path, observed_id) == echoed + " edited"
+
+
+@pytest.mark.parametrize("fault", ["missing", "invalid", "symlink", "foreign"])
+def test_restore_spilled_text_keeps_references_without_a_safe_delivery_receipt(
+    tmp_path: Path, fault: str
+) -> None:
+    reference = f"[Attached file: {materialize_text('original paste', tmp_path)}]"
+    message_id = record_spilled_text(reference, [[0, len(reference)]], tmp_path)
+    assert message_id is not None
+    receipt = pasted_text_cache_dir(tmp_path) / f"{message_id}.json"
+    if fault == "missing":
+        receipt.unlink()
+    elif fault == "invalid":
+        receipt.write_text("invalid JSON")
+    elif fault == "symlink":
+        outside = tmp_path / "receipt.json"
+        receipt.rename(outside)
+        receipt.symlink_to(outside)
+    else:
+        message_id = "../" + message_id
+
+    assert restore_spilled_text(reference, tmp_path, message_id) == reference
 
 
 def test_materialize_cache_does_not_overwrite_when_both_names_taken(

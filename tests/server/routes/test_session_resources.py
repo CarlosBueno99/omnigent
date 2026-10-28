@@ -5927,7 +5927,11 @@ async def test_codex_spilled_paste_is_mirrored_as_sent_and_settles_its_own_input
     )
     items = codex_native_executor._content_to_input_items(original, bridge)
     assert "pasted_text_" in str(items[0]["text"])
-    echoed = {"type": "userMessage", "content": [dict(item) for item in items]}
+    echoed = {
+        "type": "userMessage",
+        "clientId": items.client_message_id,
+        "content": [dict(item) for item in items],
+    }
     client = _RecordingClient()
     source_id = "codex:spilled-paste:0" if earlier_pending != "source_less" else None
     await forwarder._post_user_message(
@@ -5956,6 +5960,40 @@ async def test_codex_spilled_paste_is_mirrored_as_sent_and_settles_its_own_input
             assert store.appended_items[0].data.content[0]["text"] == "summarize the readme"
             assert store.appended_items[0].created_by == "earlier@example.test"
             assert store.appended_items[1].type == "error"
+
+        if paste_size == "small":
+            remaining = pending_inputs.pending_ids(sid)
+            literal = str(items[0]["text"])
+            later = pending_inputs.record(
+                sid,
+                [{"type": "input_text", "text": literal}],
+                created_by="literal@example.test",
+            )
+            literal_client = _RecordingClient()
+            await forwarder._post_user_message(
+                literal_client,
+                sid,
+                {"turnId": "t2"},
+                {
+                    "id": "literal_item",
+                    "type": "userMessage",
+                    "content": [{"type": "text", "text": literal}],
+                },
+                bridge_dir=bridge,
+            )
+            [(_url, literal_posted)] = literal_client.posts
+            literal_posted["data"].pop("source_id", None)
+            literal_id = await _persist_external_conversation_item(
+                sid,
+                conv,
+                SessionEventInput.model_validate(literal_posted),
+                store,  # type: ignore[arg-type]
+            )
+            stored_literal = store.get_item(sid, literal_id)
+            assert stored_literal.created_by == "literal@example.test"
+            assert stored_literal.data.content == [{"type": "input_text", "text": literal}]
+            assert later not in pending_inputs.pending_ids(sid)
+            assert pending_inputs.pending_ids(sid) == remaining
 
         # The committed message, not the runner's cache, is the durable copy.
         shutil.rmtree(pasted_text_cache_dir(bridge))
@@ -6018,7 +6056,11 @@ async def test_codex_text_upload_beside_a_spilled_paste_settles_with_the_whole_m
         client,
         sid,
         {"turnId": "t1"},
-        {"type": "userMessage", "content": [dict(item) for item in items]},
+        {
+            "type": "userMessage",
+            "clientId": items.client_message_id,
+            "content": [dict(item) for item in items],
+        },
         bridge_dir=bridge,
     )
     [(_url, posted)] = client.posts

@@ -75,6 +75,7 @@ from omnigent.inner.native_attachments import (
     materialize_attachment,
     materialize_text,
     parse_data_uri,
+    record_spilled_text,
     restore_spilled_text,
     unresolved_attachment_marker,
     uses_filesystem_delivery,
@@ -135,12 +136,25 @@ _MIRROR_TOO_LARGE_FAILURE = CodexStartupFailure(
 )
 
 
+class _SpilledInputItems(list[dict[str, object]]):
+    """Wire input with the identity of its generated paste occurrences."""
+
+    def __init__(self, items: list[dict[str, object]], client_message_id: str | None) -> None:
+        super().__init__(items)
+        self.client_message_id = client_message_id
+
+
 def _spilled_mirror_fits(input_items: list[dict[str, object]], bridge_dir: Path) -> bool:
     """Whether the forwarder can mirror this input with its spilled pastes restored."""
     text = "\n\n".join(
         value for item in input_items if isinstance(value := item.get("text"), str) and value
     )
-    return restore_spilled_text(text, bridge_dir) is not None
+    message_id = (
+        input_items.client_message_id if isinstance(input_items, _SpilledInputItems) else None
+    )
+    if isinstance(input_items, _SpilledInputItems) and message_id is None:
+        return False
+    return restore_spilled_text(text, bridge_dir, message_id) is not None
 
 
 async def _wait_for_bridge_state(
@@ -258,6 +272,9 @@ async def _native_delivery_request(
     bridge_dir: Path,
 ) -> CodexMessage:
     """Reconnect once after an authoritative refusal; never retry socket loss."""
+    input_items = params.get("input")
+    if isinstance(input_items, _SpilledInputItems):
+        params = {**params, "clientUserMessageId": input_items.client_message_id}
     try:
         return await _native_delivery_request_once(client, method, params, state)
     except CodexAppServerResponseError as error:
@@ -305,6 +322,14 @@ async def _native_delivery_request_once(
     state: CodexNativeBridgeState,
 ) -> CodexMessage:
     """Pair each RPC attempt with its result, including a rejected stale steer."""
+    if params.get("clientUserMessageId") and not client.supports_user_message_ids:
+        raise _CodexNativeInputUndelivered(
+            CodexStartupFailure(
+                message="This Codex version cannot preserve a large paste in history; "
+                "this message was not sent.",
+                remediation="Upgrade Codex to 0.154.0 or later, or attach the text as a file.",
+            )
+        )
     attempt_id = uuid.uuid4().hex
     stage = "turn_start" if method == "turn/start" else "turn_steer"
     expected = params.get("expectedTurnId") if method == "turn/steer" else None
@@ -574,6 +599,13 @@ async def _inject_codex_turn_once(
     settings_overrides: Mapping[str, object],
 ) -> None:
     """Steer an active turn or start one, recovering one proven stale steer."""
+    if isinstance(input_items, _SpilledInputItems) and input_items.client_message_id is None:
+        raise _CodexNativeInputUndelivered(
+            CodexStartupFailure(
+                message="The large paste could not be recorded safely; this message was not sent.",
+                remediation="Check local disk space and try again, or attach the text as a file.",
+            )
+        )
     if not await asyncio.to_thread(_spilled_mirror_fits, input_items, bridge_dir):
         raise _CodexNativeInputUndelivered(_MIRROR_TOO_LARGE_FAILURE)
     if state.active_turn_id is None:
@@ -1227,11 +1259,28 @@ def _content_to_input_items(
     :returns: Codex input item dicts.
     """
     items, inline, attachments = _collect_input_items(content, bridge_dir)
-    if _spill_oversized_text(items, inline, bridge_dir, session_id):
+    spilled = _spill_oversized_text(items, inline, bridge_dir, session_id)
+    if spilled:
         # Pending-input matching removes generated attachment prefixes before comparing text.
-        items = [items[index] for index in sorted(attachments)] + [
-            item for index, item in enumerate(items) if index not in attachments
+        order = sorted(attachments) + [
+            index for index in range(len(items)) if index not in attachments
         ]
+        ranges: list[list[int]] = []
+        texts: list[str] = []
+        offset = 0
+        for index in order:
+            text = items[index].get("text")
+            if not isinstance(text, str) or not text:
+                continue
+            start = offset + (2 if texts else 0)
+            offset = start + len(text)
+            texts.append(text)
+            if index in spilled and inline[index].kind == "text":
+                ranges.append([start, offset])
+        items = [items[index] for index in order]
+        if ranges:
+            message_id = record_spilled_text("\n\n".join(texts), ranges, bridge_dir)
+            items = _SpilledInputItems(items, message_id)
     return items
 
 
@@ -1309,7 +1358,7 @@ def _spill_oversized_text(
     inline: Mapping[int, _InlineText],
     bridge_dir: Path,
     session_id: str | None,
-) -> bool:
+) -> set[int]:
     """
     Move uploads, then the largest authored text, to files until the turn fits.
 
@@ -1323,11 +1372,11 @@ def _spill_oversized_text(
     :param inline: The inline text items by index in *items*.
     :param bridge_dir: Session bridge path identifying the attachment cache.
     :param session_id: Omnigent session id that the log event is attributed to.
-    :returns: Whether any text was replaced with a file reference.
+    :returns: Indices whose text was replaced with a file reference.
     """
     total = sum(len(text) for item in items if isinstance(text := item.get("text"), str))
     if total <= _MAX_INLINE_TEXT_CHARS:
-        return False
+        return set()
     # Even a one-character file name makes a reference this long.
     cache_reference = _attached_file_item(attachment_cache_dir(bridge_dir) / "x")
     shortest_reference = len(str(cache_reference["text"]))
@@ -1345,7 +1394,7 @@ def _spill_oversized_text(
         )
         if path is None:
             if entry.kind == "file":
-                return False
+                return set()
             continue
         reference = _attached_file_item(path)
         saved = len(entry.text) - len(str(reference["text"]))
@@ -1368,7 +1417,7 @@ def _spill_oversized_text(
                 chars=len(entry.text),
             ),
         )
-    return bool(replacements)
+    return set(replacements)
 
 
 def _requires_filesystem(block: Mapping[str, object]) -> bool:
