@@ -4887,7 +4887,8 @@ def _publish_child_status_to_parent(session_id: str, status: str) -> None:
             type="session.child_session.updated",
             conversation_id=parent_id,
             child_session_id=conv.id,
-            child=summary.model_dump(mode="json"),
+            # No agent store here; omitting agent_name keeps the merged value from the snapshot.
+            child=summary.model_dump(mode="json", exclude={"agent_name"}),
         )
         session_stream.publish(parent_id, event.model_dump())
 

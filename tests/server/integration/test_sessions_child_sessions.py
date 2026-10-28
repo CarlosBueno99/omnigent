@@ -797,6 +797,7 @@ async def test_child_status_edge_fans_out_to_parent_stream(
         assert updates[1]["child"]["busy"] is False
         assert updates[1]["child"]["current_task_status"] == "completed"
         assert updates[1]["child"]["title"] == "researcher:auth"
+        assert all("agent_name" not in update["child"] for update in updates)
         await asyncio.sleep(0.2)
         assert collector.queue.empty(), "a repeated identical edge must not fan out"
     finally:
