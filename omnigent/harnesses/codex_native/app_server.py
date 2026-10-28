@@ -138,6 +138,7 @@ _CONNECT_TIMEOUT_SECONDS = 10.0
 # 10 s to start codex. Match the 60 s native-terminal readiness budget; a child
 # that exits early still fails at once.
 _APP_SERVER_READY_TIMEOUT_SECONDS = 60.0
+_APP_SERVER_PROBE_CLIENT_NAME = "omnigent-probe"
 # Initialization and model/list can stall after the listener becomes ready.
 _MODEL_CATALOG_PROBE_TIMEOUT_SECONDS = 30.0
 _MODEL_DISCOVERY_CACHE_SECONDS = 300.0
@@ -1170,8 +1171,10 @@ class CodexAppServerClient:
         )
         result = response.get("result")
         user_agent = result.get("userAgent") if isinstance(result, dict) else None
+        # The server retains the first initialize client's name across connections.
         version = re.match(
-            rf"{re.escape(self._client_name)}/(\d+)\.(\d+)\.(\d+)(?:\D|$)",
+            rf"(?:{re.escape(self._client_name)}|{re.escape(_APP_SERVER_PROBE_CLIENT_NAME)})/"
+            r"(\d+)\.(\d+)\.(\d+)(?:\D|$)",
             user_agent if isinstance(user_agent, str) else "",
         )
         self.supports_user_message_ids = bool(
@@ -2714,12 +2717,12 @@ class CodexNativeAppServer:
                 if self.listen_url and self.listen_url.startswith("ws://"):
                     client = CodexAppServerClient(
                         ws_url=self.listen_url,
-                        client_name="omnigent-probe",
+                        client_name=_APP_SERVER_PROBE_CLIENT_NAME,
                     )
                 else:
                     client = CodexAppServerClient(
                         self.socket_path,
-                        client_name="omnigent-probe",
+                        client_name=_APP_SERVER_PROBE_CLIENT_NAME,
                     )
                 async with asyncio.timeout_at(deadline):
                     await client.connect()

@@ -19,7 +19,12 @@ from omnigent.harnesses.codex_native.app_server import CodexAppServerClient
     [
         ("omnigent/0.154.0 (Linux)", True),
         ("omnigent/0.163.0 (Linux)", True),
+        ("omnigent-probe/0.154.0 (Linux) xterm-256color (omnigent; 0.1)", True),
+        ("omnigent-probe/0.163.0 (Linux) xterm-256color (omnigent; 0.1)", True),
+        ("omnigent-probe/0.142.0 (Linux) xterm-256color (omnigent; 0.1)", False),
         ("omnigent/0.129.0 (Linux)", False),
+        ("omnigent/0.142.0 (Linux)", False),
+        ("omnigent/0.153.9 (Linux)", False),
         ("other-client/0.163.0 (Linux)", False),
         ("unknown", False),
         (None, False),
