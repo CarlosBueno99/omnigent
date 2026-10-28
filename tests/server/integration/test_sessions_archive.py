@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
+from omnigent.entities.conversation import MessageData, NewConversationItem
 from omnigent.server.routes import sessions as _sessions_facade
 from omnigent.server.routes._sessions import common as _sessions_common
 from omnigent.server.routes._sessions import orchestration as _sessions_orchestration
@@ -432,7 +433,7 @@ async def test_archive_idle_closed_child_releases_runner_session(
     expect_stop: bool,
     expect_release: bool,
 ) -> None:
-    """Closing an idle child deletes its runner session unless its own runner was stopped."""
+    """Closing an idle child releases its routed runner session, unless its runner was stopped."""
     session = await create_test_session(client, name="archive-closed-child")
     conv_store = SqlAlchemyConversationStore(db_uri)
     conv_store.set_host_id(session["id"], _HOST_ID, workspace="/tmp/archive-ws")
@@ -446,6 +447,16 @@ async def test_archive_idle_closed_child_releases_runner_session(
         workspace="/tmp/archive-ws" if child_runner_id else None,
         runner_id=child_runner_id,
     )
+    conv_store.append(
+        child.id,
+        [
+            NewConversationItem(
+                type="message",
+                response_id="seed",
+                data=MessageData(role="user", content=[{"type": "input_text", "text": "keep me"}]),
+            )
+        ],
+    )
     runner_requests: list[tuple[str, str]] = []
 
     def _runner(request: httpx.Request) -> httpx.Response:
@@ -455,6 +466,7 @@ async def test_archive_idle_closed_child_releases_runner_session(
     runner_client = httpx.AsyncClient(
         transport=httpx.MockTransport(_runner), base_url="http://runner"
     )
+    get_runner_client = AsyncMock(return_value=runner_client)
     host_stop = AsyncMock(return_value=stop_acknowledged)
     patch_body: dict[str, object] = {"archived": True}
     if closed:
@@ -462,9 +474,7 @@ async def test_archive_idle_closed_child_releases_runner_session(
         patch_body["labels"] = {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE}
     try:
         with (
-            patch.object(
-                _sessions_facade, "_get_runner_client", AsyncMock(return_value=runner_client)
-            ),
+            patch.object(_sessions_facade, "_get_runner_client", get_runner_client),
             patch.object(_sessions_facade, "_stop_session_host_runner", host_stop),
         ):
             resp = await client.patch(f"/v1/sessions/{child.id}", json=patch_body)
@@ -477,6 +487,15 @@ async def test_archive_idle_closed_child_releases_runner_session(
     assert host_stop.await_count == (1 if expect_stop else 0)
     release = ("DELETE", f"/v1/sessions/{child.id}")
     assert (release in runner_requests) is expect_release
+    if expect_release:
+        routed = [
+            call.kwargs["conversation"]
+            for call in get_runner_client.await_args_list
+            if call.args[0] == child.id and call.kwargs.get("conversation") is not None
+        ]
+        assert [conv.runner_id for conv in routed] == [child_runner_id]
+    items = conv_store.list_items(child.id).data
+    assert [item.data.content[0]["text"] for item in items] == ["keep me"]
 
 
 async def test_unarchive_skips_stop(
