@@ -4451,12 +4451,13 @@ def _paste_and_verify(
     # ``paste-buffer -p`` wraps it in the same bracketed-paste markers so
     # interior newlines (mapped to CR below) stay data instead of becoming
     # per-line submits. See anthropics/claude-code#52126.
-    with tempfile.NamedTemporaryFile(
-        dir=bridge_dir, prefix="paste_", suffix=".bin", delete=False
-    ) as paste_file:
-        paste_file.write(_paste_payload_bytes(text + "\n"))
-        paste_path = paste_file.name
+    paste_path: str | None = None
     try:
+        with tempfile.NamedTemporaryFile(
+            dir=bridge_dir, prefix="paste_", suffix=".bin", delete=False
+        ) as paste_file:
+            paste_path = paste_file.name
+            paste_file.write(_paste_payload_bytes(text + "\n"))
         _run_tmux(socket_path, "load-buffer", "-b", "omnigent-paste", paste_path)
         _run_tmux(
             socket_path,
@@ -4470,8 +4471,9 @@ def _paste_and_verify(
         )
         delivery_diagnostics.record_details(paste_sent=True)
     finally:
-        with contextlib.suppress(OSError):
-            os.unlink(paste_path)
+        if paste_path is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(paste_path)
     # Wait until the TUI has visibly committed the paste into its input
     # box before submitting. Claude Code coalesces rapid stdin bursts
     # into a paste; an Enter that arrives while it is still consuming
@@ -6454,7 +6456,7 @@ def _is_dialog_option_row(row: str, lines: list[str]) -> bool:
     it, e.g. ``"❯ 2. No (recommended)"`` over "Enter to confirm · Esc to cancel".
 
     :param row: The candidate composer row.
-    :param lines: Non-empty pane rows, in order.
+    :param lines: Captured pane rows, in order.
     :returns: ``True`` when the footer below the frame belongs to a dialog.
     """
     if not _NUMBERED_SELECTOR_ROW_RE.match(row.strip()):
@@ -6482,7 +6484,7 @@ def _composer_start_above_closing_rule(
     glyph meets neither condition, and a dialog's selector and footer below
     the rule (a rewind dialog under a wrapped divider) rule the box out.
 
-    :param lines: Non-empty pane rows, in order.
+    :param lines: Captured pane rows, in order.
     :param closing_rule: ``(first, last)`` row span of the closing rule.
     :returns: The composer index, or ``None`` when the rows above the closing
         rule are not framed that way.
@@ -6919,7 +6921,7 @@ def _rule_bands(
     bare run of edge glyphs continues the rule above it; on its own, or above
     a rule, it is content.
 
-    :param lines: Non-empty pane rows, in order.
+    :param lines: Captured pane rows, in order.
     :returns: Rule spans, top to bottom.
     """
     indices = (
@@ -6951,7 +6953,7 @@ def _is_wrapped_rule(lines: list[str], band: tuple[int, int]) -> bool:
     wider than it. Two separate rules on neighbouring rows, such as a short
     divider over a dialog's frame, do not have that shape.
 
-    :param lines: Non-empty pane rows, in order.
+    :param lines: Captured pane rows, in order.
     :param band: ``(first, last)`` row span from :func:`_rule_bands`.
     :returns: ``True`` when the band spans several rows of a single rule.
     """
@@ -6971,7 +6973,7 @@ def _rows_below_last_rule(lines: list[str], tail_lines: int) -> list[str]:
     rule ends with the last row of its band (:func:`_rule_bands`), so a stub
     shorter than a rule never leads the region.
 
-    :param lines: Non-empty pane rows, in order.
+    :param lines: Captured pane rows, in order.
     :param tail_lines: Rows to take from the bottom when no rule is drawn.
     :returns: The footer region, top to bottom.
     """
