@@ -184,7 +184,12 @@ def test_prompt_appearing_after_slash_paste_receives_no_submit_enter(
     with pytest.raises(bridge.ClaudeUserPromptPending):
         bridge.inject_slash_command(native_bridge, command="/model different")
     assert pasted
-    assert [args[-1] for args in sent] == ["Space", _CLEAR_ONE_ROW_COMPOSER, "/model different"]
+    assert [args[-1] for args in sent] == [
+        "Space",
+        _CLEAR_ONE_ROW_COMPOSER,
+        "BSpace",
+        "/model different",
+    ]
 
 
 @pytest.mark.parametrize(
