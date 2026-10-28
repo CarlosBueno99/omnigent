@@ -8785,7 +8785,7 @@ def test_runner_connection_binding_clock_and_orphan_controls(
     store.claim_runner_connection("runner-second", "b" * 32)
     assert not store.settle_orphaned_live_status(conv.id, 10**12)
     # Legacy metadata writes cannot invent fenced connectivity.
-    store.touch_runner_liveness(["runner-second"], now=10**12)
+    store.touch_runner_liveness(["runner-second"], now=2_000_000_000)
     assert not store.get_session_connectivity([conv.id])[conv.id].runner_online
 
 
