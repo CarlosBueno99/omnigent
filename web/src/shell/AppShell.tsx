@@ -1937,7 +1937,9 @@ function AppShellImpl() {
         !workspacePanelMounted ||
         childSessionId === conversationId ||
         childSessionId === rootSessionId ||
-        isCachedAncestor(queryClient, parentSessionId, childSessionId)
+        isCachedAncestor(queryClient, parentSessionId, childSessionId) ||
+        // The parent chain may still be loading; the Agents tree's cache shows ancestry too.
+        cachedTreeContains(queryClient, childSessionId, conversationId, MAX_TREE_DEPTH)
       ) {
         return false;
       }
