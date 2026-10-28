@@ -12,6 +12,7 @@ import pytest
 
 from tests._helpers.host import isolated_host
 from tests._helpers.live_server import isolated_process_env
+from tests._helpers.polling import poll_until
 from tests._helpers.terminal_screen import TerminalScreen
 
 pexpect = pytest.importorskip("pexpect")
@@ -24,7 +25,12 @@ def _custom_path_only_env(tmp_path: Path) -> dict[str, str | None]:
     """Seed a logged-in Kimi shim outside every directory on PATH."""
     shim = tmp_path / "custom-tools" / "kimi"
     shim.parent.mkdir(parents=True)
-    shim.write_text("#!/bin/sh\necho 'kimi-code 0.39.1'\n")
+    shim.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then echo "kimi-code 0.39.1"; exit 0; fi\n'
+        'printf "%s\\n" "$0" > custom-kimi-launched.txt\n'
+        "exec /bin/sleep 120\n"
+    )
     shim.chmod(0o755)
 
     kimi_home = tmp_path / "kimi-config"
@@ -73,6 +79,28 @@ def test_host_readiness_honors_custom_kimi_path(
         assert {key: configured.get(key) for key in _KIMI_READINESS_KEYS} == dict.fromkeys(
             _KIMI_READINESS_KEYS, True
         ), configured
+        from omnigent.native.native_coding_agents import KIMI_NATIVE_AGENT_NAME
+
+        agents = http_client.get("/v1/agents")
+        agents.raise_for_status()
+        agent_id = next(
+            a["id"] for a in agents.json()["data"] if a["name"] == KIMI_NATIVE_AGENT_NAME
+        )
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        create = http_client.post(
+            "/v1/sessions",
+            json={"agent_id": agent_id, "host_id": host.host_id, "workspace": str(workspace)},
+            timeout=60,
+        )
+        create.raise_for_status()
+        session_id = create.json()["id"]
+        try:
+            marker = workspace / "custom-kimi-launched.txt"
+            poll_until(marker.exists, timeout_s=45, interval_s=0.1)
+            assert marker.read_text().strip() == env["OMNIGENT_KIMI_PATH"]
+        finally:
+            http_client.delete(f"/v1/sessions/{session_id}", timeout=30).raise_for_status()
 
 
 @pytest.mark.timeout(180)
