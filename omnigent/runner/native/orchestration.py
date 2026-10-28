@@ -858,7 +858,7 @@ def _recover_pending_turn_replay(
             bridge_dir=bridge_dir,
             server_client=server_client,
         )
-    except Exception:  # noqa: BLE001 -- a recovery must not take the launch down
+    except Exception:
         _logger.warning(
             "turn-routing replay recovery could not start for session=%s",
             session_id,
@@ -2296,7 +2296,7 @@ async def _rehydrate_opencode_session_from_transcript(
         await opencode_client.seed_context(
             opencode_session_id, text, provider_id=provider_id, model_id=model_id
         )
-    except Exception:  # noqa: BLE001 -- rehydration is best effort.
+    except Exception:
         _logger.warning(
             "opencode resume: rehydration seed failed for %s", omnigent_session_id, exc_info=True
         )
@@ -2495,7 +2495,7 @@ async def _resolve_pi_resume_session(
                 workspace=workspace,
                 model=model,
             )
-        except Exception:  # noqa: BLE001 -- best-effort; launch fresh on failure
+        except Exception:
             built = None
             _logger.warning(
                 "Could not synthesize Pi resume session for %s; launching fresh",
@@ -2537,7 +2537,7 @@ async def _resolve_pi_resume_session(
                 workspace=workspace,
                 model=model,
             )
-        except Exception:  # noqa: BLE001 -- best-effort; launch fresh on failure
+        except Exception:
             built = None
             _logger.warning(
                 "Could not build Pi session from items for forked clone %s; launching fresh",
@@ -2664,7 +2664,7 @@ async def _auto_create_pi_terminal(
 
         spec_for_tools = _unwrap_resolved_spec(agent_spec)
         pi_tools = build_native_relay_tool_schemas(spec_for_tools)
-    except Exception:  # noqa: BLE001 -- tool registration is additive
+    except Exception:
         _logger.warning(
             "Failed to build pi-native tool schemas for session %s; "
             "Pi will run with its built-in tools only",
@@ -3185,7 +3185,7 @@ async def _auto_create_cursor_terminal(
                 server_client, session_id
             )
             write_fork_preamble(bridge_dir, _cursor_fork_history_preamble(fork_items))
-        except Exception:  # noqa: BLE001 -- context carry-over is best-effort
+        except Exception:
             _logger.warning(
                 "cursor-native: could not build fork history preamble (session=%s).",
                 session_id,
@@ -3679,7 +3679,7 @@ async def _auto_create_hermes_terminal(
                         session_id,
                         extra={"session_id": session_id},
                     )
-                except Exception:  # noqa: BLE001 -- A failed fork clone falls back to a fresh native session.
+                except Exception:
                     _logger.warning(
                         "Failed to clone hermes session for fork; launching fresh; session=%s",
                         session_id,
@@ -4049,7 +4049,7 @@ async def _auto_create_devin_terminal(
             )
             if launch_config.fork_carry_history or _devin_has_replayable_history(carried_items):
                 write_fork_preamble(bridge_dir, _cursor_fork_history_preamble(carried_items))
-        except Exception:  # noqa: BLE001 -- context carry-over is best-effort
+        except Exception:
             _logger.warning(
                 "devin-native: could not carry prior history for %s",
                 session_id,
@@ -4271,7 +4271,7 @@ async def _build_qwen_fork_recording(
         recording = await asyncio.to_thread(
             write_qwen_session_recording, qwen_session_id, workspace, records
         )
-    except Exception:  # noqa: BLE001 -- best-effort; launch fresh on failure
+    except Exception:
         _logger.warning(
             "Could not build qwen recording from items for forked clone %s; launching fresh",
             session_id,
@@ -5163,7 +5163,7 @@ async def _auto_create_codex_terminal(
             codex_path=_codex_cli_path,
             launch=_catalog_launch,
         )
-    except Exception:  # noqa: BLE001 -- startup falls back to codex's migration probe
+    except Exception:
         _logger.debug(
             "fresh codex launch catalog unavailable for session=%s",
             session_id,
@@ -5207,7 +5207,7 @@ async def _auto_create_codex_terminal(
             _codex_catalog = await codex_launch_catalog(
                 codex_path=_codex_cli_path, launch=_catalog_launch
             )
-        except Exception:  # noqa: BLE001 -- discovery must not prevent a launch
+        except Exception:
             _logger.warning(
                 "codex launch catalog unavailable for session=%s",
                 session_id,
@@ -5364,7 +5364,7 @@ async def _auto_create_codex_terminal(
                 session_id,
                 error,
             )
-        except Exception:  # noqa: BLE001 -- best-effort; fall back to stored items
+        except Exception:
             cloned_rollout = None
             _logger.warning(
                 "Could not clone source rollout for forked codex clone %s; "
@@ -5770,7 +5770,7 @@ async def _auto_create_codex_terminal(
                         model=_codex_launch.model,
                         bridge_dir=bridge_dir,
                     )
-                except Exception:  # noqa: BLE001 -- a failed update must not sink the launch
+                except Exception:
                     _logger.warning(
                         "codex-native: could not apply reasoning effort %r to resumed thread "
                         "%s for session %s; the next web turn re-applies it",
@@ -5945,7 +5945,7 @@ async def _codex_pane_screen(instance: TerminalInstance) -> str:
         # A sign-in address is far wider than the 80-column pane the runner
         # creates, so read wrapped rows joined back into their original lines.
         result = await instance.read(join_wrapped=True)
-    except Exception:  # noqa: BLE001 -- an unreadable pane simply shows nothing yet
+    except Exception:
         _logger.debug(
             "Codex startup pane read failed for %s", instance.diagnostic_id, exc_info=True
         )
@@ -8883,7 +8883,7 @@ async def _auto_create_claude_terminal(
             if _transcript is not None:
                 resume_external_session_id = session_external_id
                 resume_prefix_bytes = _measured_prefix_bytes(_transcript)
-        except Exception:  # noqa: BLE001 -- best-effort; launch fresh on failure
+        except Exception:
             _logger.warning(
                 "Could not synthesize Claude resume transcript for %s; launching without --resume",
                 session_id,
@@ -8910,7 +8910,7 @@ async def _auto_create_claude_terminal(
                 target_external_session_id=our_uuid,
                 clone_workspace=_clone_workspace,
             )
-        except Exception:  # noqa: BLE001 -- best-effort; fall back to stored items
+        except Exception:
             _cloned = None
             _logger.warning(
                 "Could not clone source transcript for forked clone %s; "
@@ -8972,7 +8972,7 @@ async def _auto_create_claude_terminal(
                 workspace=_clone_workspace,
                 bridge_dir=bridge_dir,
             )
-        except Exception:  # noqa: BLE001 -- best-effort; launch fresh on failure
+        except Exception:
             _built = None
             _logger.warning(
                 "Could not build native transcript from items for forked clone %s; "
@@ -9120,7 +9120,7 @@ async def _auto_create_claude_terminal(
             # make a same-launch check call yesterday's rows fresh.
             launch_catalog_was_stale = claude_launch_catalog_is_stale(claude_config)
             launch_catalog = await claude_launch_catalog(claude_config)
-        except Exception:  # noqa: BLE001 -- no catalog means no validation/default
+        except Exception:
             _logger.warning(
                 "claude launch catalog unavailable for session=%s",
                 session_id,
@@ -9438,7 +9438,7 @@ async def _auto_create_claude_terminal(
             except asyncio.CancelledError as exc:
                 # Release the other router before honoring the cancellation.
                 cancelled = exc
-            except Exception:  # noqa: BLE001 -- keep the seeding failure as the error.
+            except Exception:
                 _logger.warning(
                     "Router cleanup failed after Claude trust seeding failed: session=%s",
                     session_id,
