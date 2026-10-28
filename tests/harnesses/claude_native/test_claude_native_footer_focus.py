@@ -80,6 +80,8 @@ class _FakeClaudeFooter:
                     self.draft = ""
                 elif token != "\x1b[107;5u":
                     self.draft += token
+        elif key == "BSpace":
+            self.draft = self.draft[:-1]
         elif key == "Enter":
             if self.draft.strip():
                 self.submitted.append(self.draft.strip())
