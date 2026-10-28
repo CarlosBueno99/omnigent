@@ -6745,6 +6745,10 @@ async def _wait_for_managed_runner_tunnel(
     runner_id: str,
     tunnel_registry: TunnelRegistry,
     tracker: ManagedLaunchTracker,
+    *,
+    host_conn: HostConnection | None = None,
+    host_registry: HostRegistry | None = None,
+    conversation_store: ConversationStore | None = None,
 ) -> bool:
     """
     Wait for a launched managed runner to connect, failing the launch on timeout.
@@ -6753,15 +6757,35 @@ async def _wait_for_managed_runner_tunnel(
     :param runner_id: Runner id returned by the host launch frame.
     :param tunnel_registry: Runner tunnel registry to wait on.
     :param tracker: Managed launch tracker to settle on failure.
+    :param host_conn: Exact launching host connection, when available.
+    :param host_registry: Registry used to verify the same host generation.
+    :param conversation_store: Store used to verify the original runner binding.
     :returns: ``True`` when the runner connected; ``False`` after publishing
         and retaining a failed launch status.
     """
     from omnigent.server.routes import sessions as _facade
 
-    runner = await tunnel_registry.wait_for_runner(
-        runner_id,
-        timeout_s=_facade._HOST_RELAUNCH_RUNNER_CONNECT_TIMEOUT_S,
-    )
+    from .orchestration import _wait_for_host_bound_runner
+
+    async def wait_for_connection(budget_s: float) -> RunnerSession | None:
+        return await _await_runner_connect(
+            tunnel_registry, runner_id, timeout_s=budget_s, runner_exit_reports=None
+        )
+
+    timeout_s = _facade._HOST_RELAUNCH_RUNNER_CONNECT_TIMEOUT_S
+    if host_conn is not None and host_registry is not None:
+        runner = await _wait_for_host_bound_runner(
+            session_id,
+            wait_for_connection,
+            runner_id=runner_id,
+            timeout_s=timeout_s,
+            runner_exit_reports=None,
+            host_conn=host_conn,
+            host_registry=host_registry,
+            conversation_store=conversation_store,
+        )
+    else:
+        runner = await wait_for_connection(timeout_s)
     if runner is not None:
         return True
     _logger.error(

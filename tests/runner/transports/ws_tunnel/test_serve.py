@@ -505,6 +505,117 @@ async def test_serve_tunnel_no_credential_error_after_streak(
     assert "login https://ws.cloud.databricks.com/omnigent?o=123` " in message
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "decline", [None, "declined_by_server_error", "declined_without_proxy_bearer"]
+)
+async def test_serve_tunnel_rides_out_a_transient_missing_credential(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    decline,
+) -> None:
+    """A credential that is missing for a few attempts connects once it is minted again.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    :returns: None.
+    """
+    from omnigent.runner.identity import (
+        RUNNER_CONNECT_MARKER_ENV_VAR,
+        runner_credential_is_pending,
+    )
+
+    connected = tmp_path / "owned.connected"
+    monkeypatch.setenv(RUNNER_CONNECT_MARKER_ENV_VAR, str(connected))
+    monkeypatch.delenv("OMNIGENT_WRAPPER_COMMAND", raising=False)
+    monkeypatch.setattr(serve_module, "_NO_CREDENTIAL_FATAL_WINDOW_S", 120.0)
+    mints = 0
+    upgrades: list[str | None] = []
+
+    class Mint:
+        declined = False
+        declined_by_server_error = False
+        declined_without_proxy_bearer = False
+
+        def __call__(self) -> str | None:
+            nonlocal mints
+            mints += 1
+            if mints > 1:
+                assert runner_credential_is_pending(connected, "runner_transient_credential")
+            self.declined = decline is not None and mints <= 4
+            self.declined_by_server_error = self.declined and decline == "declined_by_server_error"
+            self.declined_without_proxy_bearer = (
+                self.declined and decline == "declined_without_proxy_bearer"
+            )
+            return None if mints <= 4 else "tok-recovered"
+
+        def reset_decline(self) -> None:
+            self.declined = False
+            self.declined_by_server_error = False
+            self.declined_without_proxy_bearer = False
+
+    async def _serve_once(app: Any, *, auth_token: str | None = None, **_kwargs: Any) -> None:
+        del app
+        upgrades.append(auth_token)
+        if auth_token is None:
+            raise InvalidStatus(Response(401, "Unauthorized", [], b""))
+        assert not runner_credential_is_pending(connected, "runner_transient_credential")
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(serve_module, "_serve_tunnel_once", _serve_once)
+    _clock_advanced_by_sleep(monkeypatch)
+    monkeypatch.setattr("omnigent.runner.identity.time", serve_module.time)
+
+    with pytest.raises(asyncio.CancelledError):
+        await serve_tunnel(
+            _noop_app,
+            server_url="https://ws.cloud.databricks.com/api/2.0/omnigent",
+            runner_id="runner_transient_credential",
+            runner_version="0.1.0",
+            auth_token_factory=Mint(),
+        )
+
+    assert upgrades[-1] == "tok-recovered"
+
+    assert not connected.with_suffix(".credential-pending").exists()
+
+
+@pytest.mark.asyncio
+async def test_serve_tunnel_no_credential_exits_only_after_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A credential that stays missing past the retry window still ends the launch.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    :returns: None.
+    """
+    monkeypatch.delenv("OMNIGENT_WRAPPER_COMMAND", raising=False)
+    monkeypatch.setattr(serve_module, "_NO_CREDENTIAL_FATAL_WINDOW_S", 120.0)
+    attempts = 0
+
+    async def _serve_once(app: Any, *, auth_token: str | None = None, **_kwargs: Any) -> None:
+        del app
+        assert auth_token is None
+        nonlocal attempts
+        attempts += 1
+        raise InvalidStatus(Response(401, "Unauthorized", [], b""))
+
+    monkeypatch.setattr(serve_module, "_serve_tunnel_once", _serve_once)
+    sleeps = _clock_advanced_by_sleep(monkeypatch)
+
+    with pytest.raises(serve_module.RunnerTunnelAuthRejectedError) as exc_info:
+        await serve_tunnel(
+            _noop_app,
+            server_url="https://ws.cloud.databricks.com/api/2.0/omnigent",
+            runner_id="runner_persistent_no_credential",
+            runner_version="0.1.0",
+            auth_token_factory=lambda: None,
+        )
+
+    assert str(exc_info.value).startswith(serve_module.RUNNER_TUNNEL_NO_CREDENTIAL_PREFIX)
+    assert sum(sleeps) >= serve_module._NO_CREDENTIAL_FATAL_WINDOW_S
+    assert attempts > serve_module._HTTP_AUTH_REJECTION_FATAL_ATTEMPTS
+
+
 class _SignInFactory:
     """Token factory whose credential source reports a pending interactive sign-in."""
 
@@ -522,6 +633,16 @@ class _SignInFactory:
         self.calls += 1
         self.sign_in_pending = self.calls <= self._pending_calls
         return None if self.sign_in_pending else self._token
+
+
+@pytest.fixture(autouse=True)
+def _no_credential_window_elapsed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the immediate no-credential exit for tests that predate the retry window.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    :returns: None.
+    """
+    monkeypatch.setattr(serve_module, "_NO_CREDENTIAL_FATAL_WINDOW_S", 0.0)
 
 
 def _clock_advanced_by_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:

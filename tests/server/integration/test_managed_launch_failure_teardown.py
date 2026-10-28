@@ -19,10 +19,13 @@ reaper is the provider's lifetime cap.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 import pytest_asyncio
@@ -132,6 +135,7 @@ async def _sandbox_host(
     token: str,
     *,
     refuse_launch: bool,
+    on_launch: Callable[[HostLaunchRunnerFrame], None] | None = None,
 ) -> ApplicationCommunicator:
     """Act as the host process inside the (fake) sandbox.
 
@@ -184,6 +188,8 @@ async def _sandbox_host(
                     error_code=HARNESS_NOT_CONFIGURED_ERROR_CODE,
                 )
             else:
+                if on_launch is not None:
+                    on_launch(frame)
                 result = HostLaunchRunnerResultFrame(
                     request_id=frame.request_id,
                     status="launched",
@@ -404,3 +410,209 @@ async def test_runner_connect_timeout_failure_tears_down_managed_sandbox(
     await _wait_for_sandbox_teardown(env, fake, launched_host_ids[0])
     assert fake.terminated == ["sb-fake-1"]
     del tunnels
+
+
+@pytest.mark.parametrize("outcome", ["recovered", "expired", "rejected", "declined"])
+async def test_managed_launch_owns_the_bounded_credential_wait(
+    teardown_env: _Env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    outcome: str,
+) -> None:
+    """The full managed route retains a runner recovering after the ordinary 30s grace."""
+    from websockets.exceptions import InvalidStatus
+    from websockets.http11 import Response
+
+    from omnigent.host.connect import HostProcess, _RunnerHandle
+    from omnigent.host.frames import HostRunnerStatusFrame
+    from omnigent.host.identity import HostIdentity
+    from omnigent.runner.identity import RUNNER_CONNECT_MARKER_ENV_VAR
+    from omnigent.runner.transports.ws_tunnel import serve
+    from omnigent.server.routes import sessions
+    from tests._helpers.polling import poll_until_async
+    from tests.server.integration.test_runner_tunnel_route import _connect_route
+
+    env = teardown_env
+    loop = asyncio.get_running_loop()
+    assert sessions._HOST_RELAUNCH_RUNNER_CONNECT_TIMEOUT_S == 30.0
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+    marker = tmp_path / "owned.connected"
+    monkeypatch.setenv(RUNNER_CONNECT_MARKER_ENV_VAR, str(marker))
+    monkeypatch.setattr(serve, "_NO_CREDENTIAL_FATAL_WINDOW_S", 120.0)
+    if outcome == "expired":
+        monkeypatch.setattr(serve, "_NO_CREDENTIAL_FATAL_WINDOW_S", 1.5)
+        monkeypatch.setattr("omnigent.runner.identity.RUNNER_CREDENTIAL_PENDING_WAIT_S", 1.5)
+    host_futures: list[asyncio.Future[ApplicationCommunicator]] = []
+    launched_host_ids: list[str] = []
+    host_tasks: list[asyncio.Task[None]] = []
+    runner_tasks: list[asyncio.Task[None]] = []
+    launch_frames: list[HostLaunchRunnerFrame] = []
+    statuses: list[str] = []
+    attempts: list[str | None] = []
+    started: list[float] = []
+    shutdown = asyncio.Event()
+
+    class CredentialSource:
+        declined = outcome == "declined"
+
+        def __call__(self) -> str | None:
+            if outcome == "rejected":
+                return "synthetic-rejected"
+            if outcome == "recovered" and loop.time() - started[0] >= 32.0:
+                return "synthetic-recovered"
+            return None
+
+    @asynccontextmanager
+    async def dial(url: str, *, additional_headers: dict[str, str], **_kwargs):
+        # Replace only the network dial: the proxy requires a bearer, then the
+        # production ASGI tunnel still authenticates the exact launch binding.
+        bearer = additional_headers.get("Authorization")
+        attempts.append(bearer)
+        if bearer != "Bearer synthetic-recovered":
+            raise InvalidStatus(Response(401, "Unauthorized", [], b""))
+        comm = await _connect_route(
+            env.app,
+            urlsplit(url).path,
+            headers=[
+                (key.lower().encode(), value.encode()) for key, value in additional_headers.items()
+            ],
+        )
+
+        async def send(text: str) -> None:
+            await comm.send_input({"type": "websocket.receive", "text": text})
+
+        async def receive() -> str:
+            return (await comm.receive_output(timeout=10))["text"]
+
+        async def close(**_kwargs) -> None:
+            await comm.send_input({"type": "websocket.disconnect", "code": 1000})
+
+        try:
+            yield SimpleNamespace(send=send, recv=receive, close=close)
+        finally:
+            await close()
+            await comm.wait(timeout=5)
+
+    monkeypatch.setattr("websockets.connect", dial)
+
+    def start_runner(frame: HostLaunchRunnerFrame) -> None:
+        launch_frames.append(frame)
+        started.append(loop.time())
+        runner_tasks.append(
+            asyncio.create_task(
+                serve.serve_tunnel(
+                    FastAPI(),
+                    server_url="http://test",
+                    runner_id=token_bound_runner_id(frame.binding_token),
+                    runner_version="test",
+                    auth_token_factory=CredentialSource(),
+                    tunnel_token=frame.binding_token,
+                    shutdown_event=shutdown,
+                )
+            )
+        )
+
+    async def answer_status(
+        comm: ApplicationCommunicator, invocation: HostStartInvocation
+    ) -> None:
+        host = HostProcess(
+            HostIdentity(invocation.host_id, invocation.host_name),
+            "http://test",
+            interactive_shells=["bash"],
+        )
+        frame = launch_frames[0]
+        runner_id = token_bound_runner_id(frame.binding_token)
+        host._runners[runner_id] = _RunnerHandle(
+            SimpleNamespace(poll=lambda: 1 if runner_tasks[0].done() else None),
+            tmp_path / "runner.log",
+            frame.session_id,
+            marker,
+        )
+        while True:
+            output = await comm.receive_output(timeout=10)
+            if output["type"] != "websocket.send":
+                continue
+            try:
+                query = decode_host_frame(output["text"])
+            except ValueError:
+                continue
+            if isinstance(query, HostRunnerStatusFrame):
+                result = await host._handle_runner_status(query)
+                statuses.append(result.status)
+                await comm.send_input(
+                    {"type": "websocket.receive", "text": encode_host_frame(result)}
+                )
+
+    async def start_host(invocation: HostStartInvocation) -> ApplicationCommunicator:
+        comm = await _sandbox_host(
+            env.app,
+            invocation.host_id,
+            invocation.host_name,
+            invocation.token,
+            refuse_launch=False,
+            on_launch=start_runner,
+        )
+        host_tasks.append(asyncio.create_task(answer_status(comm, invocation)))
+        return comm
+
+    def on_host_start(invocation: HostStartInvocation) -> None:
+        launched_host_ids.append(invocation.host_id)
+        future = asyncio.run_coroutine_threadsafe(start_host(invocation), loop)
+        host_futures.append(asyncio.wrap_future(future, loop=loop))
+
+    fake = FakeSandboxLauncher(on_host_start=on_host_start)
+    install_fake_modal_launcher(monkeypatch, fake)
+    agent = await create_test_agent(env.client, name="managed-credential-wait")
+    tunnels: list[ApplicationCommunicator] = []
+    try:
+        created = await env.client.post(
+            "/v1/sessions", json={"agent_id": agent["id"], "host_type": "managed"}
+        )
+        assert created.status_code == 201, created.text
+        session_id = created.json()["id"]
+        await poll_until_async(lambda: bool(host_futures), timeout_s=10, interval_s=0.05)
+        tunnels = [await future for future in host_futures]
+        assert len(tunnels) == len(launch_frames) == len(runner_tasks) == 1
+        if outcome == "recovered":
+            await asyncio.sleep(max(0, started[0] + 31.0 - loop.time()))
+            snapshot = (await env.client.get(f"/v1/sessions/{session_id}")).json()
+            assert snapshot["sandbox_status"]["stage"] == "connecting", snapshot
+            assert not fake.terminated
+            assert env.host_store.get_host(snapshot["host_id"]) is not None
+
+            async with asyncio.timeout(10):
+                while True:
+                    snapshot = (await env.client.get(f"/v1/sessions/{session_id}")).json()
+                    status = snapshot["sandbox_status"]
+                    assert status is None or status["stage"] != "failed", snapshot
+                    if status is None:
+                        break
+                    await asyncio.sleep(0.05)
+            assert loop.time() - started[0] >= 32
+            assert attempts[-1] == "Bearer synthetic-recovered"
+            assert "credential_pending" in statuses
+            assert not fake.terminated
+            assert env.conv_store.get_conversation(session_id).runner_id == token_bound_runner_id(
+                launch_frames[0].binding_token
+            )
+        else:
+            status = await _wait_for_failed_launch(env, session_id, timeout_s=6)
+            assert "did not connect" in status["error"]
+            conv = env.conv_store.get_conversation(session_id)
+            assert conv is not None
+            await _wait_for_sandbox_teardown(env, fake, launched_host_ids[0])
+            assert fake.terminated == ["sb-fake-1"]
+            assert loop.time() - started[0] < 6
+            assert ("credential_pending" in statuses) is (outcome == "expired")
+            with pytest.raises(serve.RunnerTunnelAuthRejectedError):
+                await asyncio.wait_for(asyncio.shield(runner_tasks[0]), timeout=2)
+    finally:
+        shutdown.set()
+        for task in [*runner_tasks, *host_tasks]:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*runner_tasks, *host_tasks, return_exceptions=True)
+        for comm in tunnels:
+            await comm.send_input({"type": "websocket.disconnect", "code": 1000})
+            await comm.wait(timeout=5)
+        assert not marker.with_suffix(".credential-pending").exists()

@@ -443,7 +443,12 @@ async def test_wait_for_runner_client_never_connected_makes_no_lookup(
         "expired",
     ],
 )
-async def test_explicit_sign_in_wait_is_bounded_and_owned(monkeypatch, outcome) -> None:
+@pytest.mark.parametrize(
+    "pending_status,pending_budget", [("sign_in_pending", 150.0), ("credential_pending", 120.0)]
+)
+async def test_explicit_sign_in_wait_is_bounded_and_owned(
+    monkeypatch, outcome, pending_status, pending_budget
+) -> None:
     from omnigent.errors import OmnigentError
     from omnigent.server.routes._sessions import orchestration
 
@@ -499,7 +504,7 @@ async def test_explicit_sign_in_wait_is_bounded_and_owned(monkeypatch, outcome) 
             return "alive"
         # Late pending follows alive, a cancelled poll, then a fresh deadline query.
         if status_calls == 1 or (outcome == "late_pending" and status_calls == 3):
-            return "sign_in_pending"
+            return pending_status
         status_poll_started.set()
         if status_calls == (5 if outcome == "late_pending" else 3):
             pending_rechecked.set()
@@ -527,12 +532,14 @@ async def test_explicit_sign_in_wait_is_bounded_and_owned(monkeypatch, outcome) 
                 clock.now = 30.0
                 ordinary_expired.set()
             await pending_wait_started.wait()
-            assert waits == [30.0, 150.0]
+            assert waits == [30.0, pending_budget]
             if outcome in {"connected", "deadline_tie", "late_pending", "expired"}:
                 clock.now += 31.0
-                next_status.put_nowait("sign_in_pending")
+                next_status.put_nowait(pending_status)
                 await pending_rechecked.wait()
-                assert waits == [30.0, 150.0], "a repeated status renewed the sign-in wait"
+                assert waits == [30.0, pending_budget], (
+                    "a repeated status renewed the sign-in wait"
+                )
             if outcome in {"connected", "deadline_tie", "late_pending"}:
                 assert not task.done(), "ordinary startup grace discarded pending sign-in"
                 connection_results.put_nowait(client)
@@ -541,12 +548,12 @@ async def test_explicit_sign_in_wait_is_bounded_and_owned(monkeypatch, outcome) 
                 monkeypatch.setitem(
                     orchestration._intentional_stop_sessions, "session-owned", "runner-owned"
                 )
-                next_status.put_nowait("sign_in_pending")
+                next_status.put_nowait(pending_status)
                 with pytest.raises(OmnigentError, match="was stopped"):
                     await task
             elif outcome == "rebound":
                 current.runner_id = "runner-replacement"
-                next_status.put_nowait("sign_in_pending")
+                next_status.put_nowait(pending_status)
                 with pytest.raises(OmnigentError, match="binding changed"):
                     await task
             elif outcome == "cancelled":
@@ -557,11 +564,11 @@ async def test_explicit_sign_in_wait_is_bounded_and_owned(monkeypatch, outcome) 
                 next_status.put_nowait("dead")
                 assert await task is None
             else:
-                clock.now = 149.0
+                clock.now = pending_budget - 1
                 connection_results.put_nowait(clock_tick)
                 await clock_checked.wait()
                 assert not task.done(), "sign-in wait expired before its deadline"
-                clock.now = 150.0
+                clock.now = pending_budget
                 connection_results.put_nowait(clock_tick)
                 assert await task is None
             assert not active

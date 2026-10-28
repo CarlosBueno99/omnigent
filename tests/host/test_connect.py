@@ -2092,12 +2092,20 @@ async def test_watch_runner_reports_unexpected_exit(
     assert maintenance_reasons == ["runner_exited"]
 
 
-@pytest.mark.parametrize("connected", [False, True])
+@pytest.mark.parametrize(
+    ("connected", "log_line"),
+    [
+        (False, "tunnel rejected (HTTP 401)"),
+        (True, "tunnel rejected (HTTP 401)"),
+        (False, "runner tunnel has no credential available (HTTP 401 persisted)"),
+    ],
+)
 async def test_watch_runner_reports_refused_credentials_as_sign_in(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     connected: bool,
+    log_line: str,
 ) -> None:
     """A runner refused on credentials before connecting asks for a new sign-in.
 
@@ -2114,9 +2122,7 @@ async def test_watch_runner_reports_refused_credentials_as_sign_in(
     workspace = tmp_path / "project"
     workspace.mkdir()
     original_popen = subprocess.Popen
-    script = (
-        f"echo 'tunnel rejected (HTTP 401)' >&2; sleep 0.2; exit {RUNNER_AUTH_REJECTED_EXIT_CODE}"
-    )
+    script = f"echo '{log_line}' >&2; sleep 0.2; exit {RUNNER_AUTH_REJECTED_EXIT_CODE}"
 
     def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
         """Spawn a runner that exits with the credential-rejection code."""
@@ -2146,11 +2152,17 @@ async def test_watch_runner_reports_refused_credentials_as_sign_in(
     died = next(
         record for record in caplog.records if getattr(record, "event_name", None) == "runner_died"
     )
-    assert "tunnel rejected (HTTP 401)" in report.error
+    assert log_line in report.error
     if connected:
         assert not report.error.startswith("The server rejected")
         assert died.attributes["error_category"] == "runner"
         assert died.attributes["error_phase"] == "unknown"
+    elif "no credential available" in log_line:
+        # No credential was sent, so the server did not reject this host.
+        assert report.error.startswith("The runner had no credential to send")
+        assert " login " in report.error
+        assert died.attributes["error_category"] == "config"
+        assert died.attributes["error_phase"] == "runner_launch"
     else:
         assert report.error.startswith("The server rejected this host's credentials")
         assert " login " in report.error
@@ -10923,17 +10935,20 @@ def test_run_host_process_classifies_how_the_host_ended(
 @pytest.mark.parametrize(
     "state", ["pending", "dead", "untracked", "stopped", "rebound", "stop_during_read"]
 )
+@pytest.mark.parametrize("kind", ["sign_in", "credential"])
 async def test_runner_status_only_exposes_pending_sign_in_for_its_live_launch(
-    tmp_path, monkeypatch, state
+    tmp_path, monkeypatch, state, kind
 ) -> None:
     from omnigent.host.connect import _RunnerHandle
-    from omnigent.runner.identity import mark_sign_in_pending
+    from omnigent.runner.identity import mark_credential_pending, mark_sign_in_pending
 
     monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
     host = _make_host_process()
     connected = tmp_path / "owned.connected"
     monkeypatch.setenv(RUNNER_CONNECT_MARKER_ENV_VAR, str(connected))
-    mark_sign_in_pending("runner-owned", time.monotonic() + 20)
+    mark_pending = mark_sign_in_pending if kind == "sign_in" else mark_credential_pending
+    pending_status = "sign_in_pending" if kind == "sign_in" else "credential_pending"
+    mark_pending("runner-owned", time.monotonic() + 20)
     proc = Mock(pid=123, returncode=None)
     proc.poll.return_value = 1 if state == "dead" else None
     handle = _RunnerHandle(
@@ -10950,9 +10965,14 @@ async def test_runner_status_only_exposes_pending_sign_in_for_its_live_launch(
                 handle.stop_requested = True
             return True
 
-        monkeypatch.setattr("omnigent.host.connect.runner_sign_in_is_pending", replaced)
+        monkeypatch.setattr(
+            "omnigent.host.connect.runner_sign_in_is_pending"
+            if kind == "sign_in"
+            else "omnigent.host.connect.runner_credential_is_pending",
+            replaced,
+        )
     result = await host._handle_runner_status(HostRunnerStatusFrame("status", "runner-owned"))
-    assert (result.status == "sign_in_pending") is (state == "pending")
+    assert (result.status == pending_status) is (state == "pending")
     proc.terminate.assert_not_called()
     proc.kill.assert_not_called()
 
