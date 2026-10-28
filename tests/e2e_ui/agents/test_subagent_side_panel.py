@@ -197,7 +197,7 @@ def test_composer_indicator_opens_subagent_tab_beside_parent(
     expect(pane.get_by_test_id("subagent-tab-open-full")).to_have_attribute(
         "href", f"/c/{sub.child_id}"
     )
-    # The parent transcript stays in the main column.
+    # Opening the tab must not navigate away from the parent chat.
     expect(page.get_by_text(_PARENT_REPLY, exact=True)).to_be_visible()
     _hold_for_recording(page, 1000)
 
