@@ -141,6 +141,12 @@ _SPILL_RECORD_FAILURE = CodexStartupFailure(
     remediation="Check local disk space and try again, or attach the text as a file.",
 )
 
+_SPILL_UNSUPPORTED_FAILURE = CodexStartupFailure(
+    message="This Codex version cannot preserve a large paste in history; "
+    "this message was not sent.",
+    remediation="Upgrade Codex to 0.154.0 or later, or attach the text as a file.",
+)
+
 
 class _SpilledInputItems(list[dict[str, object]]):
     """Wire input with the identity of its generated paste occurrences."""
@@ -344,13 +350,7 @@ async def _native_delivery_request_once(
 ) -> CodexMessage:
     """Pair each RPC attempt with its result, including a rejected stale steer."""
     if params.get("clientUserMessageId") and not client.supports_user_message_ids:
-        raise _CodexNativeInputUndelivered(
-            CodexStartupFailure(
-                message="This Codex version cannot preserve a large paste in history; "
-                "this message was not sent.",
-                remediation="Upgrade Codex to 0.154.0 or later, or attach the text as a file.",
-            )
-        )
+        raise _CodexNativeInputUndelivered(_SPILL_UNSUPPORTED_FAILURE)
     attempt_id = uuid.uuid4().hex
     stage = "turn_start" if method == "turn/start" else "turn_steer"
     expected = params.get("expectedTurnId") if method == "turn/steer" else None
@@ -624,6 +624,9 @@ async def _inject_codex_turn_once(
         raise _CodexNativeInputUndelivered(_SPILL_RECORD_FAILURE)
     if not await asyncio.to_thread(_spilled_mirror_fits, input_items, bridge_dir):
         raise _CodexNativeInputUndelivered(_MIRROR_TOO_LARGE_FAILURE)
+    # Refuse known unsupported input before model/settings RPCs or config mirroring.
+    if isinstance(input_items, _SpilledInputItems) and not client.supports_user_message_ids:
+        raise _CodexNativeInputUndelivered(_SPILL_UNSUPPORTED_FAILURE)
     if state.active_turn_id is None:
         await _start_codex_turn(
             client,

@@ -2000,6 +2000,15 @@ async def test_spilled_paste_is_not_sent_without_delivery_provenance(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str, active_turn_id: str | None
 ) -> None:
     _FakeCodexNativeClient.requests = []
+    mirrored_settings = []
+
+    def record_settings_mirror(_bridge_dir, settings):
+        mirrored_settings.append(dict(settings))
+        return {}
+
+    monkeypatch.setattr(
+        codex_native_executor, "mirror_applied_codex_settings", record_settings_mirror
+    )
     _seed_bridge(tmp_path, active_turn_id=active_turn_id)
     state = read_bridge_state(tmp_path)
     assert state is not None
@@ -2036,9 +2045,10 @@ async def test_spilled_paste_is_not_sent_without_delivery_provenance(
             bridge_dir=tmp_path,
             state=state,
             input_items=items,
-            settings_overrides={},
+            settings_overrides={"model": "gpt-5.6-luna", "effort": "high"},
         )
     assert _FakeCodexNativeClient.requests == []
+    assert mirrored_settings == []
     if failure != "unsupported_codex":
         assert caught.value.failure == codex_native_executor._SPILL_RECORD_FAILURE
 
@@ -2891,9 +2901,11 @@ def _run_turn_with_config(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("supports_user_message_ids", [False, True])
 def test_web_model_pick_applied_via_thread_settings_update(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    supports_user_message_ids: bool,
 ) -> None:
     """
     A web-picker model + reasoning effort apply via ``thread/settings/update``.
@@ -2906,6 +2918,9 @@ def test_web_model_pick_applied_via_thread_settings_update(
     picker silently does nothing (#1256). The settings update precedes the
     bare turn so the change is in effect for it.
     """
+    monkeypatch.setattr(
+        _FakeCodexNativeClient, "supports_user_message_ids", supports_user_message_ids
+    )
     _FakeCodexNativeClient.requests = []
     _FakeCodexNativeClient.created = []
     _FakeCodexNativeClient.next_turn = 1
