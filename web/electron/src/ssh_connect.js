@@ -279,6 +279,24 @@ function describeSshFailure(code, stderr, destination) {
 }
 
 /**
+ * Pick the line of remote output that says what went wrong: the CLI's own
+ * `Error: ...` line, which generic hints may follow, with link queries cut
+ * (sign-in links carry one-time values). Else the last line without a link.
+ *
+ * @param {string} text
+ * @returns {string} e.g. "Could not reach https://ws.example/v1/me: timed out", or "".
+ */
+function failureDetail(text) {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.replace(ANSI_RE, "").trim())
+    .filter(Boolean);
+  const error = lines.findLast((line) => /^Error:\s*\S/.test(line));
+  if (error) return error.replace(/^Error:\s*/, "").replace(/(https?:\/\/[^\s?#]*)[?#]\S*/g, "$1");
+  return lines.findLast((line) => !/https?:\/\//.test(line)) ?? "";
+}
+
+/**
  * Split a stream into lines, calling `onLine` for each complete one.
  *
  * @param {(line: string) => void} onLine
@@ -566,8 +584,8 @@ async function signIn(ctx) {
       const clean = line.replace(ANSI_RE, "").trim();
       const code = /^Confirm this code in the browser:\s*(\S+)/.exec(clean);
       if (code) onStatus({ step: "confirm-code", code: code[1] });
-      // Sign-in output can carry one-time links; keep only plain lines for errors.
-      if (clean && !/https?:\/\//.test(clean)) notes.push(clean);
+      // Kept only to explain a failure; failureDetail drops one-time link values.
+      if (clean) notes.push(clean);
       return;
     }
     if (link.port !== null && link.port !== forwarded) {
@@ -634,7 +652,7 @@ async function signIn(ctx) {
       error: `This server signs in with a username and password. Run \`omnigent login ${serverUrl}\` on ${destination} in a terminal, then connect again.`,
     };
   }
-  const detail = notes.at(-1);
+  const detail = failureDetail(notes.join("\n"));
   return {
     ok: false,
     error: detail
@@ -692,7 +710,7 @@ async function runSshConnect(ctx) {
         onStderr: onOutput,
       }).promise;
       if (install.code !== 0) {
-        const detail = lastLine((install.stderr || install.stdout).trim());
+        const detail = failureDetail(install.stderr || install.stdout);
         return {
           ok: false,
           error: `Installing Omnigent on ${destination} failed: ${detail || `exit code ${install.code}`}`,
@@ -714,7 +732,7 @@ async function runSshConnect(ctx) {
     }).promise;
     if (full.isCanceled()) return { ok: false, canceled: true, error: "Connecting was canceled." };
     if (host.code !== 0) {
-      const detail = lastLine((host.stderr || host.stdout).trim());
+      const detail = failureDetail(host.stderr || host.stdout);
       return {
         ok: false,
         error: host.timedOut

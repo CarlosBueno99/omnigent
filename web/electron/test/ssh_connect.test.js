@@ -445,6 +445,27 @@ describe("runSshConnect", () => {
     assert.equal(result.error, "Signing in on my-ec2 failed: Could not reach server");
   });
 
+  it("reports the CLI's own error over a trailing hint, without link values", async () => {
+    const session = fakeSession({
+      logins: [
+        {
+          lines: [
+            "Error: Could not reach https://ws.example/oidc/authorize?state=s3cret for sign-in",
+            "Is the server running?",
+            "If this is a runner tunnel rejection (HTTP 401), stale host processes may be the cause.",
+          ],
+          code: 1,
+        },
+      ],
+    });
+    const { ctx } = connectContext(session);
+
+    assert.equal(
+      (await runSshConnect(ctx)).error,
+      "Signing in on my-ec2 failed: Could not reach https://ws.example/oidc/authorize for sign-in",
+    );
+  });
+
   it("explains servers that sign in with a username and password", async () => {
     const session = fakeSession({
       logins: [{ lines: ["Username [admin]: ", "Aborted!"], code: 1 }],
@@ -463,7 +484,7 @@ describe("runSshConnect", () => {
 
     assert.equal(
       (await runSshConnect(ctx)).error,
-      "Starting the Omnigent host on my-ec2 failed: Error: not signed in",
+      "Starting the Omnigent host on my-ec2 failed: not signed in",
     );
   });
 });
