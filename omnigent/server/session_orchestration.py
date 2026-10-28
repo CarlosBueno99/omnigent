@@ -1,7 +1,8 @@
-"""Owner-authorized orchestration from private sessions using existing delivery."""
+"""Owner-authorized orchestration using execution-bound requester identity."""
 
 from fastapi import Request
 
+from omnigent.db.account_authority import account_generation
 from omnigent.db.db_models import normalize_uuid
 from omnigent.entities import Conversation
 from omnigent.errors import ErrorCode, OmnigentError
@@ -10,8 +11,10 @@ from omnigent.runner.identity import (
     RUNNER_TUNNEL_TOKEN_HEADER,
     token_bound_runner_id,
 )
+from omnigent.runtime.requester import REQUESTER_HEADER
 from omnigent.server.auth import LEVEL_OWNER
 from omnigent.server.feature_flags import Feature
+from omnigent.server.requester import tool_requester
 from omnigent.server.schemas import SessionStartupInput
 from omnigent.stores.conversation_store import (
     SIDE_CHAT_LABEL_KEY,
@@ -28,7 +31,8 @@ def require_owned_session(
     conversations: ConversationStore,
     permissions: PermissionStore,
     *,
-    private: bool = False,
+    check_source: bool = False,
+    allow_shared: bool = False,
 ) -> Conversation:
     """Resolve actual ownership and inherited sharing, without administrator bypass."""
     session_id = normalize_uuid(identifier)
@@ -46,14 +50,16 @@ def require_owned_session(
         grant = permissions.get(user_id, current.id)
         if grant is None or grant.level != LEVEL_OWNER:
             break
-        if private:
-            # Child access comes from the root, including public/read-only grants.
-            grants, cursor = permissions.list_for_session(current.id, limit=2)
-            if cursor is not None or any(g.user_id != user_id for g in grants):
-                raise OmnigentError(
-                    "Shared sessions cannot send messages or launch independent sessions",
-                    code=ErrorCode.FORBIDDEN,
-                )
+        if check_source:
+            if not allow_shared:
+                # Legacy runners can only establish authority from private sources.
+                grants, cursor = permissions.list_for_session(current.id, limit=2)
+                if cursor is not None or any(g.user_id != user_id for g in grants):
+                    raise OmnigentError(
+                        "Shared sessions cannot send messages or launch independent sessions "
+                        "without a verified owner execution",
+                        code=ErrorCode.FORBIDDEN,
+                    )
             if current.labels.get(SIDE_CHAT_LABEL_KEY) == "1":
                 # Side chats keep their own grants but inherit source restrictions.
                 source_id = current.labels.get(SIDE_CHAT_SOURCE_LABEL_KEY)
@@ -72,7 +78,7 @@ def require_orchestration_source(
     *,
     target_id: str | None = None,
 ) -> Conversation:
-    """Check the bound runner, private sender and optional same-owner destination."""
+    """Check runner, requester, source chain and optional same-owner destination."""
     if not request.app.state.feature_flags.enabled(Feature.SESSION_ORCHESTRATION):
         raise OmnigentError("Session orchestration is disabled", code=ErrorCode.FORBIDDEN)
     if not user_id or permissions is None:
@@ -82,12 +88,23 @@ def require_orchestration_source(
         user_id,
         conversations,
         permissions,
-        private=True,
+        check_source=True,
+        # The envelope is authenticated below before any action is admitted.
+        allow_shared=REQUESTER_HEADER in request.headers,
     )
     token = (request.headers.get(RUNNER_TUNNEL_TOKEN_HEADER) or "").strip()
     if not token or not source.runner_id or token_bound_runner_id(token) != source.runner_id:
         raise OmnigentError(
             "Session orchestration requires the sender's bound runner", code=ErrorCode.FORBIDDEN
+        )
+    requester = tool_requester(request, source)
+    if requester is not None and (
+        requester.origin.user_id != user_id
+        or requester.origin.account_generation != account_generation(user_id)
+    ):
+        raise OmnigentError(
+            "Only work from a verified owner execution can delegate to other sessions",
+            code=ErrorCode.FORBIDDEN,
         )
     if target_id is not None:
         target = require_owned_session(target_id, user_id, conversations, permissions)

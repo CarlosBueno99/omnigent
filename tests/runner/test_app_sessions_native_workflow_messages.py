@@ -19,6 +19,7 @@ from omnigent.runner import create_runner_app
 from omnigent.runner.resource_registry import (
     SessionResourceRegistry,
 )
+from omnigent.runtime.requester import REQUESTER_FIELD, InputRequester, ToolRequester
 from omnigent.spec.types import AgentSpec, ExecutorSpec
 from tests.runner.conftest import (
     _BlockingHarnessClient,
@@ -36,7 +37,10 @@ from tests.runner.helpers import NullServerClient
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("harness", ["claude-native", "codex-native"])
-async def test_native_input_identity_reaches_the_harness_request(harness: str) -> None:
+@pytest.mark.parametrize("requester_user", [None, "bryan@example.test", "pat@example.test"])
+async def test_native_input_identity_reaches_the_harness_request(
+    harness: str, requester_user: str | None
+) -> None:
     from omnigent.runtime.harnesses._scaffold import MessageEvent
 
     hc = _ScriptedHarnessClient(
@@ -55,6 +59,7 @@ async def test_native_input_identity_reaches_the_harness_request(harness: str) -
         "delivery_attempt_id": "c" * 32,
         "input_enqueued_at_ms": 12345,
     }
+    requester = InputRequester(user_id=requester_user)
     async with _runner_client(app) as client:
         response = await client.post(
             "/v1/sessions/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/events",
@@ -65,6 +70,7 @@ async def test_native_input_identity_reaches_the_harness_request(harness: str) -
                 "content": [{"type": "input_text", "text": "private prompt"}],
                 "harness": harness,
                 "stable_id": "a" * 32,
+                REQUESTER_FIELD: requester.model_dump(),
                 **identity,
             },
         )
@@ -76,6 +82,7 @@ async def test_native_input_identity_reaches_the_harness_request(harness: str) -
     assert len(hc.posted_bodies) == 1
     request = MessageEvent.model_validate(hc.posted_bodies[0]).to_create_request()
     assert request.model_dump(include=set(identity)) == identity
+    assert request.requester == requester
 
 
 def _build_blocking_app(
@@ -418,6 +425,8 @@ class _HandshakeHarnessClient(_ScriptedHarnessClient):
         super().__init__([])
         self._gate = gate
         self._consumed_ids: list[str] = []
+        self.probe_tools = False
+        self.retained_requester: ToolRequester | None = None
 
     def stream(self, method: str, url: str, *, json: dict[str, Any], timeout: Any) -> Any:
         """Turn-1 stream: created → (gate) → consumed markers → completed."""
@@ -425,6 +434,24 @@ class _HandshakeHarnessClient(_ScriptedHarnessClient):
         self.posted_bodies.append(json)
         gate = self._gate
         consumed_ids = self._consumed_ids
+        probe_tools = self.probe_tools
+        retained_requester = self.retained_requester
+        turn_number = len(self.posted_bodies)
+
+        def probe(phase: str, requester: ToolRequester | None = None) -> str:
+            return _sse(
+                {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "function_call",
+                        "status": "action_required",
+                        "name": "sys_session_message",
+                        "call_id": f"{turn_number}_{phase}",
+                        "arguments": "{}",
+                        **({REQUESTER_FIELD: requester.model_dump()} if requester else {}),
+                    },
+                }
+            )
 
         class _Ctx:
             status_code = 200
@@ -440,11 +467,18 @@ class _HandshakeHarnessClient(_ScriptedHarnessClient):
 
             async def aiter_text(self) -> AsyncIterator[str]:
                 yield _sse({"type": "response.created", "response": {"id": "resp_1"}})
+                if probe_tools:
+                    yield probe("before")
+                    if retained_requester is not None:
+                        yield probe("retained", retained_requester)
                 await gate.wait()
                 # Mirror the executor adapter: once injections are consumed
                 # into the running turn, echo each correlation id back.
                 for inj_id in list(consumed_ids):
                     yield _sse({"type": "injection.consumed", "injection_id": inj_id})
+                consumed_ids.clear()
+                if probe_tools:
+                    yield probe("after")
                 yield _sse({"type": "response.completed", "response": {"id": "resp_1"}})
 
         return _Ctx()
@@ -494,7 +528,7 @@ def _build_handshake_app(
 
 
 @pytest.mark.asyncio
-async def test_midturn_message_not_double_delivered_to_harness() -> None:
+async def test_midturn_message_not_double_delivered_to_harness(monkeypatch) -> None:
     """A message sent during an active turn must reach the harness once.
 
     Covers the web→TUI / claude-native duplication fix. When a user
@@ -515,6 +549,14 @@ async def test_midturn_message_not_double_delivered_to_harness() -> None:
 
     gate = _aio.Event()
     app, _pm, hc = _build_handshake_app(gate)
+    hc.probe_tools = True
+    calls: dict[str, ToolRequester] = {}
+
+    async def capture_call(**kwargs):
+        calls[kwargs["call_id"]] = kwargs["requester"]
+        return "{}"
+
+    monkeypatch.setattr("omnigent.runner.tool_dispatch.dispatch_tool_locally", capture_call)
 
     async with _runner_client(app) as client:
         await client.post(
@@ -536,10 +578,15 @@ async def test_midturn_message_not_double_delivered_to_harness() -> None:
                 "model": "test-agent",
                 "content": [{"type": "input_text", "text": "first"}],
                 "harness": "openai-agents",
+                REQUESTER_FIELD: InputRequester(user_id="bryan").model_dump(),
             },
         )
         assert resp1.status_code == 202
-        await _aio.sleep(0.05)
+        for _ in range(200):
+            if "1_before" in calls:
+                break
+            await _aio.sleep(0.01)
+        assert calls["1_before"].origin.user_id == "bryan"
 
         # "second" arrives while turn 1 is provably still active (blocked
         # on the gate) → the runner buffers it AND forwards it as a live
@@ -552,6 +599,7 @@ async def test_midturn_message_not_double_delivered_to_harness() -> None:
                 "model": "test-agent",
                 "content": [{"type": "input_text", "text": "second"}],
                 "harness": "openai-agents",
+                REQUESTER_FIELD: InputRequester(user_id="pat").model_dump(),
             },
         )
         # 202 "buffered" confirms turn 1 was still active — the precondition
@@ -570,9 +618,34 @@ async def test_midturn_message_not_double_delivered_to_harness() -> None:
         # would reach 2 within it.
         gate.set()
         for _ in range(100):
-            if len(hc.posted_bodies) >= 2:
+            if "1_after" in calls and not app.state.active_turns:
                 break
             await _aio.sleep(0.01)
+        assert calls["1_after"].origin.user_id is None
+        assert len(hc.posted_bodies) == 1
+        hc.retained_requester = calls["1_after"]
+
+        # Only a fresh owner execution restores authority, not a new actor label.
+        fresh = await client.post(
+            "/v1/sessions/ede98a0180773a70b1e81cc854ff7d8a/events",
+            json={
+                "type": "message",
+                "role": "user",
+                "model": "test-agent",
+                "content": [{"type": "input_text", "text": "fresh owner work"}],
+                "harness": "openai-agents",
+                REQUESTER_FIELD: InputRequester(user_id="bryan").model_dump(),
+            },
+        )
+        assert fresh.status_code == 202
+        for _ in range(200):
+            if "2_after" in calls:
+                break
+            await _aio.sleep(0.01)
+        assert calls["2_after"].origin.user_id == "bryan"
+        assert calls["2_after"].execution_id != calls["1_after"].execution_id
+        assert calls["1_after"].origin.user_id is None
+        assert calls["2_retained"] == calls["1_after"]
 
     # "second" was forwarded as a live injection (channel 1)...
     midturn_injections = [b for b in hc.patched_events if _body_contains_text(b, "second")]
@@ -581,14 +654,9 @@ async def test_midturn_message_not_double_delivered_to_harness() -> None:
         f"got {len(midturn_injections)} ({hc.patched_events})"
     )
     # ...and must NOT also be re-sent in a continuation turn (channel 2).
-    # Exactly one harness turn stream means no continuation was started.
-    assert len(hc.posted_bodies) == 1, (
-        f"'second' was double-delivered: a continuation turn started after "
-        f"the injection was consumed. The runner must drop the buffered "
-        f"copy on injection.consumed.\nposted_bodies={hc.posted_bodies}"
-    )
-    continuation_has_second = any(_body_contains_text(b, "second") for b in hc.posted_bodies[1:])
-    assert not continuation_has_second
+    # The only second turn is the explicitly submitted fresh owner message.
+    assert len(hc.posted_bodies) == 2
+    assert _body_contains_text(hc.posted_bodies[1], "fresh owner work")
 
 
 class _RefusingSteerHarnessClient(_HandshakeHarnessClient):

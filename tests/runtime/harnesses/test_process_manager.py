@@ -28,21 +28,25 @@ import logging
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
+from fastapi import FastAPI
 
 from omnigent.native.owner_claim import current_pid_namespace, read_owner_claim, write_owner_claim
 from omnigent.runtime.harnesses import _HARNESS_MODULES
 from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
 from omnigent.runtime.harnesses.process_manager import (
     _AP_PID_FILE,
+    _HARNESS_AUTH_TOKEN_ENV,
     _TMP_PARENT_ENV_VAR,
     HarnessProcessManager,
     NoLiveHarnessError,
@@ -1684,6 +1688,7 @@ async def test_pids_holding_socket_returns_empty_when_lsof_is_missing(
 
 async def test_get_client_env_override_propagates_to_subprocess(
     manager: HarnessProcessManager,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``get_client(env=...)`` threads env vars into the spawned subprocess.
 
@@ -1693,16 +1698,26 @@ async def test_get_client_env_override_propagates_to_subprocess(
     Omnigent would have to mutate its own ``os.environ`` (which races
     across concurrent conversations with different specs).
     """
+    monkeypatch.setenv(_HARNESS_AUTH_TOKEN_ENV, "ambient-test-token")
     await manager.start()
     try:
         client = await manager.get_client(
             "conv_env",
             _TEST_HARNESS_NAME,
-            env={"HARNESS_TEST_CUSTOM": "marker_alpha"},
+            env={
+                "HARNESS_TEST_CUSTOM": "marker_alpha",
+                _HARNESS_AUTH_TOKEN_ENV: "override-test-token",
+            },
         )
         # Subprocess saw the override in its env.
         resp = await client.get("/env/HARNESS_TEST_CUSTOM")
         assert resp.json() == {"value": "marker_alpha"}
+        authorization = client.headers["Authorization"]
+        assert authorization.startswith("Bearer ")
+        assert authorization not in {"Bearer ambient-test-token", "Bearer override-test-token"}
+        resp = await client.get(f"/env/{_HARNESS_AUTH_TOKEN_ENV}")
+        assert resp.json() == {"value": None}
+        assert os.environ[_HARNESS_AUTH_TOKEN_ENV] == "ambient-test-token"
     finally:
         await manager.shutdown()
 
@@ -1766,11 +1781,53 @@ async def test_get_client_env_override_is_per_conversation(
         resp_b = await client_b.get("/env/HARNESS_TEST_CUSTOM")
         assert resp_a.json()["value"] == "alpha"
         assert resp_b.json()["value"] == "beta"
+        assert client_a.headers["Authorization"] != client_b.headers["Authorization"]
     finally:
         await manager.shutdown()
 
 
 # ── Runner subprocess cleanup ──────────────────────
+
+
+@pytest.mark.parametrize("token", [None, "test-control-token"])
+def test_runner_consumes_control_token_before_loading_harness(
+    monkeypatch: pytest.MonkeyPatch, token: str | None
+) -> None:
+    """Import/factory children inherit no control credential; app state retains it."""
+    from omnigent.runtime.harnesses import _runner
+
+    if token is None:
+        monkeypatch.delenv(_HARNESS_AUTH_TOKEN_ENV, raising=False)
+    else:
+        monkeypatch.setenv(_HARNESS_AUTH_TOKEN_ENV, token)
+    observed: list[str] = []
+
+    def check_child_environment(stage: str) -> None:
+        assert _HARNESS_AUTH_TOKEN_ENV not in os.environ
+        output = subprocess.check_output(
+            [
+                sys.executable,
+                "-c",
+                "import os; print('OMNIGENT_HARNESS_AUTH_TOKEN' in os.environ)",
+            ],
+            text=True,
+        )
+        assert output.strip() == "False"
+        observed.append(stage)
+
+    def create_app() -> FastAPI:
+        check_child_environment("factory")
+        return FastAPI()
+
+    def import_harness(module_path: str) -> SimpleNamespace:
+        assert module_path == _TEST_HARNESS_MODULE
+        check_child_environment("import")
+        return SimpleNamespace(create_app=create_app)
+
+    monkeypatch.setattr(_runner.importlib, "import_module", import_harness)
+    app = _runner._load_harness_app(_TEST_HARNESS_NAME, _TEST_HARNESS_MODULE, "conv_auth")
+    assert app.state.harness_auth_token == token
+    assert observed == ["import", "factory"]
 
 
 async def test_runner_subprocess_exits_on_sigterm(

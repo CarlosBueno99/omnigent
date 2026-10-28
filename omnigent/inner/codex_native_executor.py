@@ -51,6 +51,8 @@ from omnigent.harnesses.codex_native.bridge import (
     read_unmirrored_codex_settings,
     update_active_turn_id,
 )
+from omnigent.harnesses.codex_native.execution import CodexExecutionIdentity
+from omnigent.harnesses.codex_native.requester import CodexRequesterRegistry
 from omnigent.inner.codex_goal_command import (
     goal_objective_from_content,
     goal_objective_length_error,
@@ -80,6 +82,7 @@ from omnigent.native.input_diagnostics import (
     with_input_attributes,
 )
 from omnigent.process_logging import log_once
+from omnigent.runtime.requester import InputRequester, ToolRequester
 from omnigent.util.reasoning_effort import (
     CODEX_NATIVE_EFFORTS,
     effort_for_model_switch,
@@ -228,10 +231,14 @@ async def _native_delivery_request(
     state: CodexNativeBridgeState,
     *,
     bridge_dir: Path,
+    requester: InputRequester | None = None,
+    registry: CodexRequesterRegistry | None = None,
 ) -> CodexMessage:
     """Reconnect once after an authoritative refusal; never retry socket loss."""
     try:
-        return await _native_delivery_request_once(client, method, params, state)
+        return await _native_delivery_request_once(
+            client, method, params, state, requester=requester, registry=registry
+        )
     except CodexAppServerResponseError as error:
         if not is_server_draining_error(error):
             raise
@@ -267,7 +274,9 @@ async def _native_delivery_request(
             ) from error
         # A second refusal still proves non-delivery. Transport failure after
         # this submission remains ambiguous and cannot authorize another retry.
-        return await _native_delivery_request_once(client, method, params, state)
+        return await _native_delivery_request_once(
+            client, method, params, state, requester=requester, registry=registry
+        )
 
 
 async def _native_delivery_request_once(
@@ -275,6 +284,8 @@ async def _native_delivery_request_once(
     method: Literal["turn/start", "turn/steer"],
     params: CodexParams,
     state: CodexNativeBridgeState,
+    requester: InputRequester | None = None,
+    registry: CodexRequesterRegistry | None = None,
 ) -> CodexMessage:
     """Pair each RPC attempt with its result, including a rejected stale steer."""
     attempt_id = uuid.uuid4().hex
@@ -293,9 +304,26 @@ async def _native_delivery_request_once(
         native_turn_id=requested_turn_id,
         requested_native_turn_id=requested_turn_id,
     )
+    client_id = None
+    if registry is not None:
+        client_id = registry.begin(
+            requester or InputRequester(), state.thread_id, requested_turn_id
+        )
+        params = {**params, "clientUserMessageId": client_id}
     try:
         response = await client.request(method, params)
     except BaseException as exc:
+        if (
+            registry is not None
+            and client_id is not None
+            and isinstance(exc, CodexAppServerResponseError)
+            and (
+                is_server_draining_error(exc)
+                or is_compaction_steer_refusal(exc)
+                or is_stale_active_turn_error(exc)
+            )
+        ):
+            registry.finish(client_id, refused=True)
         outcome = "rpc_error"
         if isinstance(exc, asyncio.CancelledError):
             outcome = "cancelled"
@@ -347,6 +375,8 @@ async def _start_codex_turn(
     state: CodexNativeBridgeState,
     input_items: list[dict[str, object]],
     settings_overrides: Mapping[str, object],
+    requester: InputRequester | None = None,
+    registry: CodexRequesterRegistry | None = None,
 ) -> None:
     """Apply optional settings and start one Codex turn on an idle thread."""
     settings_overrides = dict(settings_overrides)
@@ -409,6 +439,8 @@ async def _start_codex_turn(
         },
         state,
         bridge_dir=bridge_dir,
+        requester=requester,
+        registry=registry,
     )
     result = _json_object(response.get("result"))
     turn = _json_object(result.get("turn")) if result is not None else None
@@ -424,6 +456,8 @@ async def _steer_codex_turn(
     bridge_dir: Path,
     state: CodexNativeBridgeState,
     input_items: list[dict[str, object]],
+    requester: InputRequester | None = None,
+    registry: CodexRequesterRegistry | None = None,
 ) -> None:
     """Steer one bridge-recorded active Codex turn."""
     assert state.active_turn_id is not None
@@ -437,6 +471,8 @@ async def _steer_codex_turn(
         },
         state,
         bridge_dir=bridge_dir,
+        requester=requester,
+        registry=registry,
     )
     result = _json_object(response.get("result"))
     turn_id = result.get("turnId") if result is not None else None
@@ -452,11 +488,15 @@ async def _inject_codex_turn(
     state: CodexNativeBridgeState,
     input_items: list[dict[str, object]],
     settings_overrides: Mapping[str, object],
+    requester: InputRequester | None = None,
+    registry: CodexRequesterRegistry | None = None,
 ) -> None:
     """Retain explicitly refused input while an active compaction settles."""
     try:
         await _inject_codex_turn_once(
             client,
+            requester=requester,
+            registry=registry,
             bridge_dir=bridge_dir,
             state=state,
             input_items=input_items,
@@ -470,6 +510,8 @@ async def _inject_codex_turn(
     try:
         await _inject_codex_turn_once(
             client,
+            requester=requester,
+            registry=registry,
             bridge_dir=bridge_dir,
             state=recovered_state,
             input_items=input_items,
@@ -544,11 +586,15 @@ async def _inject_codex_turn_once(
     state: CodexNativeBridgeState,
     input_items: list[dict[str, object]],
     settings_overrides: Mapping[str, object],
+    requester: InputRequester | None = None,
+    registry: CodexRequesterRegistry | None = None,
 ) -> None:
     """Steer an active turn or start one, recovering one proven stale steer."""
     if state.active_turn_id is None:
         await _start_codex_turn(
             client,
+            requester=requester,
+            registry=registry,
             bridge_dir=bridge_dir,
             state=state,
             input_items=input_items,
@@ -560,6 +606,8 @@ async def _inject_codex_turn_once(
     try:
         await _steer_codex_turn(
             client,
+            requester=requester,
+            registry=registry,
             bridge_dir=bridge_dir,
             state=state,
             input_items=input_items,
@@ -583,6 +631,8 @@ async def _inject_codex_turn_once(
         )
         await _steer_codex_turn(
             client,
+            requester=requester,
+            registry=registry,
             bridge_dir=bridge_dir,
             state=recovered_state,
             input_items=input_items,
@@ -591,6 +641,8 @@ async def _inject_codex_turn_once(
     _logger.info("Codex native reconciled completed stale turn: turn_id=%s", expected_turn_id)
     await _start_codex_turn(
         client,
+        requester=requester,
+        registry=registry,
         bridge_dir=bridge_dir,
         state=recovered_state,
         input_items=input_items,
@@ -620,6 +672,52 @@ class CodexNativeExecutor(Executor):
         # See designs/NATIVE_INJECTION_SERIALIZATION.md. Relies on the
         # adapter caching one executor per conversation.
         self._inject_lock = asyncio.Lock()
+        self._requester_registry = CodexRequesterRegistry()
+        self._requester_scope: tuple[str, str, str] | None = None
+
+    def _requesters_for_state(self, state: CodexNativeBridgeState) -> CodexRequesterRegistry:
+        scope = (state.session_id, state.thread_id, state.socket_path)
+        if scope != self._requester_scope:
+            self._requester_registry = CodexRequesterRegistry()
+            self._requester_scope = scope
+        return self._requester_registry
+
+    async def resolve_tool_requester(
+        self, identity: CodexExecutionIdentity
+    ) -> ToolRequester | None:
+        """Resolve a retained call identity for the runner's authenticated IPC client."""
+        state = read_bridge_state(self._bridge_dir)
+        if (
+            state is None
+            or not _session_is_active(state.session_id, self._request_session_id)
+            or state.thread_id != identity.thread_id
+        ):
+            return None
+        scope = (state.session_id, state.thread_id, state.socket_path)
+        registry = self._requesters_for_state(state)
+        revision = registry.revision
+        client = await _connect_to_app_server(state)
+        if client is None:
+            return None
+        try:
+            response = await client.request(
+                "thread/read", {"threadId": identity.thread_id, "includeTurns": True}
+            )
+        except (OSError, WebSocketException, CodexAppServerResponseError, TimeoutError):
+            _logger.warning("Codex requester evidence unavailable", exc_info=True)
+            return None
+        finally:
+            await client.close()
+        # Validate after all transport awaits, including connection cleanup.
+        current = read_bridge_state(self._bridge_dir)
+        if (
+            current is None
+            or (current.session_id, current.thread_id, current.socket_path) != scope
+            or self._requester_scope != scope
+            or self._requester_registry is not registry
+        ):
+            return None
+        return registry.snapshot(identity, response, revision=revision)
 
     def supports_streaming(self) -> bool:
         """:returns: ``False`` because output is emitted by the native forwarder."""
@@ -629,13 +727,20 @@ class CodexNativeExecutor(Executor):
         """:returns: ``True`` because active turns accept ``turn/steer``."""
         return True
 
-    async def enqueue_session_message(self, session_key: str, content: EnqueuedContent) -> bool:
+    async def enqueue_session_message(
+        self,
+        session_key: str,
+        content: EnqueuedContent,
+        *,
+        requester: InputRequester | None = None,
+    ) -> bool:
         """
         Steer an active native Codex turn.
 
         :param session_key: Adapter session key. The native bridge is
             per conversation, so this value is only used for API parity.
         :param content: User-supplied content, usually a string.
+        :param requester: Origin captured at authenticated input ingress.
         :returns: ``True`` when Codex accepted the steering message.
         """
         del session_key
@@ -662,6 +767,8 @@ class CodexNativeExecutor(Executor):
                     state=state,
                     input_items=input_items,
                     settings_overrides={},
+                    requester=requester,
+                    registry=self._requesters_for_state(state),
                 )
             except Exception as exc:
                 ambiguous = isinstance(exc, InjectionDeliveryAmbiguous)
@@ -734,7 +841,7 @@ class CodexNativeExecutor(Executor):
                         {"threadId": state.thread_id, "turnId": ""},
                     )
                 except Exception:  # the local cancel above already took effect.
-                    _logger.warning("Codex native MCP startup interrupt failed", exc_info=True)
+                    _logger.exception("Codex native MCP startup interrupt failed")
                 _logger.info("Codex native MCP startup cancelled: %s", ", ".join(pending))
             if state.active_turn_id is not None:
                 try:
@@ -782,8 +889,8 @@ class CodexNativeExecutor(Executor):
         :param config: Per-turn executor config. Its ``model`` and
             ``extra["reasoning_effort"]`` (carrying the Omnigent web
             ``/model`` pick) are applied via a ``thread/settings/update``
-            request ahead of ``turn/start``; everything else is ignored
-            by this bridge.
+            request ahead of ``turn/start``. Its typed requester is registered
+            before the input reaches Codex.
         :returns: Async iterator yielding one terminal event.
         """
         del tools, system_prompt
@@ -942,6 +1049,10 @@ class CodexNativeExecutor(Executor):
                                 state=state,
                                 input_items=input_items,
                                 settings_overrides=settings_overrides,
+                                requester=config.requester
+                                if config is not None
+                                else InputRequester(),
+                                registry=self._requesters_for_state(state),
                             )
                     except Exception as exc:
                         if isinstance(exc, InjectionDeliveryAmbiguous):

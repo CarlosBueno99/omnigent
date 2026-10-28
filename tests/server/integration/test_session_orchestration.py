@@ -7,6 +7,7 @@ import pytest
 
 from omnigent.runner.identity import ORCHESTRATION_SOURCE_HEADER, RUNNER_TUNNEL_TOKEN_HEADER
 from omnigent.runner.tool_dispatch import execute_tool
+from omnigent.runtime.requester import REQUESTER_HEADER, ExecutionRequester, InputRequester
 from omnigent.server.auth import LEVEL_EDIT, LEVEL_READ
 from omnigent.server.feature_flags import FeatureFlags
 from omnigent.stores.conversation_store import (
@@ -50,13 +51,14 @@ async def peers(auth_client, auth_app, db_uri, monkeypatch):
     return source, target, captured
 
 
-async def _send(client, source, target, message="Please inspect the PR"):
+async def _send(client, source, target, message="Please inspect the PR", *, requester=None):
     return json.loads(
         await execute_tool(
             tool_name="sys_session_message",
             arguments=json.dumps({"session_id": target["id"], "message": message}),
             server_client=client,
             conversation_id=source["id"],
+            requester=requester,
         )
     )
 
@@ -100,6 +102,47 @@ async def test_private_sender_can_message_shared_receiver(
     store = SqlAlchemyConversationStore(db_uri)
     assert store.get_conversation(target["id"]).parent_conversation_id is None
     assert store.get_conversation(source["id"]).parent_conversation_id is None
+
+
+@pytest.mark.parametrize("actor", ["alice", "bob"])
+@pytest.mark.parametrize("sharing_after_input", [LEVEL_EDIT, LEVEL_READ, None])
+async def test_shared_input_keeps_requester_when_permissions_change(
+    auth_client, peers, db_uri, actor, sharing_after_input
+):
+    source, target, captured = peers
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    permissions.ensure_user("bob")
+    for session in (source, target):
+        permissions.grant("bob", session["id"], LEVEL_EDIT)
+
+    # Capture identity at authenticated ingress, before queueing or a grant change.
+    runner_token = auth_client.headers.pop(RUNNER_TUNNEL_TOKEN_HEADER)
+    accepted = await auth_client.post(
+        f"/v1/sessions/{source['id']}/events",
+        headers={"X-Forwarded-Email": actor},
+        json={
+            "type": "message",
+            "data": {"role": "user", "content": [{"type": "input_text", "text": "work"}]},
+        },
+    )
+    assert accepted.status_code == 202, accepted.text
+    origin = InputRequester.from_body(captured["body"])
+    assert origin.user_id == actor
+    requester = ExecutionRequester(origin).snapshot()
+    auth_client.headers[RUNNER_TUNNEL_TOKEN_HEADER] = runner_token
+    if sharing_after_input is None:
+        permissions.revoke("bob", source["id"])
+    else:
+        permissions.grant("bob", source["id"], sharing_after_input)
+
+    captured.clear()
+    result = await _send(auth_client, source, target, requester=requester)
+    if actor == "bob":
+        assert "verified owner execution" in result["detail"], result
+        assert not captured.get("posts")
+    else:
+        assert result.get("queued") is True, result
+        assert InputRequester.from_body(captured["body"]).user_id == "alice"
 
 
 async def test_runner_is_trusted_for_other_owned_sessions_it_hosts(auth_client, peers, db_uri):
@@ -152,6 +195,9 @@ async def test_peer_message_tracks_runner_startup(auth_client, peers, monkeypatc
         "blank",
         "oversize",
         "missing_source",
+        "unknown_requester",
+        "stale_account",
+        "invalid_requester",
     ],
 )
 async def test_refusal_before_delivery(condition, auth_client, auth_app, peers, db_uri):
@@ -177,12 +223,23 @@ async def test_refusal_before_delivery(condition, auth_client, auth_app, peers, 
         auth_client.headers[RUNNER_TUNNEL_TOKEN_HEADER] = "wrong"
     if condition == "self":
         target = source
+    headers = {ORCHESTRATION_SOURCE_HEADER: source["id"]}
+    if condition == "missing_source":
+        headers.clear()
+    if condition in {"unknown_requester", "stale_account", "invalid_requester"}:
+        origin = InputRequester(
+            user_id="alice" if condition == "stale_account" else None,
+            account_generation="previous-generation" if condition == "stale_account" else None,
+        )
+        headers[REQUESTER_HEADER] = (
+            "invalid"
+            if condition == "invalid_requester"
+            else ExecutionRequester(origin).snapshot().model_dump_json()
+        )
     captured.clear()
     response = await auth_client.post(
         f"/v1/sessions/{target['id']}/events",
-        headers={}
-        if condition == "missing_source"
-        else {ORCHESTRATION_SOURCE_HEADER: source["id"]},
+        headers=headers,
         json={
             "type": "session_message",
             "data": {

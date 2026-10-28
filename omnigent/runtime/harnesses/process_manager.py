@@ -75,13 +75,8 @@ _logger = logging.getLogger(__name__)
 # drive — so use the real (already per-user) temp dir.
 _TMP_PARENT_ENV_VAR = HARNESS_TMP_PARENT_ENV_VAR
 
-# S1 (security): env var carrying the per-spawn bearer token for the harness
-# control channel. The parent generates a fresh token per subprocess, ships it
-# here (private to the parent/child pair), and presents it on every ``/v1``
-# request; the harness scaffold's auth middleware compares against it. This is
-# the access boundary on Windows, where the IPC is a loopback TCP listener
-# reachable by any local process; on POSIX (uid-isolated UDS) it is defence in
-# depth.
+# Per-spawn control bearer, consumed from the environment by _runner before
+# loading the harness. Required for both UDS and loopback TCP control requests.
 _HARNESS_AUTH_TOKEN_ENV = "OMNIGENT_HARNESS_AUTH_TOKEN"
 
 # Sentinel each instance writes into its subdir on boot; the orphan sweep uses it
@@ -89,10 +84,7 @@ _HARNESS_AUTH_TOKEN_ENV = "OMNIGENT_HARNESS_AUTH_TOKEN"
 # Holds an owner claim; older builds wrote a bare PID.
 _AP_PID_FILE = "AP_PID"
 
-# Mode bits applied to the per-AP subdir and the per-conversation
-# socket. Filesystem permissions + the per-AP-uuid scope are the v1
-# auth boundary. mTLS / bearer tokens are deferred until federation
-# (see §What's deferred in the design doc).
+# Filesystem permissions also restrict UDS access to the owning Unix user.
 _DIR_MODE = 0o700
 # Socket files inherit the parent dir permissions; setting 0o600
 # explicitly on the file ensures the same restriction even on
@@ -1290,16 +1282,10 @@ class HarnessProcessManager:
         # payload running in the harness can't impersonate the runner.
         # See ``_build_harness_spawn_env``.
         effective_env: dict[str, str] = _build_harness_spawn_env(env)
-        # S1 (security): on Windows the harness IPC is a loopback-TCP listener
-        # reachable by any local process, so mint a fresh per-spawn bearer token
-        # as the access boundary the uid-isolated UDS provides on POSIX. This is
-        # Windows-only: POSIX keeps the UDS and sets no token, leaving the
-        # scaffold's auth gate inert. The token is delivered via the harness's
-        # private env and presented by our client (below) on every /v1 request.
-        auth_token: str | None = None
-        if IS_WINDOWS:
-            auth_token = secrets.token_urlsafe(32)
-            effective_env[_HARNESS_AUTH_TOKEN_ENV] = auth_token
+        # Same-UID tool processes can reach a UDS too. Always mint a fresh
+        # control bearer, overriding any inherited or caller-supplied value.
+        auth_token = secrets.token_urlsafe(32)
+        effective_env[_HARNESS_AUTH_TOKEN_ENV] = auth_token
 
         parent_pid = os.getpid()
 
@@ -1362,11 +1348,7 @@ class HarnessProcessManager:
             client = httpx.AsyncClient(
                 transport=endpoint.make_transport(),
                 base_url=endpoint.base_url,
-                # S1 (security): present the per-spawn bearer token (Windows only)
-                # so the harness scaffold accepts this client and rejects any
-                # unauthenticated local peer on the loopback-TCP channel. Empty on
-                # POSIX, where the uid-isolated UDS is the access boundary.
-                headers=({"Authorization": f"Bearer {auth_token}"} if auth_token else {}),
+                headers={"Authorization": f"Bearer {auth_token}"},
                 # See the comment above the constant for rationale.
                 # Connect/write/pool keep the 5s default so a vanished
                 # harness still surfaces quickly; read=None defers

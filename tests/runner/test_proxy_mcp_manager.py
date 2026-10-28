@@ -33,6 +33,14 @@ from omnigent.runner.mcp_execution_registry import (
 )
 from omnigent.runner.mcp_manager import McpSchemasResult
 from omnigent.runner.proxy_mcp_manager import ProxyMcpManager
+from omnigent.runtime.requester import (
+    REQUESTER_FIELD,
+    REQUESTER_HEADER,
+    ExecutionRequester,
+    InputRequester,
+    ToolRequester,
+    current_tool_requester,
+)
 from omnigent.spec.types import AgentSpec, MCPServerConfig
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -44,10 +52,12 @@ class _Call:
 
     :param url: The request URL path, e.g. ``"/v1/sessions/conv_1/mcp"``.
     :param body: The parsed JSON body of the request.
+    :param headers: The outgoing HTTP headers, including protected requester metadata.
     """
 
     url: str
     body: dict[str, Any]
+    headers: httpx.Headers
 
 
 class _StubTransport(httpx.AsyncBaseTransport):
@@ -76,7 +86,7 @@ class _StubTransport(httpx.AsyncBaseTransport):
         :raises IndexError: If the queue is exhausted (test setup error).
         """
         body = json.loads(request.content)
-        self.calls.append(_Call(url=str(request.url), body=body))
+        self.calls.append(_Call(url=str(request.url), body=body, headers=request.headers))
         return self._responses.pop(0)
 
 
@@ -338,7 +348,8 @@ async def test_schemas_for_malformed_rpc_objects_return_failure(
 
 
 @pytest.mark.asyncio
-async def test_call_tool_happy_path_returns_text() -> None:
+@pytest.mark.parametrize("requester_user", [None, "pat@example.test", "bryan@example.test"])
+async def test_call_tool_happy_path_returns_text(requester_user: str | None) -> None:
     """``call_tool`` must extract and return text content from a successful result.
 
     Failure means MCP tool results are dropped and the LLM sees empty responses,
@@ -361,7 +372,18 @@ async def test_call_tool_happy_path_returns_text() -> None:
     manager = _make_manager(transport)
     spec = _make_spec("github")
 
-    output = await manager.call_tool(spec, "github__search", {"query": "asyncio"})
+    requester = (
+        ExecutionRequester(
+            InputRequester(user_id=requester_user, account_generation="v1")
+        ).snapshot()
+        if requester_user is not None
+        else None
+    )
+    token = current_tool_requester.set(requester)
+    try:
+        output = await manager.call_tool(spec, "github__search", {"query": "asyncio"})
+    finally:
+        current_tool_requester.reset(token)
 
     assert output == "Found 3 results\nPage 1 of 1", (
         "Multiple text blocks must be joined with newline"
@@ -371,6 +393,11 @@ async def test_call_tool_happy_path_returns_text() -> None:
     assert call.body["method"] == "tools/call"
     assert call.body["params"]["name"] == "github__search"
     assert call.body["params"]["arguments"] == {"query": "asyncio"}
+    assert REQUESTER_FIELD not in call.body["params"]
+    if requester is None:
+        assert REQUESTER_HEADER not in call.headers
+    else:
+        assert ToolRequester.model_validate_json(call.headers[REQUESTER_HEADER]) == requester
 
 
 @pytest.mark.asyncio
@@ -422,9 +449,17 @@ async def test_call_tool_recreates_approval_after_server_reconnect() -> None:
     )
     manager = _make_manager(transport)
     pending_approvals.reset_for_tests()
-    task = asyncio.create_task(
-        manager.call_tool(_make_spec("github"), "sys_os_shell", {"command": "printf ok"})
+    execution = ExecutionRequester(
+        InputRequester(user_id="pat@example.test", account_generation="v1")
     )
+    requester = execution.snapshot()
+    token = current_tool_requester.set(requester)
+    try:
+        task = asyncio.create_task(
+            manager.call_tool(_make_spec("github"), "sys_os_shell", {"command": "printf ok"})
+        )
+    finally:
+        current_tool_requester.reset(token)
 
     async def _wait_until_registered(elicitation_id: str) -> None:
         for _ in range(1000):
@@ -435,11 +470,18 @@ async def test_call_tool_recreates_approval_after_server_reconnect() -> None:
 
     try:
         await _wait_until_registered(old_elicitation)
-        assert pending_approvals.notify_server_reconnect() == 1
-        await _wait_until_registered(new_elicitation)
-        assert pending_approvals.resolve(new_elicitation, approved=True)
-
-        assert await task == "approval-resumed"
+        owner = InputRequester(user_id="bryan@example.test", account_generation="v1")
+        execution.consume(owner)
+        fresh_owner = ExecutionRequester(owner).snapshot()
+        token = current_tool_requester.set(fresh_owner)
+        try:
+            assert pending_approvals.notify_server_reconnect() == 1
+            await _wait_until_registered(new_elicitation)
+            assert pending_approvals.resolve(new_elicitation, approved=True)
+            assert await task == "approval-resumed"
+            assert current_tool_requester.get() == fresh_owner
+        finally:
+            current_tool_requester.reset(token)
     finally:
         if not task.done():
             task.cancel()
@@ -452,6 +494,11 @@ async def test_call_tool_recreates_approval_after_server_reconnect() -> None:
     assert retry_params["requestState"] == "new-state"
     assert new_elicitation in retry_params["inputResponses"]
     assert old_elicitation not in retry_params["inputResponses"]
+    assert all(
+        ToolRequester.model_validate_json(call.headers[REQUESTER_HEADER]) == requester
+        for call in transport.calls
+    )
+    assert all(REQUESTER_FIELD not in call.body["params"] for call in transport.calls)
 
 
 @pytest.mark.asyncio
@@ -471,7 +518,7 @@ async def test_call_tool_reattaches_expired_execution_after_server_disconnect(
 
         async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
-            self.calls.append(_Call(url=str(request.url), body=body))
+            self.calls.append(_Call(url=str(request.url), body=body, headers=request.headers))
             operation_id = body["params"][MCP_OPERATION_ID_PARAM]
 
             async def _retained_work() -> McpExecutionResult:
@@ -518,7 +565,14 @@ async def test_call_tool_reattaches_expired_execution_after_server_disconnect(
         execution_registry=registry,
     )
     pending_approvals.reset_for_tests()
-    task = asyncio.create_task(manager.call_tool(None, "github__deploy", {}))
+    requester = ExecutionRequester(
+        InputRequester(user_id="pat@example.test", account_generation="v1")
+    ).snapshot()
+    token = current_tool_requester.set(requester)
+    try:
+        task = asyncio.create_task(manager.call_tool(None, "github__deploy", {}))
+    finally:
+        current_tool_requester.reset(token)
     try:
         for _ in range(1000):
             if pending_approvals._server_reconnect_waiters:
@@ -526,9 +580,16 @@ async def test_call_tool_reattaches_expired_execution_after_server_disconnect(
             await asyncio.sleep(0.001)
         assert pending_approvals._server_reconnect_waiters
         clock = 2.0
-        pending_approvals.notify_server_reconnect()
-
-        assert await task == "reattached"
+        fresh_owner = ExecutionRequester(
+            InputRequester(user_id="bryan@example.test", account_generation="v1")
+        ).snapshot()
+        token = current_tool_requester.set(fresh_owner)
+        try:
+            pending_approvals.notify_server_reconnect()
+            assert await task == "reattached"
+            assert current_tool_requester.get() == fresh_owner
+        finally:
+            current_tool_requester.reset(token)
     finally:
         if not task.done():
             task.cancel()
@@ -540,6 +601,10 @@ async def test_call_tool_reattaches_expired_execution_after_server_disconnect(
     first_params, retry_params = [call.body["params"] for call in transport.calls]
     assert retry_params == first_params
     assert first_params[MCP_OPERATION_ID_PARAM].startswith("mcpop_")
+    assert all(
+        ToolRequester.model_validate_json(call.headers[REQUESTER_HEADER]) == requester
+        for call in transport.calls
+    )
 
 
 @pytest.mark.asyncio

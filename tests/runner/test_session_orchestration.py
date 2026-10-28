@@ -9,7 +9,47 @@ import pytest
 
 from omnigent.runner.identity import ORCHESTRATION_SOURCE_HEADER
 from omnigent.runner.tool_dispatch import build_native_relay_tool_schemas, execute_tool
+from omnigent.runtime.requester import (
+    REQUESTER_HEADER,
+    ExecutionRequester,
+    InputRequester,
+    ToolRequester,
+)
 from omnigent.spec.types import AgentSpec
+
+
+@pytest.mark.parametrize("consumed", [False, True])
+def test_requester_is_bound_to_execution(consumed):
+    owner = InputRequester(user_id="owner")
+    collaborator = InputRequester(user_id="collaborator")
+    active = ExecutionRequester(owner)
+    admitted = active.snapshot()
+    active.begin_injection("steer", collaborator)
+    assert active.snapshot().origin.user_id is None
+    active.finish_injection("steer", consumed=consumed)
+    assert active.snapshot().origin.user_id == (None if consumed else "owner")
+    old_call = active.snapshot()
+    fresh = ExecutionRequester(owner).snapshot()
+    assert fresh.origin.user_id == "owner"
+    assert fresh.execution_id != old_call.execution_id
+    assert old_call.origin.user_id == (None if consumed else "owner")
+    assert admitted.origin.user_id == "owner"
+    if consumed:
+        active.consume(owner)
+        assert active.snapshot().origin.user_id is None
+
+
+def test_requester_serialization_and_unknown_input():
+    from omnigent.runtime.requester import REQUESTER_FIELD
+
+    origin = InputRequester(user_id="owner", account_generation="generation")
+    body = json.loads(json.dumps({REQUESTER_FIELD: origin.model_dump()}))
+    assert InputRequester.from_body(body) == origin
+    assert InputRequester.from_body({"created_by": "owner"}).user_id is None
+    assert InputRequester.from_body({REQUESTER_FIELD: {"user_id": 123}}).user_id is None
+    active = ExecutionRequester(origin)
+    active.consume(InputRequester(user_id="owner", account_generation="replacement"))
+    assert active.snapshot().origin.user_id is None
 
 
 @pytest.mark.parametrize("spec", [AgentSpec(spec_version=1), None])
@@ -27,6 +67,7 @@ async def test_create_placement(placement, monkeypatch):
     register = Mock()
     monkeypatch.setattr(subagent_work, "register_child_session", register)
     requests = []
+    requester = ExecutionRequester(InputRequester(user_id="owner")).snapshot()
 
     def handler(request):
         if request.url.path == "/v1/info":
@@ -52,11 +93,13 @@ async def test_create_placement(placement, monkeypatch):
                 ),
                 server_client=client,
                 conversation_id="manager",
+                requester=requester,
             )
         )
     assert "error" not in result, result
     assert len(requests) == (2 if placement == "same_host" else 1)
     body = json.loads(requests[0].content)
+    assert ToolRequester.model_validate_json(requests[0].headers[REQUESTER_HEADER]) == requester
     if placement == "child":
         assert requests[0].url.path == "/v1/sessions"
         assert body["parent_session_id"] == "manager"

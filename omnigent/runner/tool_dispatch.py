@@ -35,6 +35,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
+from omnigent.runtime.requester import (
+    InputRequester,
+    ToolRequester,
+    bind_tool_requester,
+    current_tool_requester,
+    requester_headers,
+)
 from omnigent.stores.conversation_store import CREATED_BY_SESSION_LABEL_KEY
 from omnigent.util.json_serialization import json_dumps_transport_safe
 from omnigent.util.json_types import JsonObject as _JsonObject
@@ -1550,10 +1557,13 @@ async def _post_child_message_event(
     created_by: str | None,
 ) -> httpx.Response:
     """Post a child message, retrying once without best-effort attribution."""
+    caller = current_tool_requester.get()
+    origin = caller.origin if caller else InputRequester()
 
     def _payload(actor: str | None) -> _JsonObject:
         return {
             "type": "message",
+            "requester": origin.model_dump(),
             "data": {
                 "role": "user",
                 "content": content,
@@ -3550,7 +3560,7 @@ async def _execute_session_create(
         model=args.get("model"),
         reasoning_effort=args.get("reasoning_effort"),
     )
-    headers: dict[str, str] = {}
+    headers: dict[str, str] = requester_headers()
     if placement != "child":
         from omnigent.runner.identity import ORCHESTRATION_SOURCE_HEADER
 
@@ -6768,6 +6778,7 @@ async def _fetch_peek_meta(
     return _PeekMeta(agent=parsed.agent, title=parsed.title, pending_elicitations=pending)
 
 
+@bind_tool_requester
 async def execute_tool(
     *,
     tool_name: str,
@@ -6789,6 +6800,7 @@ async def execute_tool(
     publish_event: Callable[[str, _JsonObject], None] | None = None,
     filesystem_registry: FilesystemRegistry | None = None,
     effective_harness: str | None = None,
+    requester: ToolRequester | None = None,  # noqa: ARG001 -- bound by the dispatch decorator
 ) -> str:
     """
     Execute a tool and return the output string.
@@ -7192,6 +7204,7 @@ async def dispatch_tool_locally(
     publish_event: Callable[[str, _JsonObject], None] | None = None,
     filesystem_registry: FilesystemRegistry | None = None,
     effective_harness: str | None = None,
+    requester: ToolRequester | None = None,
 ) -> str:
     """Execute a tool once and POST its result to the harness.
 
@@ -7224,6 +7237,7 @@ async def dispatch_tool_locally(
         )
     output = await execute_tool(
         tool_name=tool_name,
+        requester=requester,
         arguments=arguments,
         server_client=server_client,
         terminal_registry=terminal_registry,

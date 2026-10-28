@@ -7,6 +7,7 @@ import httpx
 
 from omnigent.runner.identity import ORCHESTRATION_SOURCE_HEADER
 from omnigent.runner.session_requests import is_wrong_replica, post_on_host, session_host_id
+from omnigent.runtime.requester import requester_headers
 from omnigent.util.uuid import uuid_to_bytes
 
 
@@ -32,7 +33,7 @@ async def execute_message_tool(
     try:
         path = f"/v1/sessions/{target}/events"
         payload = {"type": "session_message", "data": {"message": message}}
-        headers = {ORCHESTRATION_SOURCE_HEADER: source_id}
+        headers = {ORCHESTRATION_SOURCE_HEADER: source_id, **requester_headers()}
         response = await client.post(path, headers=headers, json=payload, timeout=60)
         if is_wrong_replica(response):
             try:

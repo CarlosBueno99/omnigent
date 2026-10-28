@@ -105,6 +105,15 @@ def test_private_manager_launch_send_read_and_sharing(
                         )
                     ]
 
+                def tool_payload(call_id):
+                    results = tool_results(call_id)
+                    assert results
+                    output = results[-1].get("output", results[-1].get("content"))
+                    if harness == "codex-native":
+                        content = json.loads(output.split("\nOutput:\n", 1)[1])
+                        return json.loads(content[0]["text"])
+                    return ast.literal_eval(output)
+
                 def items(session):
                     response = client.get(f"/v1/sessions/{session}/items", params={"limit": 100})
                     response.raise_for_status()
@@ -113,9 +122,10 @@ def test_private_manager_launch_send_read_and_sharing(
                 def wait_text(session, text):
                     return poll_until(lambda: text in json.dumps(items(session)), timeout_s=90)
 
-                def send(session, text):
+                def send(session, text, *, actor=None):
                     response = client.post(
                         f"/v1/sessions/{session}/events",
+                        headers={"X-Forwarded-Email": actor} if actor else {},
                         json={
                             "type": "message",
                             "data": {
@@ -332,15 +342,7 @@ def test_private_manager_launch_send_read_and_sharing(
                 send(manager, "MANAGER_SEND_READ_CREATE_FIND")
                 wait_text(manager, "CREATOR_FOUND")
                 for call_id in ("creator-list", "creator-info"):
-                    results = tool_results(call_id)
-                    assert results
-                    output = results[-1].get("output", results[-1].get("content"))
-                    if harness == "codex-native":
-                        # Codex wraps MCP content in timing text; the SDK renders a Python dict.
-                        content = json.loads(output.split("\nOutput:\n", 1)[1])
-                        payload = json.loads(content[0]["text"])
-                    else:
-                        payload = ast.literal_eval(output)
+                    payload = tool_payload(call_id)
                     discovered_worker = (
                         next(
                             row
@@ -389,6 +391,7 @@ def test_private_manager_launch_send_read_and_sharing(
                     json={"user_id": "__public__", "level": 1},
                 )
                 assert shared.status_code == 200, shared.text
+                configure("SHARED_OWNER_TASK", [{"text": "SHARED_OWNER_RESULT"}])
                 configure(
                     "MANAGER_SEND_READ_CREATE_MANAGED_BLOCK",
                     [
@@ -396,7 +399,7 @@ def test_private_manager_launch_send_read_and_sharing(
                             "tool_calls": [
                                 tool(
                                     "sys_session_message",
-                                    {"session_id": worker, "message": "MUST_NOT_DELIVER"},
+                                    {"session_id": worker, "message": "SHARED_OWNER_TASK"},
                                     "blocked",
                                 )
                             ]
@@ -407,7 +410,68 @@ def test_private_manager_launch_send_read_and_sharing(
                 send(manager, "MANAGER_SEND_READ_CREATE_MANAGED_BLOCK")
                 wait_text(manager, "MANAGER_BLOCKED")
                 assert "MUST_NOT_DELIVER" not in json.dumps(items(worker))
-                assert "Shared sessions cannot" in json.dumps(get_mock_requests(mock))
+                wait_text(worker, "SHARED_OWNER_RESULT")
+                for session in (manager, worker):
+                    response = client.put(
+                        f"/v1/sessions/{session}/permissions",
+                        json={"user_id": "pat@example.test", "level": 2},
+                    )
+                    assert response.status_code == 200, response.text
+                configure(
+                    "MANAGER_SEND_READ_CREATE_MANAGED_BLOCK_COLLABORATOR_DELEGATION",
+                    [
+                        {
+                            "tool_calls": [
+                                tool(
+                                    "sys_session_message",
+                                    {"session_id": worker, "message": "PAT_MUST_NOT_DELEGATE"},
+                                    "collaborator-message",
+                                )
+                            ]
+                        },
+                        {
+                            "tool_calls": [
+                                tool(
+                                    "sys_session_create",
+                                    {"agent_id": agent, "placement": "same_host"},
+                                    "collaborator-create",
+                                )
+                            ]
+                        },
+                        {"text": "COLLABORATOR_FINISHED"},
+                    ],
+                )
+                send(
+                    manager,
+                    "MANAGER_SEND_READ_CREATE_MANAGED_BLOCK_COLLABORATOR_DELEGATION",
+                    actor="pat@example.test",
+                )
+                wait_text(manager, "COLLABORATOR_FINISHED")
+                for call_id in ("collaborator-message", "collaborator-create"):
+                    assert "verified owner execution" in json.dumps(tool_results(call_id))
+                assert "PAT_MUST_NOT_DELEGATE" not in json.dumps(items(worker))
+                configure(
+                    "MANAGER_SEND_READ_CREATE_MANAGED_BLOCK_COLLABORATOR_DELEGATION_FRESH_OWNER",
+                    [
+                        {
+                            "tool_calls": [
+                                tool(
+                                    "sys_session_message",
+                                    {"session_id": worker, "message": "FRESH_OWNER_DELEGATED"},
+                                    "fresh-owner-message",
+                                )
+                            ]
+                        },
+                        {"text": "FRESH_OWNER_FINISHED"},
+                    ],
+                )
+                send(
+                    manager,
+                    "MANAGER_SEND_READ_CREATE_MANAGED_BLOCK_COLLABORATOR_DELEGATION_FRESH_OWNER",
+                )
+                wait_text(manager, "FRESH_OWNER_FINISHED")
+                wait_text(worker, "FRESH_OWNER_DELEGATED")
+                assert tool_payload("fresh-owner-message")["queued"] is True
 
                 configure(
                     "SCHEDULED_MANAGER_TASK",
@@ -489,7 +553,7 @@ def test_private_manager_launch_send_read_and_sharing(
                 )
                 assert bound.status_code == 200, bound.text
                 configure(
-                    "MANAGER_SEND_READ_CREATE_MANAGED_BLOCK_SIDE_CHAT",
+                    "MANAGER_SEND_READ_CREATE_MANAGED_BLOCK_COLLABORATOR_DELEGATION_FRESH_OWNER_SIDE_CHAT",
                     [
                         {
                             "tool_calls": [
@@ -497,7 +561,7 @@ def test_private_manager_launch_send_read_and_sharing(
                                     "sys_session_message",
                                     {
                                         "session_id": worker,
-                                        "message": "SIDE_CHAT_MUST_NOT_DELIVER",
+                                        "message": "SIDE_CHAT_OWNER_TASK",
                                     },
                                     "side-chat-message",
                                 )
@@ -506,9 +570,12 @@ def test_private_manager_launch_send_read_and_sharing(
                         {"text": "SIDE_CHAT_BLOCKED"},
                     ],
                 )
-                send(side_chat, "MANAGER_SEND_READ_CREATE_MANAGED_BLOCK_SIDE_CHAT")
+                send(
+                    side_chat,
+                    "MANAGER_SEND_READ_CREATE_MANAGED_BLOCK_COLLABORATOR_DELEGATION_FRESH_OWNER_SIDE_CHAT",
+                )
                 wait_text(side_chat, "SIDE_CHAT_BLOCKED")
                 assert "SIDE_CHAT_MUST_NOT_DELIVER" not in json.dumps(items(worker))
                 # Native tool results reach the model without entering the UI transcript.
-                side_chat_results = tool_results("side-chat-message")
-                assert "Shared sessions cannot" in json.dumps(side_chat_results)
+                wait_text(worker, "SIDE_CHAT_OWNER_TASK")
+                assert tool_payload("side-chat-message")["queued"] is True

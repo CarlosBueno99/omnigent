@@ -1049,6 +1049,33 @@ def register_core_routes(
                         "Sender host/workspace is invalid for independent creation",
                         code=ErrorCode.INVALID_INPUT,
                     ) from exc
+        from omnigent.db.account_authority import account_generation
+        from omnigent.runtime.requester import REQUESTER_HEADER, InputRequester
+        from omnigent.server.requester import tool_requester
+
+        if any(item.requester is not None for item in body.initial_items):
+            raise OmnigentError("Initial requester is server-owned", code=ErrorCode.FORBIDDEN)
+        input_requester = InputRequester(
+            user_id=user_id, account_generation=account_generation(user_id) if user_id else None
+        )
+        if REQUESTER_HEADER in request.headers:
+            requester_source = source
+            if requester_source is None and body.parent_session_id:
+                requester_source = await asyncio.to_thread(
+                    conversation_store.get_conversation, body.parent_session_id
+                )
+            if requester_source is None:
+                raise OmnigentError("Requester source is unavailable", code=ErrorCode.FORBIDDEN)
+            supplied_requester = tool_requester(request, requester_source)
+            assert supplied_requester is not None
+            input_requester = supplied_requester.origin
+        body.initial_items = [
+            item.model_copy(update={"requester": input_requester}) for item in body.initial_items
+        ]
+        if body.initial_input is not None:
+            body.initial_input = body.initial_input.model_copy(
+                update={"requester": input_requester}
+            )
         creation_metadata(parent_session_id=body.parent_session_id, host_type=body.host_type)
         resp, conv = await _create_session_from_existing_agent(
             conversation_store,

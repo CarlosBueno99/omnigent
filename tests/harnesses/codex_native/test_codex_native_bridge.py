@@ -51,6 +51,75 @@ from omnigent.harnesses.codex_native.bridge import (
     write_codex_config_model,
     write_policy_hook_config,
 )
+from omnigent.harnesses.codex_native.execution import CodexExecutionIdentity
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [
+        None,
+        {},
+        {"threadId": "thread"},
+        {
+            "x-codex-turn-metadata": (
+                '{"session_id":"session","thread_id":"thread","turn_id":"turn"}'
+            )
+        },
+        {"x-codex-turn-metadata": {"thread_id": "thread", "turn_id": "turn"}},
+        {"x-codex-turn-metadata": {"session_id": "session", "thread_id": "thread"}},
+        {"x-codex-turn-metadata": {"session_id": "session", "thread_id": "thread", "turn_id": ""}},
+        {
+            "x-codex-turn-metadata": {
+                "session_id": "session",
+                "thread_id": "thread",
+                "turn_id": True,
+            }
+        },
+        {
+            "x-codex-turn-metadata": {
+                "session_id": "session",
+                "thread_id": "thread",
+                "turn_id": "x" * 257,
+            }
+        },
+        {
+            "threadId": "different-thread",
+            "x-codex-turn-metadata": {
+                "session_id": "session",
+                "thread_id": "thread",
+                "turn_id": "turn",
+            },
+        },
+        {
+            "sessionId": "different-session",
+            "x-codex-turn-metadata": {
+                "session_id": "session",
+                "thread_id": "thread",
+                "turn_id": "turn",
+            },
+        },
+    ],
+)
+def test_codex_execution_identity_requires_complete_consistent_metadata(meta: object) -> None:
+    assert CodexExecutionIdentity.from_mcp_meta(meta) is None
+
+
+def test_codex_execution_identity_copies_only_provider_ids() -> None:
+    identity = CodexExecutionIdentity("native-process", "thread", "original-turn")
+    turn_metadata = {**identity.to_wire(), "model": "some-model", "requester_id": "not-authority"}
+    decoded = CodexExecutionIdentity.from_mcp_meta(
+        {
+            "threadId": identity.thread_id,
+            "sessionId": identity.session_id,
+            "callId": "call",
+            "x-codex-turn-metadata": turn_metadata,
+        }
+    )
+    turn_metadata["turn_id"] = "later-turn"
+
+    assert decoded == identity
+    assert decoded.to_wire() == identity.to_wire()
+    assert CodexExecutionIdentity.from_wire(decoded.to_wire()) == identity
 
 
 def test_codex_terminal_interactive_requires_thread_and_enabled_composer(
@@ -1510,3 +1579,119 @@ def test_clear_bridge_state_removes_egress_certificate_failure(tmp_path: Path) -
     clear_bridge_state(bridge_dir)
 
     assert read_certificate_failure(bridge_dir) is None
+
+
+def test_requester_registry_tracks_consumption_pending_and_delayed_calls() -> None:
+    from omnigent.harnesses.codex_native.execution import CodexExecutionIdentity
+    from omnigent.harnesses.codex_native.requester import CodexRequesterRegistry
+    from omnigent.runtime.requester import InputRequester
+
+    registry = CodexRequesterRegistry()
+    owner = InputRequester(user_id="bryan", account_generation="b1")
+    collaborator = InputRequester(user_id="pat", account_generation="p1")
+    identity = CodexExecutionIdentity("native_session", "thread", "execution")
+    first = registry.begin(owner, "thread", None)
+    items = [{"type": "userMessage", "clientId": first}]
+    turns = [{"id": "execution", "items": items}]
+    response = {
+        "result": {
+            "thread": {
+                "id": "thread",
+                "sessionId": "native_session",
+                "turns": turns,
+            }
+        }
+    }
+    original = registry.snapshot(identity, response, revision=registry.revision)
+    assert original is not None and original.origin == owner
+
+    old_revision = registry.revision
+    refused = registry.begin(collaborator, "thread", "execution")
+    assert registry.snapshot(identity, response, revision=old_revision) is None
+    pending = registry.snapshot(identity, response, revision=registry.revision)
+    assert pending is not None and pending.origin.user_id is None
+    registry.finish(refused, refused=True)
+    assert registry.snapshot(identity, response, revision=registry.revision) == original
+
+    # A start receipt is not a consumption binding: it can join the old turn.
+    raced_start = registry.begin(collaborator, "thread", None)
+    registry.finish(raced_start, refused=False)
+    pending = registry.snapshot(identity, response, revision=registry.revision)
+    assert pending is not None and pending.origin.user_id is None
+    items.append({"type": "userMessage", "clientId": raced_start})
+    mixed = registry.snapshot(identity, response, revision=registry.revision)
+    assert mixed is not None and mixed.origin.user_id is None
+    assert mixed.execution_id == original.execution_id
+
+    fresh_input = registry.begin(owner, "thread", None)
+    turns.append({"id": "fresh", "items": [{"type": "userMessage", "clientId": fresh_input}]})
+    fresh_identity = CodexExecutionIdentity("native_session", "thread", "fresh")
+    fresh = registry.snapshot(fresh_identity, response, revision=registry.revision)
+    assert fresh is not None and fresh.origin == owner
+    assert fresh.execution_id != original.execution_id
+    delayed = registry.snapshot(identity, response, revision=registry.revision)
+    assert delayed is not None and delayed.origin.user_id is None
+    assert delayed.execution_id == mixed.execution_id
+
+    # A later read of another turn must not make a stale read authorize old work.
+    items.pop()
+    stale = registry.snapshot(identity, response, revision=registry.revision)
+    assert stale is not None and stale.origin.user_id is None
+    lost = CodexRequesterRegistry().snapshot(fresh_identity, response, revision=0)
+    assert lost is not None and lost.origin.user_id is None
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "unknown_input",
+        "missing_client_id",
+        "duplicate_client_id",
+        "wrong_session",
+        "wrong_thread",
+        "missing_turn",
+        "summary",
+        "malformed_item",
+        "refused_input",
+        "copied_from_parent",
+        "wrong_expected_turn",
+    ],
+)
+def test_requester_registry_missing_or_ambiguous_evidence_is_unknown(fault: str) -> None:
+    from omnigent.harnesses.codex_native.execution import CodexExecutionIdentity
+    from omnigent.harnesses.codex_native.requester import CodexRequesterRegistry
+    from omnigent.runtime.requester import InputRequester
+
+    registry = CodexRequesterRegistry()
+    identity = CodexExecutionIdentity("native_session", "thread", "execution")
+    client_id = registry.begin(
+        InputRequester(user_id="bryan"),
+        "parent" if fault == "copied_from_parent" else "thread",
+        "other" if fault == "wrong_expected_turn" else None,
+    )
+    items: list[Any] = [{"type": "userMessage", "clientId": client_id}]
+    turn: dict[str, Any] = {"id": "execution", "items": items, "itemsView": "full"}
+    thread: dict[str, Any] = {"id": "thread", "sessionId": "native_session", "turns": [turn]}
+    match fault:
+        case "unknown_input":
+            items.append({"type": "userMessage", "clientId": "other"})
+        case "missing_client_id":
+            items[0].pop("clientId")
+        case "duplicate_client_id":
+            items.append(dict(items[0]))
+        case "wrong_session":
+            thread["sessionId"] = "other"
+        case "wrong_thread":
+            thread["id"] = "other"
+        case "missing_turn":
+            turn["id"] = "other"
+        case "summary":
+            turn["itemsView"] = "summary"
+        case "malformed_item":
+            items.append(None)
+        case "refused_input":
+            registry.finish(client_id, refused=True)
+    result = registry.snapshot(
+        identity, {"result": {"thread": thread}}, revision=registry.revision
+    )
+    assert result is None or result.origin.user_id is None

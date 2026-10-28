@@ -1128,6 +1128,7 @@ async def test_connected_host_dispatch_uses_resolved_local_owner(
 
     async def _dispatch_session_event_to_runner(*args: Any, **kwargs: Any) -> None:
         captured["agent_revision"] = kwargs.get("agent_revision")
+        captured["requester"] = args[2].requester
 
     monkeypatch.setattr(host_launch, "resolve_host_launch", _resolve_host_launch)
     monkeypatch.setattr(sessions_routes, "_launch_runner_on_host", _launch_runner_on_host)
@@ -1157,6 +1158,8 @@ async def test_connected_host_dispatch_uses_resolved_local_owner(
     await dispatch(_FakeConversation(id="conv_1", agent_id="ag_1"), _task(user_id=None))
 
     assert captured["user_id"] == RESERVED_USER_LOCAL
+    assert captured["requester"].user_id == RESERVED_USER_LOCAL
+    assert captured["requester"].account_generation is None
     # The kickoff names the bundle it runs, so the runner sees a later reinstall.
     assert captured["agent_revision"] == "ag_1/rev1"
 
@@ -1814,6 +1817,7 @@ async def test_managed_fire_saves_prompt_then_launches_fresh_sandbox(
     assert len({saved["session_id"] for saved in startup.enqueued}) == 2
     for saved in startup.enqueued:
         assert saved["user_id"] == RESERVED_USER_LOCAL
+        assert saved["event"].requester.user_id == RESERVED_USER_LOCAL
         assert saved["event"].data["content"] == [{"type": "input_text", "text": "do the thing"}]
         assert saved["headers"].get("x-omnigent-background-session-titles") == "on"
     for call in managed_launch.await_args_list:

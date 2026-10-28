@@ -203,6 +203,13 @@ from omnigent.runtime.prompt import (
     build_instructions_nullable,
     raw_author_instructions,
 )
+from omnigent.runtime.requester import (
+    REQUESTER_FIELD,
+    ExecutionRequester,
+    InputRequester,
+    ToolRequester,
+    current_tool_requester,
+)
 from omnigent.server.schemas import (
     BackgroundSessionTitleRequest,
     BackgroundSessionTitleResponse,
@@ -653,6 +660,7 @@ class TurnDispatch:
     agent_version: int | None = None
     spawn_env: dict[str, str] | None = None
     client_side_tool_names: frozenset[str] = frozenset()
+    requester: InputRequester | None = None
 
 
 @dataclasses.dataclass
@@ -1409,6 +1417,7 @@ def create_runner_app(
     app.state.native_terminal_ensure_locks = _native_terminal_ensure_locks
     _repl_terminal_ensure_locks: dict[str, asyncio.Lock] = {}
     _active_turns: dict[str, asyncio.Task[None] | None] = {}
+    _execution_requesters: dict[str, ExecutionRequester] = {}
     app.state.active_turns = _active_turns
     # Conversations whose claude-sdk `/compact` published an up-front
     # `response.compaction.in_progress`. Used to (a) swallow the executor's own
@@ -3438,6 +3447,7 @@ def create_runner_app(
         await mcp_execution_registry.cancel_session(session_id)
         _session_message_buffers.pop(session_id, None)
         _live_response_id.pop(session_id, None)
+        _execution_requesters.pop(session_id, None)
         # Clear all desync/turn state so a recreated same-id session starts clean.
         _turn_bind_epoch.pop(session_id, None)
         _recovery_turn_ids.pop(session_id, None)
@@ -3909,6 +3919,7 @@ def create_runner_app(
         The two stores represent one fact; clearing only one leaves the idle reaper stuck.
         """
         _live_response_id.pop(conv_id, None)
+        _execution_requesters.pop(conv_id, None)
         if process_manager is not None:
             process_manager.clear_in_flight(conv_id)
 
@@ -4450,7 +4461,11 @@ def create_runner_app(
                             "content": body.get("content", []),
                         }
                     )
-                next_body = all_bodies[-1]
+                next_body = dict(all_bodies[-1])
+                requesters = ExecutionRequester(InputRequester.from_body(all_bodies[0]))
+                for queued_body in all_bodies[1:]:
+                    requesters.consume(InputRequester.from_body(queued_body))
+                next_body[REQUESTER_FIELD] = requesters.origin.model_dump()
 
             if _is_sdk_compact_body(next_body):
                 # This buffered /compact now dispatches as its own turn. Mirror the
@@ -4489,11 +4504,12 @@ def create_runner_app(
         notice: str,
         child_id: str,
         created_by: str | None,
+        requester: InputRequester | None = None,
         *,
         is_rewake: bool = False,
     ) -> None:
         delivered = await _deliver_subagent_wake_post(
-            server_client, parent_id, notice, created_by=created_by
+            server_client, parent_id, notice, created_by=created_by, requester=requester
         )
         if delivered:
             _stranded_wake_parents.discard(parent_id)
@@ -4543,6 +4559,7 @@ def create_runner_app(
                 notice,
                 entry.child_session_id,
                 entry.created_by,
+                entry.requester,
                 is_rewake=is_rewake,
             )
         )
@@ -4812,12 +4829,27 @@ def create_runner_app(
             name: str,
             arguments: _JsonObject,
         ) -> _JsonObject:
-            result_str = await ProxyMcpManager(
-                _captured_session_id,
-                server_client,
-                publish_event=_publish_event,
-                execution_registry=mcp_execution_registry,
-            ).call_tool(relay_spec, name, arguments)
+            from omnigent.harnesses.codex_native.execution import current_codex_execution
+            from omnigent.runner.native_requester import resolve_codex_requester
+
+            execution = current_codex_execution.get()
+            requester = (
+                await resolve_codex_requester(process_manager, _captured_session_id, execution)
+                if execution is not None
+                else None
+            )
+            if requester is None and _session_harness_name(_captured_session_id) == "codex-native":
+                requester = ExecutionRequester(InputRequester()).snapshot()
+            requester_token = current_tool_requester.set(requester)
+            try:
+                result_str = await ProxyMcpManager(
+                    _captured_session_id,
+                    server_client,
+                    publish_event=_publish_event,
+                    execution_registry=mcp_execution_registry,
+                ).call_tool(relay_spec, name, arguments)
+            finally:
+                current_tool_requester.reset(requester_token)
             try:
                 return cast(_JsonObject, _json.loads(result_str))
             except _json.JSONDecodeError:
@@ -5179,6 +5211,7 @@ def create_runner_app(
 
         ctx = TurnDispatch(
             agent_id=_dispatched_agent_id,
+            requester=InputRequester.from_body(msg_body),
             harness=harness_name,
             spawn_env=spawn_env,
             has_mcp_servers=(
@@ -5192,6 +5225,7 @@ def create_runner_app(
             "type": "message",
             "role": "user",
             "model": msg_body.get("model", ""),
+            REQUESTER_FIELD: InputRequester.from_body(msg_body).model_dump(),
         }
         # The routed model rides in-band on the forwarded message. This body is
         # built field by field (not copied), so it must be threaded explicitly:
@@ -5504,6 +5538,12 @@ def create_runner_app(
         conv_id: str,
         dispatch: TurnDispatch | None = None,
     ) -> Response:
+        execution_requester = ExecutionRequester(
+            dispatch.requester
+            if dispatch is not None and dispatch.requester is not None
+            else InputRequester.from_body(body)
+        )
+        _execution_requesters[conv_id] = execution_requester
         manager = cast(HarnessProcessManager, process_manager)
         harness_name = dispatch.harness if dispatch else cast(str | None, body.get("harness"))
         spawn_env = (
@@ -5981,6 +6021,10 @@ def create_runner_app(
                                     continue
                                 if _evt_type == "injection.consumed":
                                     _inj_id = event.get("injection_id")
+                                    if isinstance(_inj_id, str):
+                                        execution_requester.finish_injection(
+                                            _inj_id, consumed=True
+                                        )
                                     _buf = _session_message_buffers.get(conv_id)
                                     if _inj_id is not None and _buf:
                                         _consumed = [
@@ -6137,10 +6181,20 @@ def create_runner_app(
                                             publish_event=_publish_event,
                                             execution_registry=mcp_execution_registry,
                                         )
+                                        _tool_requester = execution_requester.snapshot()
+                                        _requester_item = event.get("item")
+                                        if (
+                                            isinstance(_requester_item, dict)
+                                            and REQUESTER_FIELD in _requester_item
+                                        ):
+                                            _tool_requester = ToolRequester.model_validate(
+                                                _requester_item[REQUESTER_FIELD]
+                                            )
                                         _dispatch_tasks.append(
                                             _asyncio.create_task(
                                                 dispatch_tool_locally(
                                                     tool_name=tool_name,
+                                                    requester=_tool_requester,
                                                     call_id=get_call_id(event),
                                                     arguments=get_arguments(event),
                                                     response_id=_response_id,
@@ -6614,6 +6668,12 @@ def create_runner_app(
                         [],
                     ).append(message_body)
                     if _can_forward and process_manager is not None:
+                        _requester = _execution_requesters.get(conversation_id)
+                        if _requester is not None:
+                            _requester.begin_injection(
+                                str(message_body["injection_id"]),
+                                InputRequester.from_body(message_body),
+                            )
                         try:
                             _hc = await process_manager.get_client(conversation_id, "any")
                             _injection_resp = await _hc.post(
@@ -6622,6 +6682,10 @@ def create_runner_app(
                                 timeout=5.0,
                             )
                             if _injection_resp.status_code >= 400:
+                                if _requester is not None:
+                                    _requester.finish_injection(
+                                        str(message_body["injection_id"]), consumed=False
+                                    )
                                 _logger.warning(
                                     "post_session_events: mid-turn injection forward rejected "
                                     "conv=%s status=%s body=%s",

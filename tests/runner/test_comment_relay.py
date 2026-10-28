@@ -577,9 +577,13 @@ async def test_claude_launch_starts_the_comment_relay(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "native_lookup", ["legacy", "owner", "unknown", "bad_auth", "old_harness", "missing_locator"]
+)
 async def test_relay_executor_routes_through_omnigent_in_omnigent_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    native_lookup: str,
 ) -> None:
     """Route relay tool execution through Omnigent ``/mcp`` for policy enforcement.
 
@@ -590,6 +594,26 @@ async def test_relay_executor_routes_through_omnigent_in_omnigent_mode(
     on these relay tools was previously bypassed; this test pins the fix.
     """
     import omnigent.harnesses.claude_native.bridge as _bridge_mod
+    from omnigent.harnesses.codex_native.execution import (
+        CodexExecutionIdentity,
+        current_codex_execution,
+    )
+    from omnigent.runtime.harnesses._scaffold import HarnessApp
+    from omnigent.runtime.requester import (
+        REQUESTER_HEADER,
+        ExecutionRequester,
+        InputRequester,
+        ToolRequester,
+        current_tool_requester,
+    )
+
+    identity = CodexExecutionIdentity("provider-session", "thread", "turn")
+    origin = ExecutionRequester(InputRequester(user_id="bryan@example.test")).snapshot()
+
+    class _NativeHarness(HarnessApp):
+        async def native_tool_requester(self, execution: dict[str, str]) -> ToolRequester | None:
+            assert execution == identity.to_wire()
+            return origin if native_lookup == "owner" else None
 
     # Records every POST sent to the fake Omnigent server.
     ap_mcp_posts: list[dict[str, Any]] = []
@@ -612,7 +636,7 @@ async def test_relay_executor_routes_through_omnigent_in_omnigent_mode(
             """
             del timeout
             req = httpx.Request("GET", f"http://ap-server{url}")
-            return httpx.Response(200, json={"labels": {}}, request=req)
+            return httpx.Response(200, json={"labels": {}, "agent_id": "relay-agent"}, request=req)
 
         async def post(
             self,
@@ -630,7 +654,7 @@ async def test_relay_executor_routes_through_omnigent_in_omnigent_mode(
             :returns: 200 response with a fixed MCP result.
             """
             del timeout
-            ap_mcp_posts.append({"url": url, "json": json})
+            ap_mcp_posts.append({"url": url, "json": json, "headers": headers or {}})
             req = httpx.Request("POST", f"http://ap-server{url}")
             return httpx.Response(
                 200,
@@ -665,9 +689,31 @@ async def test_relay_executor_routes_through_omnigent_in_omnigent_mode(
     session_id = f"conv_{uuid.uuid4().hex[:12]}"
     bridge_dir = bridge_dir_for_bridge_id(session_id)
     prepare_bridge_dir(session_id, workspace=tmp_path)
+    harness_app = FastAPI() if native_lookup == "old_harness" else _NativeHarness().build()
+    harness_app.state.conversation_id = session_id
+    harness_app.state.harness_auth_token = "control-test-token"
+    harness_client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=harness_app),
+        base_url="http://harness",
+        headers={
+            "Authorization": "Bearer wrong"
+            if native_lookup == "bad_auth"
+            else "Bearer control-test-token"
+        },
+    )
+
+    async def resolve_spec(agent_id: str, sid: str) -> AgentSpec:
+        assert (agent_id, sid) == ("relay-agent", session_id)
+        return AgentSpec(
+            spec_version=1,
+            name="codex-relay",
+            executor=ExecutorSpec(type="codex-native"),
+        )
 
     try:
         app = create_runner_app(
+            process_manager=_FakeProcessManager(harness_client),  # type: ignore[arg-type]
+            spec_resolver=resolve_spec if native_lookup == "missing_locator" else None,
             resource_registry=_StubResourceRegistry(tmp_path),
             server_client=_FakeApClient(),  # type: ignore[arg-type]  # duck-typed for test
         )
@@ -690,7 +736,14 @@ async def test_relay_executor_routes_through_omnigent_in_omnigent_mode(
         executor = captured_executors[0]
 
         # Call the relay executor directly (simulates Claude Code invoking list_comments).
-        result = await executor("list_comments", {"status": "pending"})
+        locator_token = current_codex_execution.set(
+            identity if native_lookup not in {"legacy", "missing_locator"} else None
+        )
+        try:
+            result = await executor("list_comments", {"status": "pending"})
+        finally:
+            current_codex_execution.reset(locator_token)
+        assert current_tool_requester.get() is None
 
         # In Omnigent mode the executor must have POSTed a tools/call JSON-RPC to the
         # Omnigent server's /mcp endpoint, not called the direct comment handler.
@@ -706,6 +759,14 @@ async def test_relay_executor_routes_through_omnigent_in_omnigent_mode(
             "No tools/call request reached the Omnigent /mcp endpoint. "
             "The relay executor is bypassing ProxyMcpManager and policy enforcement."
         )
+        if native_lookup == "legacy":
+            assert REQUESTER_HEADER not in mcp_call["headers"]
+        else:
+            resolved = ToolRequester.model_validate_json(mcp_call["headers"][REQUESTER_HEADER])
+            if native_lookup == "owner":
+                assert resolved == origin
+            else:
+                assert resolved.origin.user_id is None
         # Tool name and arguments must be forwarded verbatim.
         assert mcp_call["json"]["params"]["name"] == "list_comments", (
             "Wrong tool name forwarded; policy would be evaluated against the wrong tool."
@@ -720,6 +781,7 @@ async def test_relay_executor_routes_through_omnigent_in_omnigent_mode(
         # The Omnigent response's text content must be parsed back to a dict.
         assert result == {"items": []}, f"Expected parsed Omnigent response dict, got {result!r}."
     finally:
+        await harness_client.aclose()
         shutil.rmtree(bridge_dir, ignore_errors=True)
 
 

@@ -12,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from unittest.mock import ANY
 
 import pytest
 from websockets.asyncio.server import ServerConnection, serve
@@ -417,11 +418,14 @@ class _OneInjectionCtx:
     """Turn context that hands the adapter one live injection and records what it emits."""
 
     def __init__(self, injection: Any) -> None:
+        from omnigent.runtime.requester import ExecutionRequester, InputRequester
+
         self._injection: Any = injection
         self.emitted: list[Any] = []
         self.response_id = "resp_injection"
         self.session_id = "session_injection"
         self.cancelled = asyncio.Event()
+        self.requester = ExecutionRequester(InputRequester())
 
     async def next_injection(self, timeout: float | None = None) -> Any:
         del timeout
@@ -496,7 +500,11 @@ def test_draining_delivery_reconnects_and_accepts_input_once(
     assert draining_client.connections == 2
     assert draining_client.closes == 2
     assert len(draining_client.requests) == 2
-    assert draining_client.requests[0] == draining_client.requests[1]
+    first_method, first_params = draining_client.requests[0]
+    second_method, second_params = draining_client.requests[1]
+    assert first_method == second_method
+    assert first_params == {**second_params, "clientUserMessageId": ANY}
+    assert first_params["clientUserMessageId"] != second_params["clientUserMessageId"]
     state = read_bridge_state(tmp_path)
     assert state is not None
     assert state.active_turn_id == ("turn_steered" if active_turn_id else "turn_1")
@@ -828,7 +836,7 @@ async def test_native_refusal_recovers_with_real_client(
     if refusal_kind == "compacting":
         assert [request["method"] for _number, request in requests] == ["turn/steer", "turn/start"]
     else:
-        assert requests[0][1]["params"] == requests[1][1]["params"]
+        assert requests[0][1]["params"] == {**requests[1][1]["params"], "clientUserMessageId": ANY}
     assert accepted_inputs == [[{"type": "text", "text": "synthetic input"}]]
     state = read_bridge_state(tmp_path)
     assert state is not None
@@ -953,6 +961,7 @@ def test_web_started_codex_turn_returns_without_waiting_for_terminal_event(
             "turn/start",
             {
                 "threadId": "thread_123",
+                "clientUserMessageId": ANY,
                 "input": [{"type": "text", "text": "first"}],
                 "environments": [{"environmentId": "local", "cwd": str(tmp_path)}],
             },
@@ -1000,6 +1009,7 @@ def test_goal_command_sets_goal_before_starting_objective_turn(
             "turn/start",
             {
                 "threadId": "thread_123",
+                "clientUserMessageId": ANY,
                 "input": [{"type": "text", "text": "Finish the implementation and tests"}],
                 "environments": [{"environmentId": "local", "cwd": str(tmp_path)}],
             },
@@ -1123,6 +1133,7 @@ def test_system_prompt_does_not_override_collaboration_mode(
             "turn/start",
             {
                 "threadId": "thread_123",
+                "clientUserMessageId": ANY,
                 "input": [{"type": "text", "text": "hello"}],
                 "environments": [{"environmentId": "local", "cwd": str(tmp_path)}],
             },
@@ -1613,6 +1624,7 @@ async def test_executor_reaches_app_server_over_ws_transport(
         {
             "threadId": "thread_123",
             "expectedTurnId": "turn_active",
+            "clientUserMessageId": ANY,
             "input": [{"type": "text", "text": "steer me"}],
         },
     ) in _FakeCodexNativeClient.requests
@@ -2251,6 +2263,7 @@ def test_web_model_pick_applied_via_thread_settings_update(
             "turn/start",
             {
                 "threadId": "thread_123",
+                "clientUserMessageId": ANY,
                 "input": [{"type": "text", "text": "hello"}],
                 "environments": [{"environmentId": "local", "cwd": str(tmp_path)}],
             },
@@ -2542,6 +2555,7 @@ def test_no_settings_update_when_overrides_unset(
             "turn/start",
             {
                 "threadId": "thread_123",
+                "clientUserMessageId": ANY,
                 "input": [{"type": "text", "text": "a"}],
                 "environments": [{"environmentId": "local", "cwd": str(tmp_path)}],
             },
@@ -3681,3 +3695,148 @@ def test_interrupt_reraises_unrelated_rejections(
     assert state is not None and state.active_turn_id == "turn_active", (
         f"an unexplained rejection must not clear the recorded turn; bridge={state!r}"
     )
+
+
+@pytest.mark.parametrize("restore_scope", [False, True], ids=["changed_scope", "restored_scope"])
+async def test_native_requester_round_trip_over_app_server_transport(
+    tmp_path: Path, restore_scope: bool
+) -> None:
+    from omnigent.harnesses.codex_native.execution import CodexExecutionIdentity
+    from omnigent.runtime.requester import InputRequester
+
+    owner = InputRequester(user_id="bryan", account_generation="generation-b")
+    collaborator = InputRequester(user_id="pat", account_generation="generation-p")
+    identity = CodexExecutionIdentity("native_session", "thread_123", "actual_turn")
+    turns: list[dict[str, Any]] = []
+    actual_turn = identity.turn_id
+    pending_users: list[str | None] = []
+    executor = CodexNativeExecutor(tmp_path)
+    hold_thread_read = False
+    thread_read_started = asyncio.Event()
+    release_thread_read = asyncio.Event()
+
+    async def handle(websocket: ServerConnection) -> None:
+        async for raw in websocket:
+            request = json.loads(raw)
+            if "id" not in request:
+                continue
+            method, params = request["method"], request.get("params", {})
+            response: dict[str, Any] = {"id": request["id"], "result": {}}
+            if method in {"turn/start", "turn/steer"}:
+                # Resolve over a second connection before the provider consumes input.
+                if turns:
+                    pending = await executor.resolve_tool_requester(identity)
+                    assert pending is not None
+                    pending_users.append(pending.origin.user_id)
+                client_id = params["clientUserMessageId"]
+                assert len(client_id) == 32 and "requester" not in params
+                assert params["input"] == [{"type": "text", "text": "identical text"}]
+                if not any(turn["id"] == actual_turn for turn in turns):
+                    turns.append({"id": actual_turn, "items": [], "itemsView": "full"})
+                target = next(turn for turn in turns if turn["id"] == actual_turn)
+                target["items"].append({"type": "userMessage", "clientId": client_id})
+                if method == "turn/steer":
+                    assert params["expectedTurnId"] == actual_turn
+                    response["result"] = {"turnId": actual_turn}
+                else:
+                    response["result"] = {"turn": {"id": "submission_receipt"}}
+            elif method == "thread/read":
+                assert params == {"threadId": identity.thread_id, "includeTurns": True}
+                response["result"] = {
+                    "thread": {
+                        "id": identity.thread_id,
+                        "sessionId": identity.session_id,
+                        "turns": turns,
+                    }
+                }
+                if hold_thread_read:
+                    thread_read_started.set()
+                    await release_thread_read.wait()
+            await websocket.send(json.dumps(response))
+
+    async def start(origin: InputRequester) -> None:
+        events = [
+            event
+            async for event in executor.run_turn(
+                [{"role": "user", "content": "identical text"}],
+                [],
+                "",
+                ExecutorConfig(requester=origin),
+            )
+        ]
+        assert [type(event) for event in events] == [TurnComplete]
+
+    async with serve(handle, "127.0.0.1", 0) as server, asyncio.timeout(10):
+        _seed_bridge(tmp_path)
+        state = read_bridge_state(tmp_path)
+        assert state is not None
+        state = replace(state, socket_path=f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}")
+        write_bridge_state(tmp_path, state)
+        await start(owner)
+        original = await executor.resolve_tool_requester(identity)
+        assert original is not None and original.origin == owner
+        assert (
+            await executor.resolve_tool_requester(replace(identity, thread_id="native_child"))
+            is None
+        )
+        # Pending input restricts the target until consumption or definitive refusal.
+        registry = executor._requesters_for_state(state)
+        pending_input = registry.begin(collaborator, identity.thread_id, identity.turn_id)
+        pending = await executor.resolve_tool_requester(identity)
+        assert pending is not None and pending.origin.user_id is None
+        registry.finish(pending_input, refused=False)
+        acknowledged = await executor.resolve_tool_requester(identity)
+        assert acknowledged is not None and acknowledged.origin.user_id is None
+        registry.finish(pending_input, refused=True)
+        restored = await executor.resolve_tool_requester(identity)
+        assert restored == original
+        assert (
+            await executor.resolve_tool_requester(replace(identity, turn_id="submission_receipt"))
+            is None
+        )
+        write_bridge_state(tmp_path, state)
+        await start(collaborator)
+        mixed = await executor.resolve_tool_requester(identity)
+        assert mixed is not None and mixed.origin.user_id is None
+        assert mixed.execution_id == original.execution_id
+
+        actual_turn = "fresh_owner_turn"
+        write_bridge_state(tmp_path, state)
+        await start(owner)
+        fresh_identity = replace(identity, turn_id=actual_turn)
+        fresh = await executor.resolve_tool_requester(fresh_identity)
+        assert fresh is not None and fresh.origin == owner
+        assert fresh.execution_id != original.execution_id
+        delayed = await executor.resolve_tool_requester(identity)
+        assert delayed is not None and delayed.origin.user_id is None
+        assert delayed.execution_id == mixed.execution_id
+        write_bridge_state(tmp_path, replace(state, active_turn_id=actual_turn))
+        assert await executor.enqueue_session_message(
+            "key", "identical text", requester=collaborator
+        )
+        steered = await executor.resolve_tool_requester(fresh_identity)
+        assert steered is not None and steered.origin.user_id is None
+        assert pending_users == [None, None, None]
+        replacement = CodexNativeExecutor(tmp_path)
+        lost = await replacement.resolve_tool_requester(fresh_identity)
+        assert lost is not None and lost.origin.user_id is None
+
+        actual_turn = "owner_before_replacement"
+        write_bridge_state(tmp_path, state)
+        await start(owner)
+        race_identity = replace(identity, turn_id=actual_turn)
+        before_replacement = await executor.resolve_tool_requester(race_identity)
+        assert before_replacement is not None and before_replacement.origin == owner
+        hold_thread_read = True
+        async with asyncio.TaskGroup() as tasks:
+            stale_lookup = tasks.create_task(executor.resolve_tool_requester(race_identity))
+            await thread_read_started.wait()
+            moved = replace(state, thread_id="replacement_thread")
+            write_bridge_state(tmp_path, moved)
+            executor._requesters_for_state(moved)
+            if restore_scope:
+                # Returning to the same scope must not revive the discarded registry.
+                write_bridge_state(tmp_path, state)
+                executor._requesters_for_state(state)
+            release_thread_read.set()
+        assert stale_lookup.result() is None

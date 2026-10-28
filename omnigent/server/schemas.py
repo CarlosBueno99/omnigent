@@ -32,6 +32,7 @@ from omnigent.entities import (
     ConversationItem,
 )
 from omnigent.inner.native_attachments import reject_authored_framework_notices
+from omnigent.runtime.requester import InputRequester
 
 # ── Shared ──────────────────────────────────────────────────────
 
@@ -1394,6 +1395,7 @@ class SessionEventInput(BaseModel):
     model_override: str | None = None
     tools: list[dict[str, Any]] | None = None
     created_by: str | None = None
+    requester: SkipJsonSchema[InputRequester | None] = None
 
     @field_validator("data")
     @classmethod
@@ -1413,6 +1415,8 @@ class SessionStartupInput(SessionEventInput):
             raise ValueError("initial_input must be a message or skill invocation")
         if self.created_by is not None:
             raise ValueError("initial_input attribution comes from the authenticated creator")
+        if self.requester is not None:
+            raise ValueError("initial_input requester comes from the authenticated creator")
         if self.type == "message":
             message = MessageData.model_validate(self.data)
             if message.role != "user":

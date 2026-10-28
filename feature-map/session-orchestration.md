@@ -1,13 +1,18 @@
 # Session orchestration
 
-An agent in a private session can send work to another session owned by the
+An owner-authorized agent can send work to another session owned by the
 same user, then read its status/history. It can also create private top-level
 workers on its host or a new managed sandbox. This is enabled by default, with
 `-session_orchestration` in `OMNIGENT_FEATURES` as a server kill switch.
 
+Shared-source support in this branch is a prototype. OpenAI Agents SDK and
+Codex-native web Chat have process and browser evidence. Native terminal input,
+provider-native helpers, Claude requester binding and legacy compatibility
+still require work before rollout.
+
 ## Sub-features
 
-- `message`: private sender, same owner and workspace; shared destinations are
+- `message`: owner-authorized sender, same owner and workspace; shared destinations are
   allowed and their readers see the message. Normal queue/steering applies.
 - `read-results`: the manager reads history/status; replies are not forwarded.
   Existing owner-authorized reads remain allowed when a session is shared.
@@ -22,14 +27,16 @@ workers on its host or a new managed sandbox. This is enabled by default, with
 - `create`: `sys_session_create` retains child creation by default; `same_host`
   and `managed` placements create independent, initially private sessions.
   Managed creation uses the server's configured default sandbox provider.
-- `sharing`: sharing the sender blocks subsequent sends and independent creates.
-  Side chats and their children also inherit restrictions from the source chain.
-  Accepted work, including tasks saved while a worker starts, continues. Making
-  the sender private restores eligibility.
+- `sharing`: a verified owner execution may delegate from a shared sender.
+  Collaborators may chat, but cannot authorize peer sends or independent workers.
+  Consumed collaborator steering blocks further delegation in that execution;
+  only a fresh owner execution restores it. Revoking or reducing a collaborator's
+  access does not change queued input's requester. Side chats and children must
+  preserve this restriction. Already accepted worker work continues.
 - `scheduled`: scheduled runs, their forks and children use the new sends and
   independent creates like any private session their owner owns, so an
   automation can message the owner's other sessions or start workers.
-- `refusal`: disabled flag, another owner, shared sender or wrong runner binding
+- `refusal`: disabled flag, another owner, unverified shared sender or wrong runner binding
   refuses the operation. Unsupported servers reject independent creation without
   falling back to ordinary creation. Timeouts, 408/429/5xx responses and invalid
   acknowledgements are uncertain and must not auto-retry. After uncertain
@@ -69,13 +76,18 @@ the header states are covered by `web/src/shell/ChatHeader.test.tsx`.
   tests/e2e/test_private_session_orchestration.py --reruns 0` uses real local
   host, server, SDK and Codex processes with a scripted model. It submits chat
   requests over HTTP and checks send, history reads, same-host creation, and
-  sharing refusal. It also checks that unconfigured managed creation gives a clear
+  sharing behavior. Both rows check shared owner requests, collaborator refusal
+  for messaging and creation, fresh owner recovery, and owner side-chat delegation.
+  The Codex row uses web submissions with provider consumption IDs and resolves
+  each tool's retained execution through authenticated harness IPC. This does not
+  cover typed terminal input or provider-native helper delegation.
+  It also checks that unconfigured managed creation gives a clear
   refusal without creating a session. Codex and tmux are required for the native row.
   Both harnesses also exercise a server restart with the explicit kill switch:
   existing runners remain opted in, but their subsequent peer sends and independent
   creates are refused without writes; session-info reads still work.
   It also fires an owner-created schedule through the real server/host and checks
-  that the resulting worker cannot message a peer or create an independent worker.
+  that the resulting worker can message a peer and create an independent worker.
 - Component integration: `uv run --no-sync pytest
   tests/server/integration/test_session_orchestration.py --reruns 0` checks the
   authenticated routes, ownership stores, refusal matrix and managed request /
@@ -91,10 +103,26 @@ the header states are covered by `web/src/shell/ChatHeader.test.tsx`.
   and replay after sharing. Scheduled-origin tests cover sends and
   creates from a scheduled run, its full fork after schedule-history deletion,
   and its children.
-- Browser/terminal manual check: send a distinctive task to a second session;
+- Browser manual check for OpenAI Agents SDK and Codex-native Chat: own A and B, share both with Pat
+  as an editor, then send a distinctive task through A as the owner. Confirm B
+  receives it. Repeat through Pat's Chat: expect refusal and no new task in B.
+  Submit a fresh owner message and confirm delegation works again. Queue/steer
+  Pat's message during owner work, reduce Pat to read-only, and verify that old
+  work does not gain owner authority. Repeat independent worker creation and
+  check that a refused request leaves no new worker.
+- Unsupported requester paths: the current Claude-native PTY integration cannot
+  bind authenticated submissions to retained calls, including in the inspected
+  newer CLI. Its tool-use locator is transported but grants no authority. Claude
+  SDK callbacks without execution binding are also unknown. Codex terminal input
+  and provider-native helpers still lack registered consumed input. Unknown
+  callbacks cannot delegate through the new requester gate. The legacy private
+  fallback and these compatibility gaps must be resolved before shipping; the
+  prototype does not promise to preserve private delegation on every harness yet.
+- Native compatibility check for each supported requester path: send a distinctive task to a second session;
   open its Chat and confirm the source label and result. Ask the manager to
-  read it. Share the manager and repeat: the tool must report refusal and the
-  destination must contain no new task. API runs do not prove these UI actions.
+  read it. Share the manager and repeat as owner, then collaborator: only the
+  owner request may reach the destination. An unsupported shared-source path
+  must refuse. API runs do not prove these UI actions.
   Append `-session_orchestration` to the isolated server's feature settings and
   restart it, then repeat from a private manager: expect a disabled error, no new
   task and no independent worker. Read history/info to confirm reads still work.
@@ -129,24 +157,26 @@ the header states are covered by `web/src/shell/ChatHeader.test.tsx`.
   the runner; independent creation has no automatic routing fallback.
 - Independent creation uses `/v1/sessions/orchestrated`, which requires a source;
   older servers cannot silently accept the request as ordinary session creation.
-- A shared receiver can continue working but cannot message back while shared.
-- Privacy checks govern these tools. They do not confine arbitrary code holding
+- A shared receiver can continue working. A verified owner execution can send
+  another message; sharing does not add automatic completion replies.
+- Requester and ownership checks govern these tools. They do not confine arbitrary code holding
   owner credentials or sanitize shared content the manager reads.
 - The source token authenticates its runner, not an exact session within that
   runner. Runners are trusted for every session they host: another private owned
   session on the same runner can be named as the source. Stable-ID runner pools
   using allow-listed tunnel tokens are unsupported;
   this gate requires token-derived runner IDs and refuses other bindings.
-- Side chats must be private and have a private, owned, available source chain
-  to send work or create independent workers. Nested side chats and their children
-  inherit this restriction. Missing or cyclic source chains are refused. Ordinary
-  reads and incoming work remain available; making the source private restores
-  eligibility without erasing copied history.
-- Peer messages carry only task text and owner attribution. They do not forward
+- Side chats require an owned, available source chain. Verified owner executions
+  may delegate through shared chains; the legacy path requires every source to
+  be private. Nested side chats and children inherit the checks. Missing or cyclic
+  chains are refused. Sharing changes never rehabilitate a known collaborator's
+  queued input or consumed steering.
+- Peer messages carry task text, display attribution, and protected requester
+  metadata on authenticated transport. They do not forward
   per-event model/tool overrides or a caller-supplied delivery ID.
   The textual source prefix is a display hint, not an authorization credential
   or authenticated provenance. Other users can copy it into ordinary messages.
-  V1 deliberately keeps this advisory text instead of adding structured provenance.
+  Requester authority comes from the protected envelope, never this text.
 - Admission is the final source check before delivery or saving a startup task.
   A queued result means acceptance, not execution; destination policy may still
   deny the task during startup replay. Successfully queued tasks can finish after

@@ -72,6 +72,14 @@ from omnigent.harnesses.claude_native.bridge import (
     stop_hook_seen_since,
     write_tmux_target,
 )
+from omnigent.harnesses.claude_native.execution import (
+    ClaudeExecutionIdentity,
+    current_claude_execution,
+)
+from omnigent.harnesses.codex_native.execution import (
+    CodexExecutionIdentity,
+    current_codex_execution,
+)
 from omnigent.inner.datamodel import (
     CredentialProxyEntry,
     CredentialProxySpec,
@@ -79,6 +87,7 @@ from omnigent.inner.datamodel import (
     OSEnvSandboxSpec,
 )
 from omnigent.native import native_cost_popup
+from omnigent.runtime.requester import current_tool_requester
 from omnigent.util.reasoning_effort import CLAUDE_EFFORTS
 
 
@@ -6867,10 +6876,35 @@ def test_post_tools_changed_preserves_programming_errors(
         post_tools_changed(tmp_path)
 
 
+@pytest.mark.parametrize("identifier", [None, "", " ", True, 12, {}, [], "x" * 257])
+def test_claude_execution_identity_rejects_malformed_locator(identifier: object) -> None:
+    assert ClaudeExecutionIdentity.from_mcp_meta({"claudecode/toolUseId": identifier}) is None
+    assert ClaudeExecutionIdentity.from_wire({"tool_use_id": identifier}) is None
+
+
+def test_claude_execution_identity_copies_only_retained_tool_id() -> None:
+    identity = ClaudeExecutionIdentity("toolu_original")
+    meta = {
+        "claudecode/toolUseId": identity.tool_use_id,
+        "prompt_id": "not-an-execution",
+        "requester": "not-authority",
+    }
+    decoded = ClaudeExecutionIdentity.from_mcp_meta(meta)
+    meta["claudecode/toolUseId"] = "toolu_later"
+    assert decoded == identity
+    assert decoded.to_wire() == {"tool_use_id": "toolu_original"}
+    assert ClaudeExecutionIdentity.from_wire(decoded.to_wire()) == identity
+    for malformed in (None, [], "toolu_original", {}, {"prompt_id": "not-a-tool"}):
+        assert ClaudeExecutionIdentity.from_mcp_meta(malformed) is None
+        assert ClaudeExecutionIdentity.from_wire(malformed) is None
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["claude", "codex"])
 @pytest.mark.parametrize("result_kind", ["text", "images", "image_error"])
 @pytest.mark.parametrize("cancellable", [False, True])
 async def test_channel_server_relays_active_omnigent_tools(
+    provider: str,
     result_kind: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -6906,6 +6940,34 @@ async def test_channel_server_relays_active_omnigent_tools(
         text=True,
     )
     calls: list[dict[str, object]] = []
+    original_execution = (
+        ClaudeExecutionIdentity("toolu_original")
+        if provider == "claude"
+        else CodexExecutionIdentity("native-process", "thread", "original-turn")
+    )
+    next_execution = (
+        ClaudeExecutionIdentity("toolu_next")
+        if provider == "claude"
+        else CodexExecutionIdentity("native-process", "thread", "next-turn")
+    )
+    executions: list[ClaudeExecutionIdentity | CodexExecutionIdentity | None] = []
+    release_background = asyncio.Event()
+    background_tasks: list[
+        asyncio.Task[ClaudeExecutionIdentity | CodexExecutionIdentity | None]
+    ] = []
+
+    def current_execution() -> ClaudeExecutionIdentity | CodexExecutionIdentity | None:
+        if provider == "claude":
+            assert current_codex_execution.get() is None
+            return current_claude_execution.get()
+        assert current_claude_execution.get() is None
+        return current_codex_execution.get()
+
+    async def delayed_execution() -> ClaudeExecutionIdentity | CodexExecutionIdentity | None:
+        await release_background.wait()
+        assert current_tool_requester.get() is None
+        return current_execution()
+
     from PIL import Image
 
     from omnigent.runtime.mcp_tool_result import encode_mcp_image_result
@@ -6934,6 +6996,12 @@ async def test_channel_server_relays_active_omnigent_tools(
         :returns: Structured tool result.
         """
         calls.append({"name": name, "arguments": arguments})
+        executions.append(current_execution())
+        assert current_tool_requester.get() is None
+        if arguments == {"value": "hello"}:
+            background_tasks.append(asyncio.create_task(delayed_execution()))
+        if arguments == {"value": "failed"}:
+            raise RuntimeError("test dispatch failure")
         if result_kind != "text":
             return json.loads(
                 encode_mcp_image_result(image_blocks, is_error=result_kind == "image_error")
@@ -6988,30 +7056,80 @@ async def test_channel_server_relays_active_omnigent_tools(
             }
         ]
 
-        _write_json_line(
-            proc.stdin,
-            {
-                "jsonrpc": "2.0",
-                "id": 3,
-                "method": "tools/call",
-                "params": {
-                    "name": "sys_custom",
-                    "arguments": {"value": "hello"},
-                },
-            },
-        )
-        tool_result = await asyncio.to_thread(_read_json_line, proc.stdout, timeout_s=5.0)
-        assert tool_result["id"] == 3
-        if result_kind == "text":
-            text = tool_result["result"]["content"][0]["text"]
-            assert json.loads(text) == {"echo": {"value": "hello"}}
-        else:
-            assert tool_result["result"] == {
-                "content": image_blocks,
-                "isError": result_kind == "image_error",
+        expected_calls: list[dict[str, object]] = []
+        for request_id, (value, execution) in enumerate(
+            [
+                ("hello", original_execution),
+                ("next", next_execution),
+                ("late", original_execution),
+                ("failed", original_execution),
+                ("unbound", None),
+                ("forged", None),
+                ("malformed", None),
+            ],
+            start=3,
+        ):
+            arguments: dict[str, object] = {"value": value}
+            if value == "forged":
+                arguments.update(
+                    {
+                        "_meta": {"claudecode/toolUseId": "toolu_forged"},
+                        "claude_execution": {"tool_use_id": "toolu_forged"},
+                        "codex_execution": original_execution.to_wire(),
+                    }
+                )
+            params: dict[str, object] = {
+                "name": "sys_custom",
+                "arguments": arguments,
             }
-        assert calls == [{"name": "sys_custom", "arguments": {"value": "hello"}}]
+            if isinstance(execution, ClaudeExecutionIdentity):
+                params["_meta"] = {"claudecode/toolUseId": execution.tool_use_id}
+            elif isinstance(execution, CodexExecutionIdentity):
+                params["_meta"] = {
+                    "threadId": execution.thread_id,
+                    "x-codex-turn-metadata": {**execution.to_wire(), "model": "some-model"},
+                }
+            elif value == "malformed":
+                params["_meta"] = {
+                    "claudecode/toolUseId": 123,
+                    "x-codex-turn-metadata": {"turn_id": "incomplete"},
+                }
+            expected_calls.append({"name": "sys_custom", "arguments": arguments})
+            _write_json_line(
+                proc.stdin,
+                {"jsonrpc": "2.0", "id": request_id, "method": "tools/call", "params": params},
+            )
+            tool_result = await asyncio.to_thread(_read_json_line, proc.stdout, timeout_s=5.0)
+            assert tool_result["id"] == request_id
+            if value == "failed":
+                assert tool_result["result"]["isError"] is True
+                assert "test dispatch failure" in tool_result["result"]["content"][0]["text"]
+            elif result_kind == "text":
+                text = tool_result["result"]["content"][0]["text"]
+                assert json.loads(text) == {"echo": arguments}
+            else:
+                assert tool_result["result"] == {
+                    "content": image_blocks,
+                    "isError": result_kind == "image_error",
+                }
+        assert calls == expected_calls
+        assert executions == [
+            original_execution,
+            next_execution,
+            original_execution,
+            original_execution,
+            None,
+            None,
+            None,
+        ]
+        assert current_codex_execution.get() is None
+        assert current_claude_execution.get() is None
+        assert current_tool_requester.get() is None
+        release_background.set()
+        assert await asyncio.wait_for(background_tasks[0], timeout=5) == original_execution
     finally:
+        release_background.set()
+        await asyncio.gather(*background_tasks)
         if relay is not None:
             relay.close()
         proc.terminate()
