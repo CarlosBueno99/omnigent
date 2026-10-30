@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import http.client
 import subprocess
+import time
+import urllib.parse
+import webbrowser
+from pathlib import Path
 
 import pytest
 
@@ -358,20 +363,24 @@ def test_announce_conversation_url_defaults_to_stderr(
     [
         # A plain conversation link keeps host + route only.
         ("http://127.0.0.1:6767/c/conv_abc", "omnigent://127.0.0.1:6767/c/conv_abc"),
-        # Workspace mount and org selector are dropped — the desktop shell
-        # infers the scheme and discovers the mount itself.
+        # Mounts and selectors cannot be represented faithfully.
         (
             "https://ws.databricks.com/omnigent/c/conv_abc?o=123",
-            "omnigent://ws.databricks.com/c/conv_abc",
+            None,
         ),
-        # A local --base-path prefix is likewise not part of the deep link.
+        # Local base paths are not discoverable by the desktop.
         (
             "http://127.0.0.1:6767/proxy/6767/c/conv_abc",
-            "omnigent://127.0.0.1:6767/c/conv_abc",
+            None,
         ),
         # Server-home URLs (what `omnigent start` opens) map to the root link.
         ("http://127.0.0.1:6767", "omnigent://127.0.0.1:6767/"),
-        ("https://ws.databricks.com/omnigent/", "omnigent://ws.databricks.com/"),
+        ("https://ws.databricks.com/omnigent/", None),
+        ("https://example.com/", "omnigent://example.com/"),
+        ("http://localhost:6767/?o=123", None),
+        ("http://localhost:6767/#settings", None),
+        ("http://user:password@localhost:6767/", None),
+        ("http://[invalid/", None),
         # The desktop shell would infer the wrong scheme, so keep the browser URL.
         ("http://10.0.0.5:6767/c/conv_abc", None),
         ("https://localhost:6767/c/conv_abc", None),
@@ -418,7 +427,102 @@ def test_open_conversation_url_desktop_falls_back_to_browser(
     opened = browser.open_conversation_url("http://127.0.0.1:6767/c/conv_abc", desktop=True)
 
     assert opened is True
-    assert calls == [
-        ["open", "omnigent://127.0.0.1:6767/c/conv_abc"],
-        ["open", "http://127.0.0.1:6767/c/conv_abc"],
-    ]
+    assert len(calls) == 2
+    assert calls[0][0] == "open"
+    assert calls[0][1].startswith("omnigent://127.0.0.1:6767/c/conv_abc?desktop_ack=")
+    assert calls[1] == ["open", "http://127.0.0.1:6767/c/conv_abc"]
+
+
+@pytest.mark.parametrize("handler", ["current", "older", "missing", "wrong-token", "expired"])
+def test_desktop_requires_acknowledgment(monkeypatch: pytest.MonkeyPatch, handler: str) -> None:
+    """Only an app accepting this invocation suppresses the browser fallback."""
+    monkeypatch.setattr(browser, "_DESKTOP_ACK_TIMEOUT", 0.3)
+    opened: list[str] = []
+
+    def open_url(url: str) -> bool:
+        """Emulate installed handlers, including one that ignores root links."""
+        opened.append(url)
+        if not url.startswith("omnigent:"):
+            return True
+        if handler == "missing":
+            raise FileNotFoundError("no opener")
+        if handler == "older":
+            return True
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+        port, token = query["desktop_ack"][0].split(":")
+        if handler == "wrong-token":
+            token = "wrong"
+        if handler == "expired":
+            time.sleep(0.4)
+        connection = http.client.HTTPConnection("127.0.0.1", int(port), timeout=1)
+        try:
+            connection.request("POST", f"/desktop-open/{token}")
+            response = connection.getresponse()
+            assert response.status == {"current": 204, "wrong-token": 404, "expired": 410}[handler]
+            response.read()
+            if handler == "current":
+                connection.request("POST", f"/desktop-open/{token}")
+                assert connection.getresponse().status == 410
+        finally:
+            connection.close()
+        return True
+
+    monkeypatch.setattr(browser, "_open_with_platform_opener", open_url)
+    assert browser.open_conversation_url("http://localhost:6767/", desktop=True)
+    port = int(
+        urllib.parse.parse_qs(urllib.parse.urlsplit(opened[0]).query)["desktop_ack"][0].split(":")[
+            0
+        ]
+    )
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+    with pytest.raises(ConnectionRefusedError):
+        connection.connect()
+    connection.close()
+    assert len(opened) == (1 if handler == "current" else 2)
+    if handler != "current":
+        assert opened[-1] == "http://localhost:6767/"
+
+
+def test_desktop_linux_delayed_opener_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A successful BackgroundBrowser launch is insufficient to accept a link."""
+    opener = tmp_path / "xdg-open"
+    opener.write_text("#!/bin/sh\nsleep 0.1\nexit 1\n")
+    opener.chmod(0o755)
+    controller = webbrowser.BackgroundBrowser(str(opener))
+    opened: list[str] = []
+
+    def open_url(url: str) -> bool:
+        """Use the real asynchronous controller for desktop dispatch."""
+        opened.append(url)
+        if url.startswith("omnigent:"):
+            assert controller.open(url) is True
+        return True
+
+    monkeypatch.setattr(browser.sys, "platform", "linux")
+    monkeypatch.setattr(browser.webbrowser, "open", open_url)
+    monkeypatch.setattr(browser, "_DESKTOP_ACK_TIMEOUT", 0.3)
+    assert browser.open_conversation_url("http://localhost:6767/", desktop=True)
+    assert len(opened) == 2
+    assert opened[-1] == "http://localhost:6767/"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:6767/proxy/6767/",
+        "https://workspace.example.com/omnigent/?o=123",
+        "https://localhost:6767/",
+    ],
+)
+def test_desktop_preserves_unrepresentable_browser_url(
+    monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    """Fallback opens the original destination without discarding routing data."""
+    opened: list[str] = []
+    monkeypatch.setattr(
+        browser, "_open_with_platform_opener", lambda target: opened.append(target) or True
+    )
+    assert browser.open_conversation_url(url, desktop=True)
+    assert opened == [url]

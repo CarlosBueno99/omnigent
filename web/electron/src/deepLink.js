@@ -132,4 +132,35 @@ function chooseDeepLinkStrategy(state) {
   return { strategy: "consent-unknown" };
 }
 
-module.exports = { parseOmnigentDeepLink, chooseDeepLinkStrategy, DEEP_LINK_PATH_RE };
+/**
+ * Claim a CLI navigation before its browser fallback deadline. Ordinary links
+ * need no acknowledgment. The endpoint is always loopback, never a supplied URL.
+ * @param {string} raw A parsed Omnigent deep link.
+ * @returns {Promise<boolean>} Whether the desktop should handle the request.
+ */
+async function acceptCliDeepLink(raw) {
+  if (!parseOmnigentDeepLink(raw)) return false;
+  const acknowledgments = new URL(raw).searchParams.getAll("desktop_ack");
+  if (acknowledgments.length === 0) return true;
+  if (acknowledgments.length !== 1) return false;
+  const match = /^([1-9][0-9]{0,4}):([a-f0-9]{64})$/.exec(acknowledgments[0]);
+  if (!match || Number(match[1]) > 65535) return false;
+  try {
+    const response = await fetch(`http://127.0.0.1:${match[1]}/desktop-open/${match[2]}`, {
+      method: "POST",
+      redirect: "error",
+      signal: AbortSignal.timeout(2000),
+    });
+    return response.status === 204;
+  } catch {
+    // The CLI already fell back, or the acknowledgment endpoint is unavailable.
+    return false;
+  }
+}
+
+module.exports = {
+  parseOmnigentDeepLink,
+  chooseDeepLinkStrategy,
+  acceptCliDeepLink,
+  DEEP_LINK_PATH_RE,
+};

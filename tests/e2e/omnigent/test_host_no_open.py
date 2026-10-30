@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shlex
 from pathlib import Path
 
 import pexpect
@@ -58,7 +59,23 @@ def test_host_browser_preference(
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     opener = bin_dir / "open"
-    opener.write_text('#!/bin/sh\nprintf "%s\\n" "$1" >> "$OMNIGENT_TEST_BROWSER_LOG"\n')
+    opener_script = bin_dir / "opener.py"
+    opener.write_text(
+        f"#!/bin/sh\nexec {shlex.quote(str(omnigent_python))} "
+        f'{shlex.quote(str(opener_script))} "$1"\n'
+    )
+    (bin_dir / "opener.py").write_text(
+        "import http.client, os, sys, urllib.parse\n"
+        "url = urllib.parse.urlsplit(sys.argv[1])\n"
+        "with open(os.environ['OMNIGENT_TEST_BROWSER_LOG'], 'a') as log:\n"
+        "    log.write(urllib.parse.urlunsplit(url._replace(query='')) + '\\n')\n"
+        "if url.scheme == 'omnigent':\n"
+        "    port, token = urllib.parse.parse_qs(url.query)['desktop_ack'][0].split(':')\n"
+        "    connection = http.client.HTTPConnection('127.0.0.1', int(port), timeout=2)\n"
+        "    connection.request('POST', '/desktop-open/' + token)\n"
+        "    assert connection.getresponse().status == 204\n"
+        "    connection.close()\n"
+    )
     opener.chmod(0o755)
     env["OMNIGENT_TEST_BROWSER_LOG"] = str(browser_log)
     env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
