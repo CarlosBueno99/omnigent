@@ -143,7 +143,7 @@ async function acceptCliDeepLink(raw) {
   const acknowledgments = new URL(raw).searchParams.getAll("desktop_ack");
   if (acknowledgments.length === 0) return true;
   if (acknowledgments.length !== 1) return false;
-  const match = /^([1-9][0-9]{0,4}):([a-f0-9]{64})$/.exec(acknowledgments[0]);
+  const match = acknowledgments[0].match(/^([1-9][0-9]{0,4}):([a-f0-9]{64})$/);
   if (!match || Number(match[1]) > 65535) return false;
   try {
     const response = await fetch(`http://127.0.0.1:${match[1]}/desktop-open/${match[2]}`, {
