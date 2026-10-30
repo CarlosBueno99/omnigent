@@ -58,6 +58,7 @@ export interface Branding {
 
 /** Release features understood by this frontend build. */
 export type FeatureKey =
+  | "codex_plan_at_launch"
   | "usage_page"
   | "harness_install"
   | "canvas"
@@ -68,7 +69,8 @@ export type FeatureKey =
   | "workspace_content_search"
   | "grid_sessions_display_ui"
   | "automations_v2"
-  | "splittable_terminal_view_ui";
+  | "splittable_terminal_view_ui"
+  | "session_orchestration";
 
 /** Deployment-wide release-feature values advertised by the server. */
 export type FeatureValues = Record<string, boolean>;
@@ -235,6 +237,8 @@ export interface ServerInfo {
    * ``false``.
    */
   request_managed_sandbox_host_id?: boolean;
+  /** True when sandbox forks accept an explicit `workspaces` list; absent on older servers. */
+  session_fork_workspaces?: boolean;
   /**
    * True when the server stores user agents (``omnigent agent add``,
    * ``GET /v1/agents?scope=user``). Gates the picker's "my agents" source
@@ -340,6 +344,7 @@ export const FALLBACK_SERVER_INFO: ServerInfo = {
   session_search_scope: false,
   scheduled_task_session_modes: false,
   request_managed_sandbox_host_id: false,
+  session_fork_workspaces: false,
   branding: null,
 };
 
@@ -455,6 +460,7 @@ export async function resolveServerInfo(): Promise<ServerInfo> {
           session_search_scope: data.session_search_scope === true,
           scheduled_task_session_modes: data.scheduled_task_session_modes === true,
           request_managed_sandbox_host_id: data.request_managed_sandbox_host_id === true,
+          session_fork_workspaces: data.session_fork_workspaces === true,
           agent_install: data.agent_install === true,
           agent_detail: data.agent_detail === true,
           agent_config_edit: data.agent_config_edit === true,

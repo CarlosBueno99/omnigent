@@ -113,6 +113,9 @@ user-visible behavior. It then uses exactly these four H2 sections in order:
 
 ## Features
 
+- [Pull request conversations](./pull-request-conversations.md) covers inline
+  GitHub threads and replies through Workspace, composer, mobile and Canvas.
+
 - [Session orchestration](./session-orchestration.md) covers private-owner
   messaging, top-level worker creation, polling results and sharing restrictions.
 
@@ -153,8 +156,8 @@ user-visible behavior. It then uses exactly these four H2 sections in order:
   custom-agent targets, fork access checks, archive, reconnect, and resume.
 - [Video recordings](./video-rendering.md) covers inline chat playback, remote
   recording links, file previews, and download fallbacks.
-- [Tool calls in chat](./tool-calls.md) covers tool-call rows, their result
-  lines, the expanded field and Raw views, and tool-run folding.
+- [Tool calls in chat](./tool-calls.md) covers tool-call rows and their edit
+  counts, the expanded field, error and Raw views, and tool-run folding.
 
 - [GitLab merge requests](./gitlab.md) covers the shared MR panel, composer,
   Canvas links, and native tracking.
@@ -198,8 +201,8 @@ map an area, remove it here in the same change.
 - Branding and base-path deploys: `tests/e2e_ui/branding/`, `tests/e2e_ui/base_path/`
 - Hotkeys: `tests/e2e_ui/hotkeys/`
 - Message rendering: `tests/e2e_ui/messages/` (only per-harness render parity,
-  Claude shell-command settlement, refused-delivery persistence, and tool-run
-  folding are mapped)
+  Claude and Codex shell-command settlement, refused-delivery persistence, and
+  tool-run folding are mapped)
 - Mobile layout: `tests/e2e_ui/mobile/` (only composer labels, the composer
   after an unacknowledged send, sidebar rename under the keyboard, and
   terminal touch scroll are mapped)
