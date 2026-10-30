@@ -99,8 +99,8 @@ be able to write resources without a separate Omnigent account.
 **CLI sign-in:** `omnigent login <server-url>`.
 
 **Host:** `omnigent host <server-url>` (or `--server`), `omnigent host ""` for a
-local server, `--background`, `--no-open`, `--open-in-desktop`,
-`--non-interactive`, and the
+local server, `--background`, `--no-open`, `--open-in-desktop` (or
+`OMNIGENT_HOST_OPEN_IN_DESKTOP=1`), `--non-interactive`, and the
 management commands `status`, `stop`, `stop-session`, `reset-id`, `enable`,
 and `disable`. With `--open-in-desktop`, a supported desktop app accepts
 the request before navigating or asking for consent. If it cannot accept within

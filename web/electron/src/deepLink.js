@@ -17,12 +17,7 @@
 const { defaultSchemeFor } = require("./url");
 
 /**
- * v1 accepted SPA paths. `/c/<conversationId>` — a single path segment after
- * `/c/`, with an optional trailing slash — or the server-home root `/`, which
- * `omnigent start` opens. Anything else (other routes, nested paths, empty
- * id) is dropped silently: an unrecognized deep link must never crash or
- * mis-navigate, and the SPA's own router stays the authority on what a valid
- * conversation id is.
+ * Accepts the server root or a one-segment conversation route.
  */
 const DEEP_LINK_PATH_RE = /^\/$|^\/c\/[^/]+\/?$/;
 
